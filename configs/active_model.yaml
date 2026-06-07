@@ -1,0 +1,7 @@
+model_name: isolation_forest
+active_model_version: null
+artifact_path: null
+feature_schema_version: feature_schema_v001
+status: not_deployed
+last_updated_at: null
+notes: "No model is active yet. This pointer will be updated after the first approved training run."

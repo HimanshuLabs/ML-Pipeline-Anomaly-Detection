@@ -1,0 +1,55 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment and secrets
+.env
+*.env
+!.env.example
+
+# Local data and generated artifacts
+data/features/training/*
+data/features/batch_scoring/*
+data/features/online_samples/*
+data/validation/*
+artifacts/models/*
+mlruns/
+logs/alerts/*
+logs/predictions/*
+
+# Keep directory structure
+!data/features/training/.gitkeep
+!data/features/batch_scoring/.gitkeep
+!data/features/online_samples/.gitkeep
+!data/validation/.gitkeep
+!artifacts/models/.gitkeep
+!logs/alerts/.gitkeep
+!logs/predictions/.gitkeep
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Docker/local runtime
+*.pid
+*.log
+docker/.env
+
+# Build outputs
+dist/
+build/
+*.egg-info/
