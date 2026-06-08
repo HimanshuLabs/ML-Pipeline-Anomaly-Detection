@@ -1,7 +1,7 @@
 # Core data processing
 numpy>=1.26,<3.0
 pandas>=2.2,<3.0
-pyarrow>=16.0,<22.0
+pyarrow==24.0.0
 
 # ML and model artifacts
 scikit-learn>=1.5,<2.0
