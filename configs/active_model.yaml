@@ -1,11 +1,26 @@
 model_name: isolation_forest
-active_model_version: v001
-status: production
-artifact_path: artifacts/models/isolation_forest/model_version=v001/model.joblib
-dataset_snapshot_id: d8a245c1-4b56-51fb-b5e5-a536b06de786
-training_dataset_id: b1d150c3-424c-528b-b121-eefb2183b7b8
+active_model_version: v002
+artifact_path: artifacts/models/isolation_forest/model_version=v002/model.joblib
 feature_schema_version: feature_schema_v001
-updated_at: '2026-06-10T04:03:12.056719+00:00'
-notes: Promoted local v001 as the first active anomaly detection model.
+status: production
+last_updated_at: '2026-06-10T07:01:28.975154+00:00'
+notes: v002 is the first production model trained from real Project 1 and Project
+  2/3 local source extracts. v001 remains the earlier demo-trained baseline.
+dataset_snapshot_id: real_source_20260610T060738Z
+training_dataset_id: null
+updated_at: '2026-06-10T07:01:28.971798+00:00'
+baseline_anomaly_rate: 0.05002985074626866
+feature_count: 51
+source_projects:
+- project_1
+- project_2_3
+source_tables:
+- public.user_features
+- marts.mart_customer_360
+- marts.mart_campaign_performance
+- marts.mart_marketing_funnel
+- marts.mart_product_sales
+- warehouse.fact_web_events
+snapshot_type: real_source_extract
 latency_budget:
   online_prediction_p95_ms: 200

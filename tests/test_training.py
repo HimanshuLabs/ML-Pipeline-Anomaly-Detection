@@ -166,3 +166,61 @@ def test_training_fails_for_missing_snapshot_file(tmp_path: Path) -> None:
             features_path=missing_features_path,
             artifact_root_override=tmp_path / "artifacts",
         )
+
+
+def test_build_training_feature_matrix_uses_real_source_metadata_columns() -> None:
+    from anomaly_detection.training import build_training_feature_matrix
+
+    frame = pd.DataFrame(
+        {
+            "entity_id": ["user_1", "user_2"],
+            "source_project": ["project_1", "project_2_3"],
+            "total_events": [10, 20],
+            "avg_api_latency_ms": [120.0, 180.0],
+            "avg_fraud_score": [0.02, 0.08],
+        }
+    )
+
+    matrix = build_training_feature_matrix(
+        frame,
+        snapshot_metadata={
+            "snapshot_type": "real_source_extract",
+            "feature_columns": [
+                "total_events",
+                "avg_api_latency_ms",
+                "avg_fraud_score",
+            ],
+        },
+    )
+
+    assert list(matrix.columns) == [
+        "total_events",
+        "avg_api_latency_ms",
+        "avg_fraud_score",
+    ]
+    assert len(matrix) == 2
+
+
+def test_resolve_snapshot_paths_supports_latest_snapshot(tmp_path: Path) -> None:
+    from anomaly_detection.training import resolve_snapshot_paths
+
+    snapshot_dir = (
+        tmp_path
+        / "snapshot_date=2026-06-10"
+        / "snapshot_id=real_source_20260610T060738Z"
+    )
+    snapshot_dir.mkdir(parents=True)
+
+    features_path = snapshot_dir / "features.parquet"
+    metadata_path = snapshot_dir / "metadata.json"
+
+    pd.DataFrame({"value": [1]}).to_parquet(features_path, index=False)
+    metadata_path.write_text('{"snapshot_id": "real_source_20260610T060738Z"}', encoding="utf-8")
+
+    resolved_features_path, resolved_metadata_path = resolve_snapshot_paths(
+        "latest",
+        training_root=tmp_path,
+    )
+
+    assert resolved_features_path == features_path
+    assert resolved_metadata_path == metadata_path

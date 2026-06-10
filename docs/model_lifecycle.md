@@ -323,3 +323,55 @@ The active production model pointer must include:
 The key rule is simple: the production pointer must identify not only which artifact is active, but also which exact training snapshot produced it.
 
 This avoids a common MLOps failure mode where the serving layer knows the model file path but loses dataset lineage.
+
+<!-- BEGIN REAL_SOURCE_MODEL_LIFECYCLE -->
+## Real-source model lifecycle
+
+
+### Active production model
+
+The active production anomaly detection model is now `isolation_forest` version `v002`.
+
+| Field | Value |
+|---|---|
+| Active version | `v002` |
+| Status | `production` |
+| Artifact path | `artifacts/models/isolation_forest/model_version=v002/model.joblib` |
+| Dataset snapshot ID | `real_source_20260610T060738Z` |
+| Snapshot type | `real_source_extract` |
+| Feature schema version | `feature_schema_v001` |
+| Training rows | `16,750` |
+| Feature count | `51` |
+| Baseline anomaly rate | `0.05002985074626866` |
+| Source projects | `project_1`, `project_2_3` |
+
+### Version history
+
+| Version | Status | Source | Rows | Features | Notes |
+|---|---|---|---:|---:|---|
+| `v001` | `archived` | Project 4 generated demo snapshot | `240` | `11` | First local Isolation Forest baseline used to prove training, baseline metrics, and registry mechanics. |
+| `v002` | `production` | Real Project 1 and Project 2/3 local PostgreSQL extracts | `16,750` | `51` | First production model trained from actual upstream project outputs. |
+
+### Metric interpretation
+
+The model is an unsupervised Isolation Forest anomaly detector.
+
+Implemented claims:
+
+- baseline anomaly rate is captured
+- feature baseline mean, variance, min, max, and missing counts are captured
+- model version lineage is captured
+- source snapshot lineage is captured
+- rollback path exists through archived `v001`
+
+Non-claims:
+
+- no precision claim
+- no recall claim
+- no false positive rate claim
+- no false negative rate claim
+
+Those require delayed labels, backtesting labels, or a verified simulated-label evaluation set.
+
+<!-- END REAL_SOURCE_MODEL_LIFECYCLE -->
+
