@@ -25,10 +25,10 @@ This makes the system reproducible, auditable, and recoverable.
 | Feature validation | Implemented | Feature frames are validated before training, batch scoring, or online inference. |
 | Training snapshot generation | Implemented locally | Parquet snapshot and JSON metadata are written under data/features/training/. |
 | Database metadata write | Planned | Metadata maps to ml.feature_snapshots and ml.training_datasets, but DB writes are not wired yet. |
-| Isolation Forest training | Planned | Training will consume frozen snapshot files. |
-| Model registry | Planned | Registry will link model versions to snapshot_id and training_dataset_id. |
-| Baseline metrics | Planned | Baseline feature stats and anomaly metrics will be captured after training. |
-| Promotion and rollback | Planned | Active model pointer and rollback controls are added later. |
+| Isolation Forest training | Implemented locally | Training consumes frozen snapshot files and writes versioned local artifacts under artifacts/models/. |
+| Model registry | Implemented locally | Local JSON registry links model versions to artifact paths, snapshot_id, training_dataset_id, status, and approval state. |
+| Baseline metrics | Implemented locally | Training writes baseline_stats.json with feature baselines, anomaly rate, score summary, latency placeholders, and label-availability notes. |
+| Promotion and rollback | Partially implemented | Production promotion and active_model.yaml pointer are implemented locally. Rollback controls are planned for the rollback checkpoint. |
 
 ---
 
@@ -162,7 +162,7 @@ Local snapshot metadata maps to database records as follows.
 
 ## Model version linkage
 
-Future model registry records must include:
+Model registry records include or are designed to include:
 
 - model_version
 - model_name
@@ -185,18 +185,85 @@ If that answer is missing, the model is not production-grade.
 
 ---
 
-## Planned training flow
+## Local model registry implementation
 
-The intended training flow is:
+Checkpoint 7 implements a local JSON model registry.
+
+Registry path:
+
+    artifacts/models/_registry/model_registry.json
+
+The registry is generated runtime metadata and is intentionally ignored by Git.
+
+Each local registry entry records:
+
+| Field group | Purpose |
+|---|---|
+| Model identity | model_id, model_name, model_version, algorithm |
+| Artifact location | artifact_path, artifact_dir, metadata_path, feature_schema_path, baseline_stats_path |
+| Dataset lineage | snapshot_id, training_dataset_id |
+| Schema lineage | feature_schema_version |
+| Training metadata | training_started_at_utc, training_finished_at_utc |
+| Baseline metrics | baseline_anomaly_rate, latency placeholders, future precision/recall proxy fields |
+| Lifecycle state | candidate, staging, production, archived, rolled_back, failed_validation |
+| Approval state | approved_for_prod, promoted_at_utc, archived_at_utc |
+
+This local registry mirrors the PostgreSQL target tables without forcing a database dependency into the first model lifecycle checkpoint.
+
+---
+
+## Active model pointer
+
+The active production model is tracked in:
+
+    configs/active_model.yaml
+
+Current local pointer shape:
+
+    model_name: isolation_forest
+    active_model_version: v001
+    artifact_path: artifacts/models/isolation_forest/model_version=v001/model.joblib
+    feature_schema_version: feature_schema_v001
+    status: production
+
+The artifact path is stored repo-relative. Absolute local paths are avoided because they make the repository machine-specific.
+
+The future online inference service will read this pointer to load the active production model.
+
+---
+
+## Current local model state
+
+The first promoted model is:
+
+| Field | Value |
+|---|---|
+| model_name | isolation_forest |
+| model_version | v001 |
+| status | production |
+| approved_for_prod | true |
+| training mode | validated local demo snapshot |
+| baseline anomaly rate | 0.05 |
+| label availability | unlabeled_proxy_metrics |
+
+Important limitation:
+
+The current v001 model is trained from a validated demo snapshot generated inside Project 4. It proves the lifecycle mechanics, artifact layout, baseline metrics, registry, and promotion flow. It is not yet trained from a live extract of Project 1 and Project 2/3 sources.
+
+---
+
+## Implemented local training flow
+
+The implemented local training flow is:
 
     validated feature dataframe
         -> training snapshot generation
-        -> snapshot metadata persisted locally and later to SQL
+        -> snapshot metadata persisted locally as JSON
         -> training reads features.parquet
         -> model trains on ordered feature columns
         -> baseline metrics are calculated
         -> artifact is saved under artifacts/models/
-        -> model registry record links model_version to snapshot_id
+        -> local model registry record links model_version to snapshot_id
 
 Training should not read from a loose CSV, random dataframe, or mutable source table directly.
 

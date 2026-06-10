@@ -1,7 +1,7 @@
 model_name: isolation_forest
-active_model_version: null
-artifact_path: null
+active_model_version: v001
+artifact_path: artifacts/models/isolation_forest/model_version=v001/model.joblib
 feature_schema_version: feature_schema_v001
-status: not_deployed
-last_updated_at: null
-notes: "No model is active yet. This pointer will be updated after the first approved training run."
+status: production
+last_updated_at: '2026-06-10T04:03:12.056719+00:00'
+notes: Promoted local v001 as the first active anomaly detection model.
