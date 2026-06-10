@@ -53,3 +53,6 @@ docker/.env
 dist/
 build/
 *.egg-info/
+
+# Local-only personal interview notes
+docs/interview_narrative.md

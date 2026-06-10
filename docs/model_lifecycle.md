@@ -375,3 +375,29 @@ Those require delayed labels, backtesting labels, or a verified simulated-label 
 
 <!-- END REAL_SOURCE_MODEL_LIFECYCLE -->
 
+<!-- BASELINE_METRICS_CLOSURE_START -->
+## Baseline metrics closure for v002
+
+The active production model is `isolation_forest` version `v002`.
+
+`v002` is the first production model trained from real local source extracts from Project 1 and Project 2/3. Its training metadata records `snapshot_type = real_source_extract`, and `configs/active_model.yaml` points production traffic to `v002`.
+
+Verified baseline state:
+
+| Field | Value |
+|---|---|
+| Model version | `v002` |
+| Active status | `production` |
+| Snapshot type | `real_source_extract` |
+| Training rows | `16,750` |
+| Model feature count | `51` |
+| Baseline anomaly rate | `0.05002985074626866` |
+| Metric type | `unsupervised_training_baseline` |
+| Label availability | `unlabeled_proxy_metrics` |
+
+Every model feature in `metadata.json` has a corresponding baseline entry in `baseline_stats.json`. These feature baselines are the reference point for later current-vs-baseline monitoring and mean/variance drift checks.
+
+This project does not claim real supervised precision, recall, false positive rate, or false negative rate for `v002`, because the current training data does not contain verified ground-truth anomaly labels. Any future precision/recall/FPR/FNR metrics must be explicitly marked as proxy, simulated, backtested, or delayed-truth metrics.
+
+The current latency values in `baseline_stats.json` are placeholders from the offline training baseline and are not evidence of measured FastAPI serving latency. Online latency will be measured separately during latency-budget validation, with the target remaining p95 under 200 ms.
+<!-- BASELINE_METRICS_CLOSURE_END -->

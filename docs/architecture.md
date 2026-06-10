@@ -64,3 +64,22 @@ Future online inference can consume low-latency feature samples from Project 1 o
 
 <!-- END REAL_SOURCE_ML_BRIDGE -->
 
+<!-- BASELINE_METRICS_CLOSURE_START -->
+## Baseline metrics closure
+
+The production architecture now has a verified baseline reference for `v002`.
+
+The active model pointer in `configs/active_model.yaml` references `isolation_forest` version `v002`, trained from real local Project 1 and Project 2/3 extracts. The model artifact folder contains `metadata.json`, `feature_schema.json`, and `baseline_stats.json`.
+
+The baseline layer currently provides:
+
+- baseline anomaly rate
+- per-feature baseline statistics for all 51 model features
+- prediction summary from offline training
+- baseline metric type marked as `unsupervised_training_baseline`
+- label availability marked as `unlabeled_proxy_metrics`
+
+This keeps the monitoring design honest: drift checks and current anomaly rates will be compared against real training baselines, but the system does not claim supervised production accuracy. Precision, recall, false positive rate, and false negative rate are intentionally not claimed until verified labels, backtesting labels, or delayed-truth labels exist.
+
+The latency values stored with the offline baseline are placeholders. Real online serving latency belongs to the later API latency-budget validation path.
+<!-- BASELINE_METRICS_CLOSURE_END -->
