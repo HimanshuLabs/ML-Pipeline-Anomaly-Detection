@@ -537,3 +537,247 @@ def list_model_versions(
         entries = [entry for entry in entries if entry.status == status]
 
     return entries
+
+
+# ---------------------------------------------------------------------------
+# Production lifecycle API
+# ---------------------------------------------------------------------------
+# This compatibility layer adds explicit model lifecycle operations while
+# preserving the existing registry implementation above.
+
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
+from enum import StrEnum
+from pathlib import Path
+from typing import Any
+from uuid import uuid4
+
+import yaml
+
+
+class ModelStatus(StrEnum):
+    """Supported lifecycle statuses for registered model versions."""
+
+    CANDIDATE = "candidate"
+    STAGING = "staging"
+    PRODUCTION = "production"
+    ARCHIVED = "archived"
+    ROLLED_BACK = "rolled_back"
+    FAILED_VALIDATION = "failed_validation"
+
+
+@dataclass(frozen=True)
+class ModelRegistryRecord:
+    """Metadata required to treat a trained model as a governed production asset."""
+
+    model_name: str
+    model_version: str
+    status: str
+    artifact_path: str
+    dataset_snapshot_id: str
+    feature_schema_version: str
+    training_timestamp: str
+    metrics: dict[str, Any]
+    approved_for_prod: bool = False
+    registry_id: str = ""
+    created_at: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        record = asdict(self)
+        if not record["registry_id"]:
+            record["registry_id"] = str(uuid4())
+        if not record["created_at"]:
+            record["created_at"] = datetime.now(UTC).isoformat()
+        return record
+
+
+def _registry_path() -> Path:
+    return Path("artifacts/models/_registry/model_registry.json")
+
+
+def _active_model_config_path() -> Path:
+    return Path("configs/active_model.yaml")
+
+
+def _load_registry_document(registry_path: Path | None = None) -> dict[str, Any]:
+    path = registry_path or _registry_path()
+    if not path.exists():
+        return {"models": []}
+
+    try:
+        import json
+
+        with path.open("r", encoding="utf-8") as file:
+            payload = json.load(file)
+    except Exception as exc:  # noqa: BLE001
+        raise ValueError(f"Failed to read model registry JSON at {path}: {exc}") from exc
+
+    if isinstance(payload, list):
+        return {"models": payload}
+
+    if isinstance(payload, dict):
+        if "models" not in payload:
+            payload["models"] = []
+        if not isinstance(payload["models"], list):
+            raise ValueError("Model registry field 'models' must be a list.")
+        return payload
+
+    raise ValueError("Model registry must be a JSON object or list.")
+
+
+def _write_registry_document(payload: dict[str, Any], registry_path: Path | None = None) -> None:
+    import json
+
+    path = registry_path or _registry_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    with path.open("w", encoding="utf-8") as file:
+        json.dump(payload, file, indent=2, sort_keys=True)
+
+
+def _find_model_record(
+    payload: dict[str, Any],
+    *,
+    model_name: str,
+    model_version: str,
+) -> dict[str, Any]:
+    for record in payload.get("models", []):
+        if (
+            record.get("model_name") == model_name
+            and record.get("model_version") == model_version
+        ):
+            return record
+
+    raise ValueError(f"Model version not found: {model_name}/{model_version}")
+
+
+def register_model(
+    *,
+    model_name: str,
+    model_version: str,
+    artifact_path: str,
+    dataset_snapshot_id: str,
+    feature_schema_version: str,
+    training_timestamp: str,
+    metrics: dict[str, Any] | None = None,
+    status: ModelStatus | str = ModelStatus.CANDIDATE,
+    approved_for_prod: bool = False,
+    registry_path: Path | None = None,
+) -> ModelRegistryRecord:
+    """Register a trained model version as a lifecycle-controlled asset."""
+
+    normalized_status = ModelStatus(status).value
+    payload = _load_registry_document(registry_path)
+
+    duplicate_exists = any(
+        record.get("model_name") == model_name
+        and record.get("model_version") == model_version
+        for record in payload.get("models", [])
+    )
+    if duplicate_exists:
+        raise ValueError(f"Model version already registered: {model_name}/{model_version}")
+
+    artifact = Path(artifact_path)
+    if not artifact.exists():
+        raise FileNotFoundError(f"Model artifact does not exist: {artifact_path}")
+
+    record = ModelRegistryRecord(
+        model_name=model_name,
+        model_version=model_version,
+        status=normalized_status,
+        artifact_path=artifact_path,
+        dataset_snapshot_id=dataset_snapshot_id,
+        feature_schema_version=feature_schema_version,
+        training_timestamp=training_timestamp,
+        metrics=metrics or {},
+        approved_for_prod=approved_for_prod,
+    )
+
+    payload.setdefault("models", []).append(record.to_dict())
+    _write_registry_document(payload, registry_path)
+
+    return record
+
+
+def promote_model(
+    *,
+    model_name: str,
+    model_version: str,
+    target_status: ModelStatus | str = ModelStatus.PRODUCTION,
+    registry_path: Path | None = None,
+    active_model_config_path: Path | None = None,
+) -> dict[str, Any]:
+    """Promote a model version and update the active model pointer for production."""
+
+    normalized_status = ModelStatus(target_status).value
+    payload = _load_registry_document(registry_path)
+    target_record = _find_model_record(
+        payload,
+        model_name=model_name,
+        model_version=model_version,
+    )
+
+    if normalized_status == ModelStatus.PRODUCTION.value:
+        for record in payload.get("models", []):
+            same_model = record.get("model_name") == model_name
+            currently_production = record.get("status") == ModelStatus.PRODUCTION.value
+            same_version = record.get("model_version") == model_version
+
+            if same_model and currently_production and not same_version:
+                record["status"] = ModelStatus.ARCHIVED.value
+                record["approved_for_prod"] = False
+
+        target_record["approved_for_prod"] = True
+
+    target_record["status"] = normalized_status
+    target_record["promoted_at"] = datetime.now(UTC).isoformat()
+
+    _write_registry_document(payload, registry_path)
+
+    if normalized_status == ModelStatus.PRODUCTION.value:
+        config_path = active_model_config_path or _active_model_config_path()
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+
+        active_config = {
+            "model_name": target_record["model_name"],
+            "active_model_version": target_record["model_version"],
+            "status": target_record["status"],
+            "artifact_path": target_record["artifact_path"],
+            "dataset_snapshot_id": target_record["dataset_snapshot_id"],
+            "feature_schema_version": target_record["feature_schema_version"],
+            "updated_at": target_record["promoted_at"],
+        }
+
+        with config_path.open("w", encoding="utf-8") as file:
+            yaml.safe_dump(active_config, file, sort_keys=False)
+
+    return target_record
+
+
+def get_active_model(
+    active_model_config_path: Path | None = None,
+) -> dict[str, Any]:
+    """Load the active production model pointer from configs/active_model.yaml."""
+
+    config_path = active_model_config_path or _active_model_config_path()
+    if not config_path.exists():
+        raise FileNotFoundError(f"Active model config does not exist: {config_path}")
+
+    with config_path.open("r", encoding="utf-8") as file:
+        payload = yaml.safe_load(file) or {}
+
+    required_fields = {
+        "model_name",
+        "active_model_version",
+        "status",
+        "artifact_path",
+        "dataset_snapshot_id",
+        "feature_schema_version",
+    }
+    missing_fields = sorted(required_fields - set(payload))
+    if missing_fields:
+        raise ValueError(
+            f"Active model config is missing required fields: {missing_fields}"
+        )
+
+    return payload

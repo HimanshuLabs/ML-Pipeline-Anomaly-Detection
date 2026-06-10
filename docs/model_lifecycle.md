@@ -283,3 +283,43 @@ Training should not read from a loose CSV, random dataframe, or mutable source t
 
 ---
 
+
+---
+
+## Checkpoint 7 lifecycle API update
+
+The local registry now exposes an explicit lifecycle API:
+
+- `ModelStatus`
+- `ModelRegistryRecord`
+- `register_model()`
+- `promote_model()`
+- `get_active_model()`
+
+This keeps model lifecycle behavior testable from Python instead of relying only on manually edited JSON or YAML files.
+
+Supported model statuses:
+
+| Status | Meaning |
+|---|---|
+| candidate | Newly trained model awaiting review. |
+| staging | Model approved for pre-production validation. |
+| production | Active model serving batch or online inference. |
+| archived | Previous production model no longer active. |
+| rolled_back | Model version removed from active service due to rollback. |
+| failed_validation | Model rejected because validation, drift, metric, or artifact checks failed. |
+
+The active production model pointer must include:
+
+- `model_name`
+- `active_model_version`
+- `status`
+- `artifact_path`
+- `dataset_snapshot_id`
+- `training_dataset_id`
+- `feature_schema_version`
+- `updated_at`
+
+The key rule is simple: the production pointer must identify not only which artifact is active, but also which exact training snapshot produced it.
+
+This avoids a common MLOps failure mode where the serving layer knows the model file path but loses dataset lineage.
