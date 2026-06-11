@@ -28,7 +28,7 @@ This keeps Project 4 aligned with the wider platform:
 | Local JSONL persistence | Implemented | Fallback path is `logs/predictions/batch_predictions.jsonl`. |
 | PostgreSQL prediction schema | Implemented | `sql/create_prediction_tables.sql` defines `ml.batch_predictions` and `ml.online_predictions`. |
 | Direct PostgreSQL insert from Python | Planned | Schema exists, but this checkpoint uses JSONL fallback first for deterministic local validation. |
-| Online FastAPI inference | Planned | This belongs to the next checkpoint. |
+| Online FastAPI inference | Implemented | FastAPI service loads active `v002` model in memory and supports health, active model, single prediction, batch prediction, metrics, and rollback stub endpoints. |
 | Prometheus metrics | Planned | Added after online/batch prediction paths stabilize. |
 | Drift checks | Planned | Drift comparison comes after prediction evidence exists. |
 | Grafana dashboard | Planned | Dashboard panels will use prediction, drift, latency, and model-version metrics later. |
@@ -306,3 +306,101 @@ rollback integration with inference health
 ```
 
 Checkpoint 9 is complete only when the batch scorer, unit tests, and this document validate together.
+
+## Online FastAPI inference
+
+### Implemented status
+
+Online inference is implemented as a local FastAPI service that loads the active production model from `configs/active_model.yaml`.
+
+The active model is currently:
+
+| Field | Value |
+|---|---|
+| Model name | `isolation_forest` |
+| Active version | `v002` |
+| Artifact path | `artifacts/models/isolation_forest/model_version=v002/model.joblib` |
+| Feature schema version | `feature_schema_v001` |
+| Feature count | `51` |
+| Snapshot type | `real_source_extract` |
+| Online p95 latency budget | `200 ms` |
+
+The service loads the model once into memory through `OnlineInferenceService`. It does not read the model artifact from disk for every prediction request.
+
+### Implemented endpoints
+
+| Endpoint | Status | Purpose |
+|---|---|---|
+| `GET /health` | Implemented | Returns API health and active model load status. |
+| `GET /model/active` | Implemented | Returns active model metadata, feature count, baseline anomaly rate, threshold, and load timestamp. |
+| `POST /predict` | Implemented | Scores one model-ready feature payload with the active in-memory model. |
+| `POST /predict/batch` | Implemented | Scores multiple model-ready payloads through the same in-memory service. |
+| `GET /metrics` | Implemented | Exposes Prometheus-format counters and latency histogram. |
+| `POST /admin/rollback` | Stubbed | Returns planned rollback status without mutating the active model pointer. Real rollback is implemented later. |
+
+### Prediction response contract
+
+| Field | Meaning |
+|---|---|
+| `prediction_id` | Unique prediction event ID. |
+| `model_name` | Active model family. |
+| `model_version` | Active model version used for scoring. |
+| `dataset_snapshot_id` | Training snapshot lineage for the active model. |
+| `feature_schema_version` | Feature contract version used by the model. |
+| `entity_type` | Scored entity class, currently usually `user`. |
+| `entity_id` | Scored entity identifier. |
+| `prediction_timestamp` | UTC timestamp for the score event. |
+| `anomaly_score` | Isolation Forest decision score. |
+| `is_anomaly` | Boolean anomaly decision. |
+| `threshold_used` | Threshold used for classification. |
+| `drift_status` | Current drift evaluation state. Currently `not_evaluated` in the online path. |
+| `feature_payload_hash` | Stable SHA-256 hash of the feature payload. |
+| `latency_ms` | Measured scoring latency inside the inference service. |
+
+### Threshold behavior
+
+The `v002` baseline artifact does not currently include an explicit threshold field.
+
+For online scoring, the service uses `0.0` as the fallback threshold. This matches the standard Isolation Forest decision boundary where negative `decision_function` values are treated as more anomalous.
+
+This is intentionally documented instead of hidden. Later threshold tuning can replace this fallback with an explicit configured threshold after enough production-like score distributions are observed.
+
+### Prometheus metrics exposed
+
+| Metric | Purpose |
+|---|---|
+| `project4_prediction_requests_total` | Counts successful and failed prediction requests by endpoint and model version. |
+| `project4_prediction_errors_total` | Counts prediction errors by endpoint and model version. |
+| `project4_anomalies_detected_total` | Counts online anomaly decisions by endpoint and model version. |
+| `project4_prediction_latency_seconds` | Tracks request latency by endpoint and model version. |
+
+### Current limitations
+
+| Area | Current state |
+|---|---|
+| Drift status | Returned as `not_evaluated`; full online drift integration is planned for the drift checkpoint. |
+| Prediction persistence | API response includes prediction evidence, but durable online prediction logging is planned for the prediction logging checkpoint. |
+| Rollback | `/admin/rollback` is intentionally a non-mutating stub. Real rollback controls are planned for the rollback checkpoint. |
+| Threshold tuning | Uses fallback `0.0` because `v002` has no explicit threshold artifact yet. |
+| Authentication | Not implemented locally. This is acceptable for the local portfolio build, but would be required before real deployment. |
+
+### Validation evidence
+
+Local validation currently covers:
+
+    PYTHONPATH=src pytest tests/test_api.py tests/test_batch_inference.py -q
+
+Expected result:
+
+    15 passed
+
+Manual API validation should include:
+
+    uvicorn api.main:app --host 0.0.0.0 --port 8004
+    curl http://localhost:8004/health
+    curl http://localhost:8004/model/active
+    curl http://localhost:8004/metrics
+
+Online inference is considered partially complete when health and active model endpoints work.
+
+It is considered complete for this checkpoint when `/predict` and `/predict/batch` score against the active in-memory `v002` model.
