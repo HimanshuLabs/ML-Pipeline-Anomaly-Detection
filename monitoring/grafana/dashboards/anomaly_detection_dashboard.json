@@ -95,7 +95,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum(increase(prediction_requests_total[5m]))",
+          "expr": "round(sum(increase(prediction_requests_total[5m])))",
           "legendFormat": "requests",
           "refId": "A"
         }
@@ -160,7 +160,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum(increase(anomalies_detected_total[5m]))",
+          "expr": "round(sum(increase(anomalies_detected_total[5m])))",
           "legendFormat": "anomalies",
           "refId": "A"
         }
@@ -663,7 +663,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum(increase(drift_detected_total[15m]))",
+          "expr": "round(sum(increase(drift_detected_total[15m])))",
           "legendFormat": "drift_events",
           "refId": "A"
         }
@@ -728,7 +728,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum(increase(prediction_errors_total[15m]))",
+          "expr": "round(sum(increase(prediction_errors_total[15m])))",
           "legendFormat": "prediction_errors",
           "refId": "A"
         }
@@ -793,7 +793,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum(increase(drift_detected_total[15m]))",
+          "expr": "round(sum(increase(drift_detected_total[15m])))",
           "legendFormat": "alert_proxy",
           "refId": "A"
         }
@@ -858,7 +858,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum(increase(model_rollback_total[24h]))",
+          "expr": "round(sum(increase(model_rollback_total[24h])))",
           "legendFormat": "rollbacks",
           "refId": "A"
         }

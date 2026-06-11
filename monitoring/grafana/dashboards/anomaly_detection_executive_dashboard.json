@@ -20,7 +20,7 @@
       },
       "options": {
         "mode": "markdown",
-        "content": "## ML Anomaly Detection Platform\\nProduction-style anomaly monitoring over the active Isolation Forest model. This dashboard summarizes model health, traffic, anomaly behavior, latency, drift, prediction reliability, and rollback evidence."
+        "content": "## ML Anomaly Detection Platform\nProduction-style anomaly monitoring over the active Isolation Forest model. This dashboard summarizes model health, traffic, anomaly behavior, latency, drift, prediction reliability, and rollback evidence."
       }
     },
     {
@@ -58,14 +58,6 @@
               {
                 "color": "green",
                 "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 1
-              },
-              {
-                "color": "red",
-                "value": 5
               }
             ]
           },
@@ -109,7 +101,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum(increase(prediction_requests_total[15m]))",
+          "expr": "round(sum(increase(prediction_requests_total[15m])))",
           "legendFormat": "requests",
           "refId": "A"
         }
@@ -126,11 +118,11 @@
               },
               {
                 "color": "yellow",
-                "value": 1
+                "value": 500
               },
               {
                 "color": "red",
-                "value": 5
+                "value": 2000
               }
             ]
           },
@@ -239,7 +231,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum(increase(prediction_errors_total[15m]))",
+          "expr": "round(sum(increase(prediction_errors_total[15m])))",
           "legendFormat": "errors",
           "refId": "A"
         }
@@ -443,11 +435,11 @@
               },
               {
                 "color": "yellow",
-                "value": 1
+                "value": 150
               },
               {
                 "color": "red",
-                "value": 5
+                "value": 200
               }
             ]
           },
@@ -491,7 +483,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum(increase(drift_detected_total[15m]))",
+          "expr": "round(sum(increase(drift_detected_total[15m])))",
           "legendFormat": "drift_events",
           "refId": "A"
         }
@@ -556,7 +548,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum(increase(model_rollback_total[24h]))",
+          "expr": "round(sum(increase(model_rollback_total[24h])))",
           "legendFormat": "rollbacks",
           "refId": "A"
         }
@@ -621,7 +613,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum(increase(anomalies_detected_total[15m]))",
+          "expr": "round(sum(increase(anomalies_detected_total[15m])))",
           "legendFormat": "anomalies",
           "refId": "A"
         }
@@ -638,11 +630,11 @@
               },
               {
                 "color": "yellow",
-                "value": 1
+                "value": 500
               },
               {
                 "color": "red",
-                "value": 5
+                "value": 2000
               }
             ]
           },
@@ -799,7 +791,7 @@
       },
       "options": {
         "mode": "markdown",
-        "content": "### How to read this dashboard\\n- Healthy: active model is visible, request count moves, p95 latency stays below 200 ms, prediction errors remain near zero, and drift events stay low.\\n- Investigate: anomaly rate spikes, p95 latency crosses 200 ms, repeated drift appears, or rollback count increases unexpectedly.\\n- Current limitation: explicit alert-event metrics and rollback execution arrive in later checkpoints."
+        "content": "### How to read this dashboard\n- Healthy: active model is visible, request count moves, p95 latency stays below 200 ms, prediction errors remain near zero, and drift events stay low.\n- Investigate: anomaly rate spikes, p95 latency crosses 200 ms, repeated drift appears, or rollback count increases unexpectedly.\n- Current limitation: explicit alert-event metrics and rollback execution arrive in later checkpoints."
       }
     }
   ],
