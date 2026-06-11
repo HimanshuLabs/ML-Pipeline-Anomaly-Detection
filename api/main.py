@@ -8,8 +8,16 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Response
-from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
+from anomaly_detection.metrics import (
+    observe_prediction_latency_ms,
+    prometheus_content_type,
+    record_anomaly_detected,
+    record_prediction_error,
+    record_prediction_request,
+    render_prometheus_metrics,
+    set_active_model_version,
+)
 from anomaly_detection.prediction_logging import write_online_predictions_jsonl
 
 from anomaly_detection.online_inference import (
@@ -34,29 +42,6 @@ logger = logging.getLogger(__name__)
 
 SERVICE_NAME = "project4-online-anomaly-inference"
 
-PREDICTION_REQUESTS_TOTAL = Counter(
-    "project4_prediction_requests_total",
-    "Total number of online anomaly prediction requests.",
-    ["endpoint", "model_version", "status"],
-)
-
-PREDICTION_ERRORS_TOTAL = Counter(
-    "project4_prediction_errors_total",
-    "Total number of failed online anomaly prediction requests.",
-    ["endpoint", "model_version"],
-)
-
-ANOMALIES_DETECTED_TOTAL = Counter(
-    "project4_anomalies_detected_total",
-    "Total number of anomalies detected by online inference.",
-    ["endpoint", "model_version"],
-)
-
-PREDICTION_LATENCY_SECONDS = Histogram(
-    "project4_prediction_latency_seconds",
-    "Online anomaly prediction latency in seconds.",
-    ["endpoint", "model_version"],
-)
 
 
 class AppState:
@@ -98,6 +83,10 @@ async def lifespan(app: FastAPI):
     try:
         state.inference_service = OnlineInferenceService()
         info = state.inference_service.active_model_info()
+        set_active_model_version(
+            model_name=info.model_name,
+            model_version=info.model_version,
+        )
         logger.info(
             "Loaded active anomaly model",
             extra={
@@ -166,21 +155,22 @@ def predict(request: PredictRequest) -> PredictionResponse:
         )
 
         if prediction.is_anomaly:
-            ANOMALIES_DETECTED_TOTAL.labels(
+            record_anomaly_detected(
                 endpoint="/predict",
                 model_version=prediction.model_version,
-            ).inc()
+            )
 
-        PREDICTION_REQUESTS_TOTAL.labels(
+        record_prediction_request(
             endpoint="/predict",
             model_version=prediction.model_version,
             status="success",
-        ).inc()
+        )
 
-        PREDICTION_LATENCY_SECONDS.labels(
+        observe_prediction_latency_ms(
             endpoint="/predict",
             model_version=prediction.model_version,
-        ).observe(time.perf_counter() - started_at)
+            latency_ms=(time.perf_counter() - started_at) * 1000,
+        )
 
         prediction_payload = prediction_to_dict(prediction)
         persist_online_prediction_evidence([prediction_payload])
@@ -188,15 +178,15 @@ def predict(request: PredictRequest) -> PredictionResponse:
         return PredictionResponse(**prediction_payload)
 
     except OnlineInferenceError as exc:
-        PREDICTION_ERRORS_TOTAL.labels(
+        record_prediction_error(
             endpoint="/predict",
             model_version=model_version,
-        ).inc()
-        PREDICTION_REQUESTS_TOTAL.labels(
+        )
+        record_prediction_request(
             endpoint="/predict",
             model_version=model_version,
             status="error",
-        ).inc()
+        )
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
@@ -216,21 +206,22 @@ def predict_batch(request: BatchPredictRequest) -> BatchPredictionResponse:
 
         for prediction in predictions:
             if prediction.is_anomaly:
-                ANOMALIES_DETECTED_TOTAL.labels(
+                record_anomaly_detected(
                     endpoint="/predict/batch",
                     model_version=prediction.model_version,
-                ).inc()
+                )
 
-        PREDICTION_REQUESTS_TOTAL.labels(
+        record_prediction_request(
             endpoint="/predict/batch",
             model_version=model_version,
             status="success",
-        ).inc()
+        )
 
-        PREDICTION_LATENCY_SECONDS.labels(
+        observe_prediction_latency_ms(
             endpoint="/predict/batch",
             model_version=model_version,
-        ).observe(time.perf_counter() - started_at)
+            latency_ms=(time.perf_counter() - started_at) * 1000,
+        )
 
         prediction_payloads = [
             prediction_to_dict(prediction)
@@ -248,15 +239,15 @@ def predict_batch(request: BatchPredictRequest) -> BatchPredictionResponse:
         )
 
     except OnlineInferenceError as exc:
-        PREDICTION_ERRORS_TOTAL.labels(
+        record_prediction_error(
             endpoint="/predict/batch",
             model_version=model_version,
-        ).inc()
-        PREDICTION_REQUESTS_TOTAL.labels(
+        )
+        record_prediction_request(
             endpoint="/predict/batch",
             model_version=model_version,
             status="error",
-        ).inc()
+        )
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
@@ -265,8 +256,8 @@ def metrics() -> Response:
     """Expose Prometheus metrics in text format."""
 
     return Response(
-        content=generate_latest(),
-        media_type=CONTENT_TYPE_LATEST,
+        content=render_prometheus_metrics(),
+        media_type=prometheus_content_type(),
     )
 
 

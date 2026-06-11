@@ -142,8 +142,9 @@ def test_metrics_endpoint_exposes_prometheus_metrics(
 
     assert response.status_code == 200
     assert "text/plain" in response.headers["content-type"]
-    assert "project4_prediction_requests_total" in response.text
-    assert "project4_prediction_latency_seconds" in response.text
+    assert "prediction_requests_total" in response.text
+    assert "prediction_latency_ms" in response.text
+    assert "active_model_version" in response.text
 
 
 def test_rollback_endpoint_is_stubbed_and_non_mutating(client: TestClient) -> None:

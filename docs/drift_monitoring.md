@@ -280,7 +280,7 @@ Expected result:
 
 ## Fit inside Project 4
 
-This checkpoint sits after prediction logging and before Prometheus metrics.
+This checkpoint sits after prediction logging and feeds the Prometheus metrics layer.
 
 Flow:
 
@@ -294,7 +294,7 @@ Flow:
         ↓
     logs/alerts/drift_events.jsonl
         ↓
-    future Prometheus metrics
+    Prometheus metrics
         ↓
     future Grafana panels
         ↓
@@ -303,3 +303,45 @@ Flow:
     future rollback review
 
 This makes Project 4 more than a model-serving demo. It gives the platform a way to know when the data underneath the model has changed.
+
+## Prometheus metrics
+
+Project 4 exposes Prometheus metrics through the FastAPI `/metrics` endpoint.
+
+Implemented metrics:
+
+| Metric | Type | Purpose |
+|---|---|---|
+| `prediction_requests_total` | Counter | Counts online prediction requests by endpoint, model version, and status. |
+| `prediction_errors_total` | Counter | Counts failed prediction attempts by endpoint and model version. |
+| `anomalies_detected_total` | Counter | Counts anomaly predictions by endpoint and model version. |
+| `prediction_latency_ms` | Histogram | Tracks online prediction latency in milliseconds against the service latency budget. |
+| `drift_detected_total` | Counter | Counts warning and critical drift events by model version, feature, and drift status. |
+| `feature_mean_delta` | Gauge | Publishes the latest absolute mean delta for each evaluated feature. |
+| `feature_variance_delta` | Gauge | Publishes the latest absolute variance delta for each evaluated feature. |
+| `active_model_version` | Gauge | Publishes the currently loaded model version as a labeled gauge value of `1`. |
+| `model_rollback_total` | Counter | Counts rollback attempts by source version, target version, and status. |
+
+Current implementation status:
+
+- `/metrics` is implemented in `api/main.py`.
+- Metric definitions live in `src/anomaly_detection/metrics.py`.
+- Online inference records request, error, anomaly, latency, and active model metrics.
+- Drift metrics can be published from drift evaluation results through `publish_drift_evaluation_metrics`.
+- Rollback metrics are exposed as a contract now and will be wired to the real rollback mechanism in the rollback checkpoint.
+- `monitoring/prometheus.yml` provides a local scrape configuration for the FastAPI service on port `8004`.
+
+Operational interpretation:
+
+- `prediction_requests_total` and `prediction_errors_total` prove API reliability.
+- `anomalies_detected_total` shows anomaly volume over time.
+- `prediction_latency_ms` proves whether online inference stays within the p95 latency budget.
+- `feature_mean_delta` and `feature_variance_delta` make drift visible instead of burying it in logs.
+- `active_model_version` connects runtime behavior to the model registry.
+- `model_rollback_total` will become rollback evidence once rollback controls are implemented.
+
+Limitations:
+
+- Metrics are in-memory process metrics. Restarting the API resets counters unless Prometheus has already scraped them.
+- PostgreSQL persistence for current metric snapshots is not implemented in this checkpoint.
+- Grafana visualization is planned for the dashboard checkpoint.
