@@ -484,3 +484,74 @@ Unhealthy behavior:
 - Alert proxy panels use drift metrics until explicit alert-event metrics are implemented.
 - Rollback panels are wired but only become operational evidence after rollback controls emit `model_rollback_total`.
 - This is a local monitoring implementation, not a managed cloud Grafana deployment.
+
+## Alert events
+
+Alert events are implemented as a local-first monitoring contract.
+
+Implemented:
+
+- Critical drift alerts are generated from drift evaluation results.
+- Anomaly-rate spike alerts are generated when current anomaly rate exceeds the configured baseline multiplier.
+- Latency budget alerts are generated when online p95 latency exceeds the 200 ms service budget.
+- Prediction error-rate alerts are generated when runtime error rate exceeds the configured threshold.
+- Manual alert test events are supported for smoke validation.
+- Alert records are persisted to `logs/alerts/anomaly_alerts.jsonl`.
+
+Database readiness:
+
+- `sql/create_monitoring_tables.sql` already defines `monitoring.alert_events`.
+- The JSONL alert shape is aligned with the SQL table fields.
+- Direct PostgreSQL insert wiring is planned for a later hardening pass.
+
+Alert event fields include:
+
+- `alert_event_id`
+- `drift_event_id`
+- `model_name`
+- `model_version`
+- `alert_type`
+- `severity`
+- `alert_status`
+- `alert_source`
+- `metric_name`
+- `metric_value`
+- `threshold_value`
+- `comparison_operator`
+- `entity_type`
+- `entity_id`
+- `message`
+- `details`
+- `triggered_at`
+
+Supported alert types:
+
+- `drift_critical`
+- `anomaly_rate_spike`
+- `latency_budget_breach`
+- `prediction_error_rate_breach`
+- `manual_alert`
+
+Current operational behavior:
+
+Critical drift creates operational alert evidence. Warning drift remains visible through drift events and Prometheus metrics but does not create an alert event in this checkpoint. This is intentional: alerts should be meaningful, not noisy.
+
+Alert outputs:
+
+- `logs/alerts/anomaly_alerts.jsonl`
+- `monitoring.alert_events`
+
+The database table exists, but JSONL is the implemented persistence path in this checkpoint.
+
+Failure-mode notes:
+
+- Alert generation failure should not rewrite or invalidate the original drift result.
+- Alerts are evidence for operator review and future rollback decisions.
+- Alert existence does not automatically prove the model is wrong.
+- Critical drift proves the current scored data has moved materially away from the approved training baseline.
+- Latency and prediction-error alerts indicate service reliability risk.
+- Anomaly-rate spikes indicate scoring behavior has materially changed against the approved baseline.
+
+Rollback relationship:
+
+Alert events are the input evidence layer for the next checkpoint. Rollback should not be implemented as blind automation. It should consume alert evidence, registry state, active model state, and previous stable model metadata before changing the active production pointer.

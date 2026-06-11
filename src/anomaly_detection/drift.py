@@ -623,3 +623,46 @@ def read_drift_events_jsonl(path: Path) -> list[dict[str, Any]]:
         records.append(record)
 
     return records
+
+
+def create_alerts_for_drift_result(
+    drift_result: DriftEvaluationResult,
+) -> list[Any]:
+    """Create alert events from a drift evaluation result.
+
+    Drift evaluation remains the source of truth. This helper only translates
+    critical drift events into alert events. Warning drift is still persisted as
+    drift evidence, but it does not generate an operational alert in this
+    checkpoint.
+    """
+
+    from anomaly_detection.alerts import create_critical_drift_alerts
+
+    return create_critical_drift_alerts(drift_result)
+
+
+def append_alerts_for_drift_result_jsonl(
+    drift_result: DriftEvaluationResult,
+    output_path: Path | None = None,
+) -> Path | None:
+    """Persist alert events generated from a drift evaluation result.
+
+    Returns:
+        Path to the written alert JSONL file when alerts are generated.
+        None when the drift result does not produce alert events.
+    """
+
+    from anomaly_detection.alerts import (
+        DEFAULT_ALERT_EVENTS_PATH,
+        append_alert_events_jsonl,
+    )
+
+    alert_events = create_alerts_for_drift_result(drift_result)
+
+    if not alert_events:
+        return None
+
+    return append_alert_events_jsonl(
+        alert_events,
+        output_path or DEFAULT_ALERT_EVENTS_PATH,
+    )
