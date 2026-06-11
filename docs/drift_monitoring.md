@@ -345,3 +345,99 @@ Limitations:
 - Metrics are in-memory process metrics. Restarting the API resets counters unless Prometheus has already scraped them.
 - PostgreSQL persistence for current metric snapshots is not implemented in this checkpoint.
 - Grafana visualization is planned for the dashboard checkpoint.
+
+## Grafana dashboard
+
+Project 4 includes a Grafana dashboard definition at:
+
+~~~text
+monitoring/grafana/dashboards/anomaly_detection_dashboard.json
+~~~
+
+The dashboard is designed for local Grafana on:
+
+~~~text
+http://localhost:3004
+~~~
+
+It uses Prometheus as the datasource and expects Prometheus to scrape the Project 4 FastAPI metrics endpoint:
+
+~~~text
+http://localhost:8004/metrics
+~~~
+
+### Dashboard status
+
+Implemented:
+
+- Dashboard JSON exists and validates with `python -m json.tool`.
+- Dashboard panels use the Prometheus metrics exposed by the FastAPI service.
+- Panels are grouped around model health, traffic, anomaly behavior, latency, drift, alert proxy, and rollback evidence.
+- The dashboard is local-first and does not claim cloud-managed Grafana deployment.
+
+Planned in later checkpoints:
+
+- Explicit alert-event metrics are handled in the alert events checkpoint.
+- Rollback controls are handled in the rollback checkpoint.
+- Until those checkpoints are complete, the dashboard includes alert and rollback panels that are wired to available metrics but may show zero or proxy values.
+
+### Dashboard panels
+
+| Panel | Metric/query family | What it proves |
+|---|---|---|
+| Active model version | `active_model_version` | Shows which model version is currently loaded by the online inference service. |
+| Prediction requests — last 5m | `prediction_requests_total` | Shows recent online scoring volume. |
+| Anomalies detected — last 5m | `anomalies_detected_total` | Shows recent anomaly volume. |
+| Anomaly rate — last 5m | `anomalies_detected_total / prediction_requests_total` | Shows whether live anomaly behavior is stable or spiking. |
+| Prediction request rate | `rate(prediction_requests_total[5m])` | Shows request throughput by endpoint and status. |
+| Anomaly rate over time | `rate(anomalies_detected_total) / rate(prediction_requests_total)` | Shows anomaly-rate trend over time. |
+| Prediction latency p50 | `histogram_quantile(0.50, prediction_latency_ms_bucket)` | Tracks median online inference latency. |
+| Prediction latency p95 | `histogram_quantile(0.95, prediction_latency_ms_bucket)` | Tracks the service latency budget. The Project 4 target is p95 below 200 ms. |
+| Feature mean delta | `feature_mean_delta` | Shows latest mean drift magnitude by feature. |
+| Feature variance delta | `feature_variance_delta` | Shows latest variance drift magnitude by feature. |
+| Drift events — last 15m | `drift_detected_total` | Shows recent drift detections. |
+| Prediction errors — last 15m | `prediction_errors_total` | Shows online inference reliability issues. |
+| Alert proxy — drift events last 15m | `drift_detected_total` | Temporary alert proxy until explicit alert event metrics are implemented. |
+| Rollback count — last 24h | `model_rollback_total` | Shows rollback evidence once rollback controls are implemented. |
+| Drift events by feature | `rate(drift_detected_total[5m]) by feature_name` | Shows which features are repeatedly drifting. |
+| Rollback attempts by status | `rate(model_rollback_total[5m]) by status` | Shows rollback attempt outcomes once rollback execution exists. |
+
+### Import flow
+
+1. Confirm the API is running on port `8004`.
+2. Confirm Prometheus is running and scraping `localhost:8004`.
+3. Open Grafana on port `3004`.
+4. Add or confirm a Prometheus datasource.
+5. Import `monitoring/grafana/dashboards/anomaly_detection_dashboard.json`.
+6. Select the Prometheus datasource when Grafana asks for `${DS_PROMETHEUS}`.
+7. Generate a few `/predict` requests and refresh the dashboard.
+
+### Operational interpretation
+
+Healthy dashboard behavior:
+
+- `active_model_version` shows the expected production model, currently `v002`.
+- Request count increases when `/predict` or `/predict/batch` is called.
+- Anomaly count increases only when the model returns anomaly predictions.
+- p95 latency stays below the configured online inference budget.
+- Feature mean and variance deltas stay within expected drift thresholds.
+- Prediction errors remain near zero.
+- Rollback count stays zero unless a rollback is intentionally triggered.
+
+Unhealthy dashboard behavior:
+
+- Active model version is missing or does not match the active model config.
+- Request count is flat while the API is receiving traffic.
+- Prediction errors increase.
+- p95 latency crosses 200 ms.
+- Drift events rise repeatedly for the same features.
+- Anomaly rate materially exceeds the approved baseline anomaly rate.
+- Rollback count increases unexpectedly.
+
+### Current limitations
+
+- Prometheus metrics are process-local. API restarts reset counters unless Prometheus has already scraped them.
+- The dashboard reads metrics from Prometheus, not directly from PostgreSQL.
+- Alert proxy panels use drift metrics until explicit alert-event metrics are implemented.
+- Rollback panels are wired but only become operational evidence after rollback controls emit `model_rollback_total`.
+- This is a local monitoring implementation, not a managed cloud Grafana deployment.
