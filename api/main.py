@@ -10,6 +10,8 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Response
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
+from anomaly_detection.prediction_logging import write_online_predictions_jsonl
+
 from anomaly_detection.online_inference import (
     OnlineInferenceError,
     OnlineInferenceService,
@@ -64,6 +66,17 @@ class AppState:
 
 
 state = AppState()
+
+
+def persist_online_prediction_evidence(
+    prediction_records: list[dict[str, Any]],
+) -> None:
+    """Persist online prediction evidence without breaking the API response path."""
+
+    try:
+        write_online_predictions_jsonl(prediction_records)
+    except Exception:
+        logger.exception("Failed to persist online prediction evidence")
 
 
 def get_inference_service() -> OnlineInferenceService:
@@ -169,7 +182,10 @@ def predict(request: PredictRequest) -> PredictionResponse:
             model_version=prediction.model_version,
         ).observe(time.perf_counter() - started_at)
 
-        return PredictionResponse(**prediction_to_dict(prediction))
+        prediction_payload = prediction_to_dict(prediction)
+        persist_online_prediction_evidence([prediction_payload])
+
+        return PredictionResponse(**prediction_payload)
 
     except OnlineInferenceError as exc:
         PREDICTION_ERRORS_TOTAL.labels(
@@ -216,10 +232,16 @@ def predict_batch(request: BatchPredictRequest) -> BatchPredictionResponse:
             model_version=model_version,
         ).observe(time.perf_counter() - started_at)
 
+        prediction_payloads = [
+            prediction_to_dict(prediction)
+            for prediction in predictions
+        ]
+        persist_online_prediction_evidence(prediction_payloads)
+
         return BatchPredictionResponse(
             predictions=[
-                PredictionResponse(**prediction_to_dict(prediction))
-                for prediction in predictions
+                PredictionResponse(**prediction_payload)
+                for prediction_payload in prediction_payloads
             ],
             prediction_count=len(predictions),
             model_version=model_version,

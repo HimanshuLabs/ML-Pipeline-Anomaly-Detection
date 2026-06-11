@@ -14,7 +14,7 @@ import argparse
 import hashlib
 import json
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -24,6 +24,8 @@ import joblib
 import numpy as np
 import pandas as pd
 import yaml
+
+from anomaly_detection.prediction_logging import write_batch_predictions_jsonl
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -428,24 +430,12 @@ def write_predictions_jsonl(
     predictions: list[BatchPredictionRecord],
     output_path: Path = DEFAULT_PREDICTION_LOG_PATH,
 ) -> Path:
-    """Append batch prediction records to a JSONL file."""
+    """Persist batch prediction evidence using the shared logging contract."""
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-
-    with output_path.open("a", encoding="utf-8") as file_obj:
-        for prediction in predictions:
-            file_obj.write(
-                json.dumps(
-                    asdict(prediction),
-                    sort_keys=True,
-                    ensure_ascii=False,
-                    default=str,
-                )
-                + "\n"
-            )
-
-    return output_path
-
+    return write_batch_predictions_jsonl(
+        list(predictions),
+        output_path,
+    )
 
 def load_feature_batch(input_path: Path) -> pd.DataFrame:
     """Load a batch feature file from parquet, csv, json, or jsonl."""

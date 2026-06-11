@@ -404,3 +404,44 @@ Manual API validation should include:
 Online inference is considered partially complete when health and active model endpoints work.
 
 It is considered complete for this checkpoint when `/predict` and `/predict/batch` score against the active in-memory `v002` model.
+
+## Prediction evidence logging
+
+Prediction logging is implemented as a shared local-first contract used by both inference paths.
+
+Implemented:
+
+- Batch inference appends prediction evidence to `logs/predictions/batch_predictions.jsonl`.
+- Online FastAPI inference appends prediction evidence to `logs/predictions/online_predictions.jsonl`.
+- Both paths use `src/anomaly_detection/prediction_logging.py` for JSON-safe serialization and JSONL persistence.
+- Batch inference keeps the existing `write_predictions_jsonl` wrapper, but delegates to the shared prediction logging module.
+- Online `/predict` persists one evidence record per successful request.
+- Online `/predict/batch` persists one evidence record per scored payload.
+- Prediction logging failure is logged but does not fail the API response path.
+
+Prediction evidence includes:
+
+- `prediction_id`
+- `prediction_source`
+- `model_name`
+- `model_version`
+- `entity_type`
+- `entity_id`
+- `anomaly_score`
+- `is_anomaly`
+- `threshold_used`
+- `prediction_status`
+- `feature_payload_hash`
+- latency field from the inference path
+- `logged_at`
+
+Database readiness:
+
+- `sql/create_prediction_tables.sql` already defines `ml.batch_predictions`.
+- `sql/create_prediction_tables.sql` already defines `ml.online_predictions`.
+- Direct PostgreSQL insert wiring is planned for a later hardening pass.
+- The JSONL record shape is intentionally aligned with the SQL tables so database persistence can be added without changing the inference response contract.
+
+Operational reason:
+
+Prediction evidence makes anomaly scoring auditable. A prediction can be traced back to the model version, scored entity, timestamp, anomaly score, threshold, and payload hash. This is required before drift checks, alert events, current metrics, and rollback decisions can be trusted.

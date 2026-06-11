@@ -182,3 +182,87 @@ def test_batch_predict_rejects_empty_payload_list(client: TestClient) -> None:
     )
 
     assert response.status_code == 422
+
+
+def test_predict_persists_online_prediction_evidence(
+    client: TestClient,
+    valid_feature_payload: dict[str, float | str],
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Single online prediction should append one durable evidence record."""
+
+    from api import main as api_main
+
+    output_path = tmp_path / "online_predictions.jsonl"
+
+    def _write_to_tmp(records):
+        from anomaly_detection.prediction_logging import write_online_predictions_jsonl
+
+        return write_online_predictions_jsonl(records, output_path)
+
+    monkeypatch.setattr(
+        api_main,
+        "write_online_predictions_jsonl",
+        _write_to_tmp,
+    )
+
+    response = client.post(
+        "/predict",
+        json={
+            "entity_id": "logged_user_001",
+            "entity_type": "user",
+            "feature_payload": valid_feature_payload,
+        },
+    )
+
+    assert response.status_code == 200
+
+    records = output_path.read_text(encoding="utf-8").splitlines()
+    assert len(records) == 1
+    assert '"prediction_source":"online"' in records[0]
+    assert '"entity_id":"logged_user_001"' in records[0]
+    assert '"model_version":"v002"' in records[0]
+
+
+def test_predict_batch_persists_online_prediction_evidence(
+    client: TestClient,
+    valid_feature_payload: dict[str, float | str],
+    tmp_path,
+    monkeypatch,
+) -> None:
+    """Batch online prediction should append all prediction evidence records."""
+
+    from api import main as api_main
+
+    output_path = tmp_path / "online_predictions.jsonl"
+
+    def _write_to_tmp(records):
+        from anomaly_detection.prediction_logging import write_online_predictions_jsonl
+
+        return write_online_predictions_jsonl(records, output_path)
+
+    monkeypatch.setattr(
+        api_main,
+        "write_online_predictions_jsonl",
+        _write_to_tmp,
+    )
+
+    second_payload = dict(valid_feature_payload)
+    second_payload["entity_id"] = "logged_user_002"
+
+    response = client.post(
+        "/predict/batch",
+        json={
+            "entity_type": "user",
+            "feature_payloads": [valid_feature_payload, second_payload],
+        },
+    )
+
+    assert response.status_code == 200
+
+    records = output_path.read_text(encoding="utf-8").splitlines()
+    assert len(records) == 2
+    assert all('"prediction_source":"online"' in record for record in records)
+    assert '"entity_id":"test_user_001"' in records[0]
+    assert '"entity_id":"logged_user_002"' in records[1]
