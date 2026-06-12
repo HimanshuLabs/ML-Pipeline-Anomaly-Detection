@@ -1,0 +1,103 @@
+{
+  "baseline_anomaly_rate": 0.05,
+  "feature_baselines": {
+    "avg_api_latency_ms": {
+      "max": 614.0,
+      "mean": 140.20833333333334,
+      "min": 95.0,
+      "missing_count": 0,
+      "variance": 10571.373263888889
+    },
+    "avg_cart_value_7d": {
+      "max": 768.0,
+      "mean": 173.8125,
+      "min": 120.0,
+      "missing_count": 0,
+      "variance": 17629.65234375
+    },
+    "campaign_roas": {
+      "max": 15.36,
+      "mean": 3.4754999999999994,
+      "min": 2.4,
+      "missing_count": 0,
+      "variance": 6.9408397499999985
+    },
+    "cart_abandonment_rate": {
+      "max": 0.99,
+      "mean": 0.24839583333333334,
+      "min": 0.16,
+      "missing_count": 0,
+      "variance": 0.02968336414930555
+    },
+    "conversion_rate": {
+      "max": 0.395,
+      "mean": 0.3075,
+      "min": 0.22,
+      "missing_count": 0,
+      "variance": 0.0032812500000000003
+    },
+    "customer_lifetime_value": {
+      "max": 6175.5,
+      "mean": 1600.25,
+      "min": 850.0,
+      "missing_count": 0,
+      "variance": 1173192.0625
+    },
+    "discount_sensitivity": {
+      "max": 2.2199999999999998,
+      "mean": 0.4974999999999999,
+      "min": 0.35,
+      "missing_count": 0,
+      "variance": 0.14858124999999994
+    },
+    "event_count_1h": {
+      "max": 31.0,
+      "mean": 8.5,
+      "min": 4.0,
+      "missing_count": 0,
+      "variance": 25.583333333333332
+    },
+    "fraud_score_avg": {
+      "max": 0.315,
+      "mean": 0.0875,
+      "min": 0.04,
+      "missing_count": 0,
+      "variance": 0.00255625
+    },
+    "page_load_p95_ms": {
+      "max": 1506.0,
+      "mean": 343.85,
+      "min": 240.0,
+      "missing_count": 0,
+      "variance": 69779.4275
+    },
+    "purchase_probability_delta": {
+      "max": 0.54,
+      "mean": 0.1297916666666667,
+      "min": 0.08,
+      "missing_count": 0,
+      "variance": 0.008043706597222222
+    }
+  },
+  "feature_schema_version": "feature_schema_v001",
+  "label_availability": "unlabeled_proxy_metrics",
+  "latency_summary": {
+    "latency_max_ms": 0.0,
+    "latency_p50_ms": 0.0,
+    "latency_p95_ms": 0.0
+  },
+  "metric_type": "unsupervised_training_baseline",
+  "model_name": "isolation_forest",
+  "model_version": "v001",
+  "notes": "Isolation Forest is trained without ground-truth anomaly labels in this checkpoint. Precision, recall, false positive rate, and false negative rate are not claimed here. They require delayed labels, backtesting, or simulated labels in later evaluation work.",
+  "prediction_summary": {
+    "anomaly_count": 12,
+    "anomaly_rate": 0.05,
+    "normal_count": 228,
+    "row_count": 240,
+    "score_max": 0.13908767828005014,
+    "score_mean": 0.08559635005452586,
+    "score_min": -0.12717221308053095,
+    "score_std": 0.04971632058089556
+  }
+}
