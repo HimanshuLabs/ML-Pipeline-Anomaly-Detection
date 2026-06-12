@@ -1,0 +1,204 @@
+name: ML Platform Validation
+
+on:
+  push:
+    branches:
+      - main
+      - project4-platform-foundation
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  validate:
+    name: Validate ML platform
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade "pip>=25,<26"
+          python -m pip install -r requirements.txt
+
+      - name: Run Ruff quality gate
+        run: |
+          ruff check .
+
+      - name: Run secret scan basics
+        run: |
+          python - <<'PY'
+          from __future__ import annotations
+
+          import re
+          from pathlib import Path
+
+          blocked_dirs = {
+              ".git",
+              ".venv",
+              "__pycache__",
+              ".pytest_cache",
+              ".ruff_cache",
+              "logs",
+              "mlruns",
+          }
+
+          patterns = {
+              "private_key": re.compile(r"BEGIN (RSA |OPENSSH |EC |DSA )?PRIVATE KEY"),
+              "aws_access_key": re.compile(r"AKIA[0-9A-Z]{16}"),
+              "github_token": re.compile(r"gh[pousr]_[A-Za-z0-9_]{20,}"),
+              "openai_key": re.compile(r"sk-[A-Za-z0-9]{20,}"),
+              "slack_token": re.compile(r"xox[baprs]-[A-Za-z0-9-]{20,}"),
+          }
+
+          violations: list[str] = []
+
+          for path in Path(".").rglob("*"):
+              if not path.is_file():
+                  continue
+
+              if any(part in blocked_dirs for part in path.parts):
+                  continue
+
+              if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".gif", ".joblib", ".parquet"}:
+                  continue
+
+              try:
+                  text = path.read_text(encoding="utf-8")
+              except UnicodeDecodeError:
+                  continue
+
+              for label, pattern in patterns.items():
+                  if pattern.search(text):
+                      violations.append(f"{path}: matched {label}")
+
+          if violations:
+              print("\n".join(violations))
+              raise SystemExit("Secret scan basics failed")
+
+          print("OK: no basic secret patterns found")
+          PY
+
+      - name: Run SQL smoke checks
+        run: |
+          python - <<'PY'
+          from __future__ import annotations
+
+          from pathlib import Path
+
+          required_sql_files = [
+              Path("sql/create_ml_schemas.sql"),
+              Path("sql/create_feature_tables.sql"),
+              Path("sql/create_model_registry_tables.sql"),
+              Path("sql/create_prediction_tables.sql"),
+              Path("sql/create_monitoring_tables.sql"),
+              Path("sql/validation_queries.sql"),
+          ]
+
+          for path in required_sql_files:
+              if not path.exists():
+                  raise SystemExit(f"Missing SQL file: {path}")
+
+              text = path.read_text(encoding="utf-8").strip()
+              if not text:
+                  raise SystemExit(f"Empty SQL file: {path}")
+
+              lowered = text.lower()
+              if not any(keyword in lowered for keyword in ["create schema", "create table", "select"]):
+                  raise SystemExit(f"SQL smoke check failed for {path}")
+
+              print(f"OK: {path}")
+
+          print("OK: SQL smoke checks passed")
+          PY
+
+      - name: Run training smoke tests
+        run: |
+          PYTHONPATH=src pytest tests/test_training_snapshot.py tests/test_training.py -q
+
+      - name: Run source extraction smoke tests
+        run: |
+          PYTHONPATH=src pytest tests/test_source_extract.py -q
+
+      - name: Run registry and baseline audit
+        run: |
+          PYTHONPATH=src pytest tests/test_registry.py -q
+          python - <<'PY'
+          from __future__ import annotations
+
+          import json
+          from pathlib import Path
+
+          import yaml
+
+          model_dir = Path("artifacts/models/isolation_forest/model_version=v002")
+          metadata_path = model_dir / "metadata.json"
+          baseline_path = model_dir / "baseline_stats.json"
+          schema_path = model_dir / "feature_schema.json"
+          active_path = Path("configs/active_model.yaml")
+
+          for path in [metadata_path, baseline_path, schema_path, active_path]:
+              if not path.exists():
+                  raise SystemExit(f"Missing baseline artifact: {path}")
+              print(f"OK: {path}")
+
+          metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+          baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+          schema = json.loads(schema_path.read_text(encoding="utf-8"))
+          active = yaml.safe_load(active_path.read_text(encoding="utf-8"))
+
+          feature_names = metadata["feature_names"]
+          feature_baselines = baseline["feature_baselines"]
+
+          checks = {
+              "active_model_is_v002": active["active_model_version"] == "v002",
+              "metadata_model_version_is_v002": metadata["model_version"] == "v002",
+              "baseline_model_version_is_v002": baseline["model_version"] == "v002",
+              "schema_feature_count_matches_metadata": schema["feature_count"] == len(feature_names),
+              "all_features_have_baselines": set(feature_names) == set(feature_baselines),
+              "baseline_has_anomaly_rate": "baseline_anomaly_rate" in baseline,
+              "baseline_has_prediction_summary": "prediction_summary" in baseline,
+              "baseline_has_latency_summary": "latency_summary" in baseline,
+              "label_availability_is_proxy": baseline["label_availability"] == "unlabeled_proxy_metrics",
+              "snapshot_is_real_source": (
+                  metadata["training_snapshot_metadata"]["snapshot_type"] == "real_source_extract"
+              ),
+          }
+
+          failed = [name for name, passed in checks.items() if not passed]
+          for name, passed in checks.items():
+              print(f"{'OK' if passed else 'FAIL'}: {name}")
+
+          if failed:
+              raise SystemExit(f"Baseline audit failed: {failed}")
+
+          print("OK: baseline metrics audit passed")
+          PY
+
+      - name: Run drift and rollback tests
+        run: |
+          PYTHONPATH=src pytest tests/test_drift.py tests/test_alerts.py tests/test_rollback.py -q
+
+      - name: Run FastAPI and metrics tests
+        run: |
+          PYTHONPATH=src pytest tests/test_api.py tests/test_metrics.py tests/test_prediction_logging.py -q
+
+      - name: Run full pytest suite
+        run: |
+          PYTHONPATH=src pytest -q
+
+      - name: Build API Docker image
+        run: |
+          docker build -f docker/Dockerfile.api -t project4-anomaly-api:ci .
+
+      - name: Build batch Docker image
+        run: |
+          docker build -f docker/Dockerfile.batch -t project4-anomaly-batch:ci .

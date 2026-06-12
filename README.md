@@ -77,3 +77,32 @@ Current Docker scope:
 - Planned: CI Docker build validation.
 - Optional/planned: Kubernetes manifests.
 - Not implemented: cloud deployment.
+
+## CI/CD validation
+
+GitHub Actions workflow:
+
+- `.github/workflows/ci.yml`
+- Workflow name: `ML Platform Validation`
+
+Implemented CI gates:
+
+- Ruff code quality validation.
+- Basic secret pattern scan.
+- SQL smoke checks for required schema/table/query files.
+- Training snapshot and Isolation Forest training tests.
+- Real-source extraction smoke tests.
+- Model registry tests.
+- Baseline metrics audit for active production model `v002`.
+- Drift, alert, and rollback tests.
+- FastAPI, metrics, and prediction logging tests.
+- Full pytest suite.
+- Docker API image build using `docker/Dockerfile.api`.
+- Docker batch image build using `docker/Dockerfile.batch`.
+
+Completion status:
+
+- Implemented locally: workflow file and validation commands.
+- Fully complete only after GitHub Actions passes on the remote branch or pull request.
+- Not implemented: cloud deployment.
+
