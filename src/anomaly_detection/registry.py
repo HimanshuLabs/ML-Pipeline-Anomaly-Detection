@@ -479,9 +479,10 @@ def promote_model_version(
                     **{
                         **entry.to_dict(),
                         "status": "archived",
-                        "approved_for_prod": False,
+                        "approved_for_prod": True,
                         "archived_at_utc": now,
-                        "notes": entry.notes or "Archived during production promotion.",
+                        "notes": entry.notes
+                        or "Archived during production promotion and retained as rollback-safe.",
                     }
                 )
             )
@@ -725,7 +726,7 @@ def promote_model(
 
             if same_model and currently_production and not same_version:
                 record["status"] = ModelStatus.ARCHIVED.value
-                record["approved_for_prod"] = False
+                record["approved_for_prod"] = True
 
         target_record["approved_for_prod"] = True
 

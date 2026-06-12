@@ -129,79 +129,24 @@ CREATE TABLE IF NOT EXISTS monitoring.alert_events (
 );
 
 CREATE TABLE IF NOT EXISTS audit.rollback_events (
-    rollback_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-
-    alert_event_id UUID REFERENCES monitoring.alert_events(alert_event_id) ON DELETE SET NULL,
-
-    from_model_id UUID REFERENCES ml.model_registry(model_id) ON DELETE SET NULL,
-    to_model_id UUID REFERENCES ml.model_registry(model_id) ON DELETE SET NULL,
-
+    rollback_id TEXT PRIMARY KEY,
     model_name TEXT NOT NULL,
     from_model_version TEXT NOT NULL,
     to_model_version TEXT NOT NULL,
-
     rollback_reason TEXT NOT NULL,
-    rollback_trigger TEXT NOT NULL
-        CHECK (
-            rollback_trigger IN (
-                'manual',
-                'critical_drift',
-                'latency_budget_breach',
-                'prediction_error_spike',
-                'anomaly_rate_spike',
-                'model_degradation',
-                'validation_failure'
-            )
-        ),
-
-    triggered_by TEXT NOT NULL DEFAULT CURRENT_USER,
-    triggered_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-
-    completed_at TIMESTAMPTZ,
-    rollback_status TEXT NOT NULL DEFAULT 'started'
-        CHECK (
-            rollback_status IN (
-                'started',
-                'completed',
-                'failed',
-                'cancelled'
-            )
-        ),
-
-    validation_status TEXT NOT NULL DEFAULT 'pending'
-        CHECK (
-            validation_status IN (
-                'pending',
-                'passed',
-                'failed',
-                'not_required'
-            )
-        ),
-
-    previous_active_model_config JSONB NOT NULL DEFAULT '{}'::jsonb,
-    new_active_model_config JSONB NOT NULL DEFAULT '{}'::jsonb,
-
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    notes TEXT,
-
-    CONSTRAINT rollback_events_versions_different_chk
-        CHECK (from_model_version <> to_model_version),
-
-    CONSTRAINT rollback_events_completion_time_chk
-        CHECK (
-            completed_at IS NULL
-            OR completed_at >= triggered_at
-        ),
-
-    CONSTRAINT rollback_events_from_model_version_fk
-        FOREIGN KEY (model_name, from_model_version)
-        REFERENCES ml.model_registry(model_name, model_version)
-        ON DELETE RESTRICT,
-
-    CONSTRAINT rollback_events_to_model_version_fk
-        FOREIGN KEY (model_name, to_model_version)
-        REFERENCES ml.model_registry(model_name, model_version)
-        ON DELETE RESTRICT
+    triggered_by TEXT NOT NULL,
+    triggered_at_utc TIMESTAMPTZ NOT NULL,
+    validation_status TEXT NOT NULL CHECK (
+        validation_status IN (
+            'dry_run_validated',
+            'applied',
+            'failed'
+        )
+    ),
+    dry_run BOOLEAN NOT NULL DEFAULT FALSE,
+    active_model_path TEXT NOT NULL,
+    rollback_event_path TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
 CREATE INDEX IF NOT EXISTS idx_drift_events_model_version
@@ -251,3 +196,10 @@ COMMENT ON TABLE monitoring.alert_events IS
 
 COMMENT ON TABLE audit.rollback_events IS
 'Stores rollback audit evidence when Project 4 reverts from an unhealthy model version to a previous stable model version.';
+
+
+CREATE INDEX IF NOT EXISTS idx_rollback_events_model_time
+    ON audit.rollback_events (model_name, triggered_at_utc DESC);
+
+CREATE INDEX IF NOT EXISTS idx_rollback_events_versions
+    ON audit.rollback_events (from_model_version, to_model_version);

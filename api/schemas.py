@@ -101,3 +101,39 @@ class RollbackStubResponse(BaseModel):
     action_taken: bool
     reason: str
     active_model_version: str | None
+
+
+class RollbackRequest(BaseModel):
+    """Request body for controlled model rollback."""
+
+    rollback_reason: str = Field(
+        default="manual rollback request",
+        min_length=1,
+        description="Operational reason for rollback.",
+    )
+    triggered_by: str = Field(
+        default="operator",
+        min_length=1,
+        description="Human or system actor requesting rollback.",
+    )
+    dry_run: bool = Field(
+        default=True,
+        description="Validate rollback target without mutating active model pointer.",
+    )
+
+
+class RollbackResponse(BaseModel):
+    """Response body for rollback validation or execution."""
+
+    status: str
+    action_taken: bool
+    rollback_id: str | None = None
+    model_name: str | None = None
+    from_model_version: str | None = None
+    to_model_version: str | None = None
+    rollback_reason: str
+    triggered_by: str
+    validation_status: str
+    dry_run: bool
+    active_model_version: str | None = None
+    rollback_event_path: str | None = None

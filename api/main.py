@@ -1,6 +1,13 @@
+from __future__ import annotations
+
+from anomaly_detection.rollback import RollbackError, rollback_active_model
+from anomaly_detection.registry import list_model_versions, read_active_model_pointer
+from anomaly_detection.metrics import record_model_rollback
+from api.schemas import RollbackRequest, RollbackResponse
+from fastapi import HTTPException
+from pathlib import Path
 """FastAPI application for Project 4 online anomaly inference."""
 
-from __future__ import annotations
 
 import logging
 import time
@@ -261,20 +268,50 @@ def metrics() -> Response:
     )
 
 
-@app.post("/admin/rollback", response_model=RollbackStubResponse)
-def rollback_stub() -> RollbackStubResponse:
-    """Return rollback stub status without mutating active model config."""
+@app.post("/admin/rollback", response_model=RollbackResponse)
+def rollback_model(request: RollbackRequest | None = None) -> dict[str, Any]:
+    """Validate or apply rollback to the previous stable approved model."""
 
-    active_version: str | None = None
-    if state.inference_service is not None:
-        active_version = state.inference_service.active_model_info().model_version
+    rollback_request = request or RollbackRequest()
 
-    return RollbackStubResponse(
-        status="planned",
-        action_taken=False,
-        reason=(
-            "Rollback endpoint is intentionally stubbed in Checkpoint 10. "
-            "Actual rollback controls are implemented in the rollback checkpoint."
-        ),
-        active_model_version=active_version,
-    )
+    try:
+        active_pointer_before = read_active_model_pointer()
+        registry_records = list_model_versions(
+            model_name=active_pointer_before.model_name,
+        )
+
+        rollback_event = rollback_active_model(
+            registry_records,
+            active_model_path=Path("configs/active_model.yaml"),
+            rollback_reason=rollback_request.rollback_reason,
+            triggered_by=rollback_request.triggered_by,
+            dry_run=rollback_request.dry_run,
+        )
+
+        if not rollback_request.dry_run:
+            record_model_rollback(
+                model_name=rollback_event.model_name,
+                from_model_version=rollback_event.from_model_version,
+                to_model_version=rollback_event.to_model_version,
+                triggered_by=rollback_event.triggered_by,
+            )
+
+        active_pointer_after = read_active_model_pointer()
+
+        return {
+            "status": "validated" if rollback_request.dry_run else "applied",
+            "action_taken": not rollback_request.dry_run,
+            "rollback_id": rollback_event.rollback_id,
+            "model_name": rollback_event.model_name,
+            "from_model_version": rollback_event.from_model_version,
+            "to_model_version": rollback_event.to_model_version,
+            "rollback_reason": rollback_event.rollback_reason,
+            "triggered_by": rollback_event.triggered_by,
+            "validation_status": rollback_event.validation_status,
+            "dry_run": rollback_event.dry_run,
+            "active_model_version": active_pointer_after.active_model_version,
+            "rollback_event_path": rollback_event.rollback_event_path,
+        }
+
+    except RollbackError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

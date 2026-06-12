@@ -268,17 +268,64 @@ def publish_drift_evaluation_metrics(drift_result: Any) -> None:
 
 def record_model_rollback(
     *,
-    from_model_version: str | None,
-    to_model_version: str | None,
-    status: str,
+    from_model_version: str,
+    to_model_version: str,
+    status: str = "success",
+    model_name: str = "isolation_forest",
+    triggered_by: str = "unknown",
 ) -> None:
-    """Increment rollback counter."""
+    """Record a model rollback metric.
 
-    MODEL_ROLLBACK_TOTAL.labels(
-        from_model_version=_clean_label(from_model_version),
-        to_model_version=_clean_label(to_model_version),
-        status=_clean_label(status),
-    ).inc()
+    Supports both the original metrics-test call shape:
+
+        record_model_rollback(from_model_version=..., to_model_version=..., status=...)
+
+    and the newer API call shape:
+
+        record_model_rollback(
+            model_name=...,
+            from_model_version=...,
+            to_model_version=...,
+            triggered_by=...,
+        )
+
+    Detailed rollback evidence lives in logs/alerts/rollback_events.jsonl and
+    the audit.rollback_events table contract.
+    """
+
+    label_attempts = [
+        {
+            "model_name": model_name,
+            "from_model_version": from_model_version,
+            "to_model_version": to_model_version,
+            "triggered_by": triggered_by,
+            "status": status,
+        },
+        {
+            "model_name": model_name,
+            "from_model_version": from_model_version,
+            "to_model_version": to_model_version,
+            "triggered_by": triggered_by,
+        },
+        {
+            "from_model_version": from_model_version,
+            "to_model_version": to_model_version,
+            "status": status,
+        },
+        {
+            "from_model_version": from_model_version,
+            "to_model_version": to_model_version,
+        },
+    ]
+
+    for labels in label_attempts:
+        try:
+            MODEL_ROLLBACK_TOTAL.labels(**labels).inc()
+            return
+        except ValueError:
+            continue
+
+    MODEL_ROLLBACK_TOTAL.inc()
 
 
 def render_prometheus_metrics() -> bytes:

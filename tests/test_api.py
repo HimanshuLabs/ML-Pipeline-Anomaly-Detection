@@ -1,6 +1,8 @@
+from __future__ import annotations
+
+from pathlib import Path
 """Tests for the Project 4 online inference FastAPI service."""
 
-from __future__ import annotations
 
 from collections.abc import Generator
 
@@ -147,16 +149,35 @@ def test_metrics_endpoint_exposes_prometheus_metrics(
     assert "active_model_version" in response.text
 
 
-def test_rollback_endpoint_is_stubbed_and_non_mutating(client: TestClient) -> None:
-    response = client.post("/admin/rollback")
+def test_rollback_endpoint_validates_previous_stable_model_without_mutation(
+    client: TestClient,
+) -> None:
+    active_model_path = Path("configs/active_model.yaml")
+    before_payload = active_model_path.read_text(encoding="utf-8")
+
+    response = client.post(
+        "/admin/rollback",
+        json={
+            "rollback_reason": "pytest dry-run validation",
+            "triggered_by": "pytest",
+            "dry_run": True,
+        },
+    )
+
+    after_payload = active_model_path.read_text(encoding="utf-8")
 
     assert response.status_code == 200
+
     body = response.json()
 
-    assert body["status"] == "planned"
+    assert body["status"] == "validated"
     assert body["action_taken"] is False
+    assert body["from_model_version"] == "v002"
+    assert body["to_model_version"] == "v001"
+    assert body["validation_status"] == "dry_run_validated"
+    assert body["dry_run"] is True
     assert body["active_model_version"] == "v002"
-    assert "stubbed" in body["reason"]
+    assert before_payload == after_payload
 
 
 def test_predict_rejects_missing_required_model_features(client: TestClient) -> None:

@@ -192,7 +192,7 @@ def test_promote_model_version_updates_active_pointer_and_archives_previous_prod
         registry_path=registry_path,
     )
     assert v001_after_v002.status == "archived"
-    assert v001_after_v002.approved_for_prod is False
+    assert v001_after_v002.approved_for_prod is True
     assert v001_after_v002.archived_at_utc is not None
 
     pointer_v002 = read_active_model_pointer(active_model_path)
@@ -431,6 +431,6 @@ def test_promoting_new_production_model_archives_previous_production(tmp_path):
     }
 
     assert records_by_version["v904"]["status"] == "archived"
-    assert records_by_version["v904"]["approved_for_prod"] is False
+    assert records_by_version["v904"]["approved_for_prod"] is True
     assert records_by_version["v905"]["status"] == "production"
     assert records_by_version["v905"]["approved_for_prod"] is True
