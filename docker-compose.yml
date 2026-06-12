@@ -1,0 +1,32 @@
+services:
+  anomaly-api:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    image: project4-anomaly-api:local
+    ports:
+      - "${PROJECT4_API_HOST_PORT:-8014}:8004"
+    environment:
+      PYTHONPATH: /app/src
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ./logs:/app/logs
+
+  anomaly-batch:
+    profiles:
+      - batch
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.batch
+    image: project4-anomaly-batch:local
+    environment:
+      PYTHONPATH: /app/src
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ./data/features/batch_scoring:/app/data/features/batch_scoring
+      - ./logs:/app/logs
+    command:
+      - python
+      - -m
+      - anomaly_detection.batch_inference
+      - --help
