@@ -218,3 +218,128 @@ def build_baseline_stats_payload(
             "or simulated labels in later evaluation work."
         ),
     }
+
+# FALSE_POSITIVE_FALSE_NEGATIVE_THRESHOLD_HELPERS
+def estimate_threshold_from_scores(
+    anomaly_scores: list[float],
+    *,
+    target_anomaly_rate: float,
+) -> float:
+    """Estimate an anomaly threshold from model scores.
+
+    The project currently uses unsupervised anomaly detection with proxy metrics.
+    Because real labels are not available, this helper does not claim precision,
+    recall, false-positive rate, or false-negative rate.
+
+    Assumption:
+        Lower anomaly scores are treated as more anomalous.
+
+    Args:
+        anomaly_scores: Raw anomaly scores produced by the model.
+        target_anomaly_rate: Desired fraction of records to flag as anomalous.
+
+    Returns:
+        Score threshold where records at or below the threshold are anomalous.
+
+    Raises:
+        ValueError: If inputs are empty, non-finite, or outside valid range.
+    """
+    import math
+
+    if not 0 < target_anomaly_rate < 1:
+        raise ValueError("target_anomaly_rate must be between 0 and 1")
+
+    cleaned_scores = [
+        float(score)
+        for score in anomaly_scores
+        if score is not None and math.isfinite(float(score))
+    ]
+
+    if not cleaned_scores:
+        raise ValueError("anomaly_scores must contain at least one finite score")
+
+    sorted_scores = sorted(cleaned_scores)
+    threshold_index = max(
+        0,
+        min(
+            len(sorted_scores) - 1,
+            int(len(sorted_scores) * target_anomaly_rate) - 1,
+        ),
+    )
+
+    return sorted_scores[threshold_index]
+
+
+def summarize_threshold_tradeoff(
+    *,
+    threshold: float,
+    baseline_anomaly_rate: float,
+    current_anomaly_rate: float | None = None,
+    label_availability: str = "unlabeled_proxy_metrics",
+) -> dict[str, object]:
+    """Summarize threshold tradeoffs honestly for an unsupervised model.
+
+    This function intentionally separates real metrics from proxy reasoning.
+    Without known-good / known-bad labels, Project 4 can discuss false-positive
+    and false-negative risk, but it cannot truthfully compute real FP/FN rates.
+
+    Args:
+        threshold: Active anomaly score threshold.
+        baseline_anomaly_rate: Training/baseline anomaly rate.
+        current_anomaly_rate: Optional observed anomaly rate from production-like
+            inference logs.
+        label_availability: Label status for the metric interpretation.
+
+    Returns:
+        Dictionary suitable for docs, metadata, or operational reporting.
+    """
+    if not 0 <= baseline_anomaly_rate <= 1:
+        raise ValueError("baseline_anomaly_rate must be between 0 and 1")
+
+    if current_anomaly_rate is not None and not 0 <= current_anomaly_rate <= 1:
+        raise ValueError("current_anomaly_rate must be between 0 and 1")
+
+    labels_available = label_availability == "real_labels_available"
+
+    summary: dict[str, object] = {
+        "threshold": float(threshold),
+        "baseline_anomaly_rate": float(baseline_anomaly_rate),
+        "current_anomaly_rate": (
+            None if current_anomaly_rate is None else float(current_anomaly_rate)
+        ),
+        "label_availability": label_availability,
+        "metrics_are_proxy": not labels_available,
+        "real_false_positive_rate_available": labels_available,
+        "real_false_negative_rate_available": labels_available,
+        "false_positive_definition": (
+            "A normal entity/event incorrectly flagged as anomalous."
+        ),
+        "false_negative_definition": (
+            "A real anomalous entity/event not flagged by the model."
+        ),
+        "lower_threshold_effect": (
+            "Fewer records are flagged; alert fatigue may fall, but missed "
+            "anomaly risk can rise."
+        ),
+        "higher_threshold_effect": (
+            "More records are flagged; missed anomaly risk may fall, but false "
+            "positive risk and alert fatigue can rise."
+        ),
+        "operational_position": (
+            "With unlabeled anomaly data, threshold quality is judged by proxy "
+            "signals: anomaly-rate stability, drift status, alert volume, "
+            "latency, investigation feedback, and later delayed truth labels."
+        ),
+    }
+
+    if current_anomaly_rate is not None:
+        summary["anomaly_rate_delta"] = float(
+            current_anomaly_rate - baseline_anomaly_rate
+        )
+        summary["anomaly_rate_ratio"] = (
+            None
+            if baseline_anomaly_rate == 0
+            else float(current_anomaly_rate / baseline_anomaly_rate)
+        )
+
+    return summary
