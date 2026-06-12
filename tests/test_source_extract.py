@@ -7,7 +7,6 @@ import pytest
 
 from anomaly_detection.source_extract import (
     MODEL_FEATURE_COLUMNS,
-    SourceExtractionError,
     transform_campaign_performance,
     transform_customer_360,
     transform_marketing_funnel,

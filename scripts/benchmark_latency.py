@@ -23,7 +23,6 @@ from typing import Any
 
 import httpx
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SRC_PATH = PROJECT_ROOT / "src"
 
@@ -31,7 +30,6 @@ if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
 from anomaly_detection.online_inference import OnlineInferenceService  # noqa: E402
-
 
 DEFAULT_LATENCY_BUDGET_MS = 200.0
 
@@ -249,4 +247,4 @@ if __name__ == "__main__":
         raise SystemExit(main())
     except LatencyBenchmarkError as exc:
         print(f"benchmark_error={exc}", file=sys.stderr)
-        raise SystemExit(1)
+        raise SystemExit(1) from exc

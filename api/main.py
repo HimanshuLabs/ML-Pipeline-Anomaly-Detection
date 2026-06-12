@@ -1,17 +1,11 @@
-from __future__ import annotations
-
-from anomaly_detection.rollback import RollbackError, rollback_active_model
-from anomaly_detection.registry import list_model_versions, read_active_model_pointer
-from anomaly_detection.metrics import record_model_rollback
-from api.schemas import RollbackRequest, RollbackResponse
-from fastapi import HTTPException
-from pathlib import Path
 """FastAPI application for Project 4 online anomaly inference."""
 
+from __future__ import annotations
 
 import logging
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Response
@@ -20,20 +14,21 @@ from anomaly_detection.metrics import (
     observe_prediction_latency_ms,
     prometheus_content_type,
     record_anomaly_detected,
+    record_model_rollback,
     record_prediction_error,
     record_prediction_request,
     render_prometheus_metrics,
     set_active_model_version,
 )
-from anomaly_detection.prediction_logging import write_online_predictions_jsonl
-
 from anomaly_detection.online_inference import (
     OnlineInferenceError,
     OnlineInferenceService,
     model_info_to_dict,
     prediction_to_dict,
 )
-
+from anomaly_detection.prediction_logging import write_online_predictions_jsonl
+from anomaly_detection.registry import list_model_versions, read_active_model_pointer
+from anomaly_detection.rollback import RollbackError, rollback_active_model
 from api.schemas import (
     ActiveModelResponse,
     BatchPredictionResponse,
@@ -41,9 +36,9 @@ from api.schemas import (
     HealthResponse,
     PredictionResponse,
     PredictRequest,
-    RollbackStubResponse,
+    RollbackRequest,
+    RollbackResponse,
 )
-
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +97,7 @@ async def lifespan(app: FastAPI):
                 "feature_count": info.feature_count,
             },
         )
-    except Exception as exc:  # pragma: no cover - covered by runtime smoke checks
+    except Exception:  # pragma: no cover - covered by runtime smoke checks
         logger.exception("Failed to load active anomaly model")
         state.inference_service = None
 

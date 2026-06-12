@@ -27,7 +27,6 @@ import yaml
 
 from anomaly_detection.prediction_logging import write_batch_predictions_jsonl
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 DEFAULT_ACTIVE_MODEL_PATH = PROJECT_ROOT / "configs" / "active_model.yaml"
@@ -361,7 +360,7 @@ def score_feature_batch(
 
     records: list[BatchPredictionRecord] = []
 
-    for row_number, (row_index, row) in enumerate(features.iterrows()):
+    for row_number, (_row_index, row) in enumerate(features.iterrows()):
         feature_payload = {
             feature_name: _json_safe(row[feature_name])
             for feature_name in feature_names

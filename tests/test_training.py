@@ -103,7 +103,10 @@ def test_train_isolation_forest_from_snapshot_writes_versioned_artifacts(
     assert artifact_metadata.feature_schema_version == "feature_schema_v001"
     assert artifact_metadata.baseline_anomaly_rate >= 0.0
     assert artifact_metadata.baseline_anomaly_rate <= 1.0
-    assert artifact_metadata.training_snapshot_metadata["snapshot_id"] == snapshot_metadata.snapshot_id
+    assert (
+        artifact_metadata.training_snapshot_metadata["snapshot_id"]
+        == snapshot_metadata.snapshot_id
+    )
 
     with (artifact_dir / "metadata.json").open("r", encoding="utf-8") as file:
         metadata_payload = json.load(file)
@@ -146,7 +149,9 @@ def test_train_isolation_forest_from_snapshot_writes_versioned_artifacts(
     assert set(baseline_payload["feature_baselines"]) == set(schema_payload["feature_names"])
 
     loaded_model = load_trained_model(artifact_dir / "model.joblib")
-    predictions = loaded_model.predict(_sample_feature_frame().loc[:, schema_payload["feature_names"]])
+    predictions = loaded_model.predict(
+        _sample_feature_frame().loc[:, schema_payload["feature_names"]],
+    )
     assert len(predictions) == 40
 
 

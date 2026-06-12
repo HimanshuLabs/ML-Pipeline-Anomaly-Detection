@@ -16,8 +16,8 @@ Output:
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable
 
 import numpy as np
 import pandas as pd
@@ -281,10 +281,11 @@ def _resolve_reference_timestamp(
     if reference_timestamp is not None:
         parsed = pd.Timestamp(reference_timestamp)
 
-        if parsed.tzinfo is None:
-            parsed = parsed.tz_localize("UTC")
-        else:
-            parsed = parsed.tz_convert("UTC")
+        parsed = (
+            parsed.tz_localize("UTC")
+            if parsed.tzinfo is None
+            else parsed.tz_convert("UTC")
+        )
 
         return parsed
 

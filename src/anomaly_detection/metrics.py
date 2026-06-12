@@ -29,7 +29,6 @@ from prometheus_client import (
     generate_latest,
 )
 
-
 UNKNOWN_MODEL_VERSION = "unknown"
 
 PREDICTION_REQUESTS_TOTAL = Counter(

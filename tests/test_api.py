@@ -1,16 +1,15 @@
-from __future__ import annotations
-
-from pathlib import Path
 """Tests for the Project 4 online inference FastAPI service."""
 
+from __future__ import annotations
 
 from collections.abc import Generator
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
-from api.main import app, state
 from anomaly_detection.online_inference import OnlineInferenceService
+from api.main import app, state
 
 
 @pytest.fixture()

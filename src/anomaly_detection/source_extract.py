@@ -300,7 +300,10 @@ def transform_customer_360(dataframe: pd.DataFrame) -> pd.DataFrame:
     for source_column, target_column in column_mapping.items():
         features[target_column] = _numeric_series(dataframe, source_column)
 
-    features["repeat_purchase_signal"] = _bool_series(dataframe, "repeat_purchase_signal").astype("int64")
+    features["repeat_purchase_signal"] = _bool_series(
+        dataframe,
+        "repeat_purchase_signal",
+    ).astype("int64")
 
     return _finalize_feature_frame(
         features,
@@ -666,7 +669,10 @@ def write_snapshot(
     )
 
 
-def run_source_extract(config_path: str | Path, output_root: str | Path | None = None) -> SnapshotWriteResult:
+def run_source_extract(
+    config_path: str | Path,
+    output_root: str | Path | None = None,
+) -> SnapshotWriteResult:
     """Run end-to-end source extraction and snapshot writing."""
 
     config = load_config(config_path)
@@ -675,7 +681,9 @@ def run_source_extract(config_path: str | Path, output_root: str | Path | None =
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Extract real-source features for Project 4 training.")
+    parser = argparse.ArgumentParser(
+        description="Extract real-source features for Project 4 training.",
+    )
     parser.add_argument("--config", required=True, help="Path to source_extract.yaml")
     parser.add_argument("--output-root", default=None, help="Output root for training snapshots")
     return parser.parse_args()

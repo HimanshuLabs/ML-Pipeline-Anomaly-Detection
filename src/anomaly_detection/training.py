@@ -230,7 +230,7 @@ def _load_optional_snapshot_metadata(metadata_path: str | Path | None) -> dict[s
             loaded = json.load(file)
 
         if not isinstance(loaded, dict):
-            raise TrainingError(f"Snapshot metadata must be a JSON object: {path}")
+            raise TrainingError(f"Snapshot metadata must be a JSON object: {path}") from None
 
         return loaded
 
@@ -374,9 +374,13 @@ def resolve_snapshot_paths(
         metadata_path = snapshot_path.parent / "metadata.json"
         return snapshot_path, metadata_path if metadata_path.exists() else None
 
-    matching_metadata = sorted(root.glob(f"snapshot_date=*/snapshot_id={snapshot_value}/metadata.json"))
+    matching_metadata = sorted(
+        root.glob(f"snapshot_date=*/snapshot_id={snapshot_value}/metadata.json"),
+    )
     if not matching_metadata:
-        matching_metadata = sorted(root.glob(f"snapshot_date=*/snapshot_id=*{snapshot_value}*/metadata.json"))
+        matching_metadata = sorted(
+            root.glob(f"snapshot_date=*/snapshot_id=*{snapshot_value}*/metadata.json"),
+        )
 
     if not matching_metadata:
         raise TrainingError(f"Could not resolve training snapshot: {snapshot_value}")

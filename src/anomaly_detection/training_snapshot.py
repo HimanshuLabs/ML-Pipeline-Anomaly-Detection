@@ -20,11 +20,9 @@ import pandas as pd
 from anomaly_detection.feature_validation import (
     FeatureValidationConfig,
     FeatureValidationError,
-    FeatureValidationResult,
     load_feature_validation_config,
     validate_feature_dataframe,
 )
-
 
 DEFAULT_TRAINING_SNAPSHOT_ROOT = Path("data/features/training")
 FEATURES_FILENAME = "features.parquet"

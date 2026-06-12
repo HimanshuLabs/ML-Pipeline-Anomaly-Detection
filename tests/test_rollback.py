@@ -23,7 +23,10 @@ def _write_active_model(path: Path, version: str = "v002") -> None:
             {
                 "model_name": "isolation_forest",
                 "active_model_version": version,
-                "artifact_path": f"artifacts/models/isolation_forest/model_version={version}/model.joblib",
+                "artifact_path": (
+                    "artifacts/models/isolation_forest/"
+                    f"model_version={version}/model.joblib"
+                ),
                 "dataset_snapshot_id": f"snapshot_{version}",
                 "feature_schema_version": "feature_schema_v001",
                 "status": "production",

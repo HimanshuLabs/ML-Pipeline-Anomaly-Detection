@@ -22,11 +22,11 @@ import pandas as pd
 import yaml
 
 from anomaly_detection.batch_inference import (
+    DEFAULT_ACTIVE_MODEL_PATH,
     ActiveModelArtifacts,
     BatchInferenceError,
     get_required_feature_names,
     hash_feature_payload,
-    DEFAULT_ACTIVE_MODEL_PATH,
     load_active_model_artifacts,
     prepare_feature_matrix,
 )

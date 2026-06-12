@@ -12,8 +12,10 @@ import json
 import uuid
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import yaml
 
@@ -466,8 +468,6 @@ def promote_model_version(
     if target_index is None:
         raise RegistryError(f"Model version not registered: {model_name} {model_version}")
 
-    target_entry = entries[target_index]
-
     for entry in entries:
         if (
             entry.model_name == model_name
@@ -546,14 +546,6 @@ def list_model_versions(
 # This compatibility layer adds explicit model lifecycle operations while
 # preserving the existing registry implementation above.
 
-from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
-from enum import StrEnum
-from pathlib import Path
-from typing import Any
-from uuid import uuid4
-
-import yaml
 
 
 class ModelStatus(StrEnum):

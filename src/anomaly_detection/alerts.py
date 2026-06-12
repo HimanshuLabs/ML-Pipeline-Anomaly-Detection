@@ -25,7 +25,6 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ALERT_EVENTS_PATH = PROJECT_ROOT / "logs" / "alerts" / "anomaly_alerts.jsonl"
 

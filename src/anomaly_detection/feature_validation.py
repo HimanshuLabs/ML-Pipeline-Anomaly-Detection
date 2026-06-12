@@ -16,7 +16,6 @@ import numpy as np
 import pandas as pd
 import yaml
 
-
 DEFAULT_CONFIG_PATH = Path("configs/model_config.yaml")
 
 

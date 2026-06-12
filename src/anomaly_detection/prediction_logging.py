@@ -21,7 +21,6 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 DEFAULT_BATCH_PREDICTION_LOG_PATH = (
