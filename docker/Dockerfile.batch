@@ -1,0 +1,50 @@
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PIP_NO_CACHE_DIR=1
+ENV PYTHONPATH=/app/src
+
+WORKDIR /app
+
+RUN groupadd --system app \
+    && useradd --system --gid app --home-dir /app app
+
+COPY requirements.txt /app/requirements.txt
+
+RUN python -m pip install --root-user-action=ignore --upgrade "pip>=25,<26" \
+    && python -m pip install --root-user-action=ignore -r /app/requirements.txt
+
+COPY src /app/src
+COPY configs /app/configs
+COPY artifacts/models /app/artifacts/models
+
+RUN mkdir -p /app/data/features/batch_scoring /app/logs/predictions /app/logs/alerts \
+    && python - <<'PY'
+from pathlib import Path
+
+required_paths = [
+    Path("src/anomaly_detection/batch_inference.py"),
+    Path("configs/active_model.yaml"),
+    Path("artifacts/models/isolation_forest/model_version=v002/model.joblib"),
+    Path("artifacts/models/isolation_forest/model_version=v002/metadata.json"),
+    Path("artifacts/models/isolation_forest/model_version=v002/feature_schema.json"),
+    Path("artifacts/models/isolation_forest/model_version=v002/baseline_stats.json"),
+]
+
+missing_paths = [
+    str(path)
+    for path in required_paths
+    if not path.exists()
+]
+
+if missing_paths:
+    raise SystemExit("Missing required batch runtime paths: " + ", ".join(missing_paths))
+
+print("OK: required batch runtime paths are present")
+PY
+RUN chown -R app:app /app
+
+USER app
+
+CMD ["python", "-m", "anomaly_detection.batch_inference", "--help"]

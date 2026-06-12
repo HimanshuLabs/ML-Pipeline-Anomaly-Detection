@@ -1,0 +1,34 @@
+model:
+  name: isolation_forest
+  algorithm: IsolationForest
+  random_state: 42
+  contamination: 0.05
+  n_estimators: 200
+  max_samples: auto
+
+features:
+  schema_version: feature_schema_v001
+  entity_key: entity_id
+  timestamp_column: feature_timestamp
+  required_numeric_features:
+    - avg_cart_value_7d
+    - event_count_1h
+    - avg_api_latency_ms
+    - fraud_score_avg
+    - purchase_probability_delta
+    - cart_abandonment_rate
+    - campaign_roas
+    - conversion_rate
+    - customer_lifetime_value
+    - discount_sensitivity
+    - page_load_p95_ms
+
+training:
+  snapshot_root: data/features/training
+  artifact_root: artifacts/models
+  model_registry_backend: local
+  mlflow_tracking_uri: file:./mlruns
+  approval_required: true
+
+latency_budget:
+  online_prediction_p95_ms: 200

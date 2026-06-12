@@ -1,0 +1,20 @@
+{
+  "entity_key": "entity_id",
+  "feature_count": 11,
+  "feature_names": [
+    "avg_cart_value_7d",
+    "event_count_1h",
+    "avg_api_latency_ms",
+    "fraud_score_avg",
+    "purchase_probability_delta",
+    "cart_abandonment_rate",
+    "campaign_roas",
+    "conversion_rate",
+    "customer_lifetime_value",
+    "discount_sensitivity",
+    "page_load_p95_ms"
+  ],
+  "feature_schema_version": "feature_schema_v001",
+  "source": "configs/model_config.yaml",
+  "timestamp_column": "feature_timestamp"
+}
