@@ -1,0 +1,77 @@
+{
+  "algorithm": "IsolationForest",
+  "artifact_dir": "/home/manshu/Desktop/Project-4-ML-Pipeline-Anomaly-Detection/artifacts/models/isolation_forest/model_version=v001",
+  "baseline_anomaly_rate": 0.05,
+  "baseline_stats_path": "/home/manshu/Desktop/Project-4-ML-Pipeline-Anomaly-Detection/artifacts/models/isolation_forest/model_version=v001/baseline_stats.json",
+  "feature_names": [
+    "avg_cart_value_7d",
+    "event_count_1h",
+    "avg_api_latency_ms",
+    "fraud_score_avg",
+    "purchase_probability_delta",
+    "cart_abandonment_rate",
+    "campaign_roas",
+    "conversion_rate",
+    "customer_lifetime_value",
+    "discount_sensitivity",
+    "page_load_p95_ms"
+  ],
+  "feature_schema_path": "/home/manshu/Desktop/Project-4-ML-Pipeline-Anomaly-Detection/artifacts/models/isolation_forest/model_version=v001/feature_schema.json",
+  "feature_schema_version": "feature_schema_v001",
+  "metadata_path": "/home/manshu/Desktop/Project-4-ML-Pipeline-Anomaly-Detection/artifacts/models/isolation_forest/model_version=v001/metadata.json",
+  "model_name": "isolation_forest",
+  "model_parameters": {
+    "contamination": 0.05,
+    "max_samples": "auto",
+    "n_estimators": 200,
+    "random_state": 42
+  },
+  "model_path": "/home/manshu/Desktop/Project-4-ML-Pipeline-Anomaly-Detection/artifacts/models/isolation_forest/model_version=v001/model.joblib",
+  "model_version": "v001",
+  "row_count": 240,
+  "training_finished_at_utc": "2026-06-08T17:44:18.434885+00:00",
+  "training_snapshot_metadata": {
+    "content_hash": "27d07b57c4f28ab294af120afe76545665302d55d006f9f3b37b6812e10e0922",
+    "created_at_utc": "2026-06-08T12:00:00+00:00",
+    "data_quality_status": "passed",
+    "dataset_version": "dataset_2026-06-05_d8a245c1",
+    "entity_key": "entity_id",
+    "feature_columns": [
+      "avg_cart_value_7d",
+      "event_count_1h",
+      "avg_api_latency_ms",
+      "fraud_score_avg",
+      "purchase_probability_delta",
+      "cart_abandonment_rate",
+      "campaign_roas",
+      "conversion_rate",
+      "customer_lifetime_value",
+      "discount_sensitivity",
+      "page_load_p95_ms"
+    ],
+    "feature_count": 11,
+    "feature_schema_version": "feature_schema_v001",
+    "features_path": "data/features/training/snapshot_date=2026-06-05/snapshot_id=d8a245c1-4b56-51fb-b5e5-a536b06de786/features.parquet",
+    "metadata_path": "data/features/training/snapshot_date=2026-06-05/snapshot_id=d8a245c1-4b56-51fb-b5e5-a536b06de786/metadata.json",
+    "row_count": 240,
+    "snapshot_date": "2026-06-05",
+    "snapshot_id": "d8a245c1-4b56-51fb-b5e5-a536b06de786",
+    "snapshot_name": "training_snapshot_2026-06-05_d8a245c1-4b56-51fb-b5e5-a536b06de786",
+    "snapshot_path": "data/features/training/snapshot_date=2026-06-05/snapshot_id=d8a245c1-4b56-51fb-b5e5-a536b06de786",
+    "source_max_timestamp": "2026-06-05T23:30:00+00:00",
+    "source_min_timestamp": "2026-06-01T00:00:00+00:00",
+    "source_project_versions": {
+      "project1": "completed_local_portfolio_source",
+      "project2_3": "completed_local_portfolio_source"
+    },
+    "source_tables": [
+      "project1_gold_user_behavior_features_demo",
+      "project2_3_marketing_warehouse_marts_demo"
+    ],
+    "timestamp_column": "feature_timestamp",
+    "training_dataset_id": "b1d150c3-424c-528b-b121-eefb2183b7b8",
+    "validation_errors": [],
+    "validation_warnings": []
+  },
+  "training_started_at_utc": "2026-06-08T17:44:17.901739+00:00"
+}

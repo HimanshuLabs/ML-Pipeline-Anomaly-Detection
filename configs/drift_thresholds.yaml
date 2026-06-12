@@ -1,0 +1,30 @@
+drift:
+  method: mean_variance_threshold
+  status_levels:
+    normal: "Feature movement is within expected range."
+    warning: "Feature movement should be reviewed."
+    critical: "Feature movement may invalidate the active model."
+
+thresholds:
+  default:
+    mean_delta_warning: 0.15
+    mean_delta_critical: 0.30
+    variance_delta_warning: 0.25
+    variance_delta_critical: 0.50
+
+  feature_overrides:
+    avg_api_latency_ms:
+      mean_delta_warning: 0.20
+      mean_delta_critical: 0.40
+      variance_delta_warning: 0.30
+      variance_delta_critical: 0.60
+    page_load_p95_ms:
+      mean_delta_warning: 0.20
+      mean_delta_critical: 0.40
+      variance_delta_warning: 0.30
+      variance_delta_critical: 0.60
+
+alerts:
+  emit_log_alert: true
+  alert_log_path: logs/alerts/anomaly_alerts.jsonl
+  critical_drift_triggers_rollback_review: true

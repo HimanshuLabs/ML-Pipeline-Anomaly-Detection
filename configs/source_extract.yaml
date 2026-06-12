@@ -1,0 +1,59 @@
+source_extract:
+  snapshot_type: real_source_extract
+  feature_schema_version: feature_schema_v001
+  output_snapshot_prefix: real_source
+  minimum_total_rows: 100
+
+  project_1:
+    enabled: true
+    project_name: project_1
+    source_type: postgres
+    host: localhost
+    port: 5433
+    database: personalization_db
+    username: de_user
+    password_env_var: PROJECT1_POSTGRES_PASSWORD
+    schema: public
+    table: user_features
+    entity_key: user_id
+
+  project_2_3:
+    enabled: true
+    project_name: project_2_3
+    source_type: postgres
+    host: localhost
+    port: 5434
+    database: marketing_analytics
+    username: project2
+    password_env_var: PROJECT23_POSTGRES_PASSWORD
+
+    tables:
+      customer_360:
+        schema: marts
+        table: mart_customer_360
+        entity_key: customer_id
+
+      campaign_performance:
+        schema: marts
+        table: mart_campaign_performance
+        entity_key: campaign_id
+
+      marketing_funnel:
+        schema: marts
+        table: mart_marketing_funnel
+        entity_key: campaign_id
+
+      product_sales:
+        schema: marts
+        table: mart_product_sales
+        entity_key: product_id
+
+      web_events:
+        schema: warehouse
+        table: fact_web_events
+        entity_key: event_id
+
+  output:
+    root: data/features/training
+    write_metadata: true
+    write_parquet: true
