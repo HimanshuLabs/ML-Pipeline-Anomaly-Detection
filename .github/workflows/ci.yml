@@ -192,9 +192,74 @@ jobs:
         run: |
           PYTHONPATH=src pytest tests/test_api.py tests/test_metrics.py tests/test_prediction_logging.py -q
 
-      - name: Run full pytest suite
+      - name: Run full pytest suite with JUnit report
         run: |
-          PYTHONPATH=src pytest -q
+          mkdir -p reports
+          PYTHONPATH=src pytest -q --junitxml=reports/pytest-results.xml
+
+      - name: Publish pytest summary
+        if: always()
+        run: |
+          python - <<'PY_SUMMARY'
+          from __future__ import annotations
+
+          import os
+          from pathlib import Path
+          from xml.etree import ElementTree as ET
+
+          report_path = Path("reports/pytest-results.xml")
+          summary_path = Path(os.environ["GITHUB_STEP_SUMMARY"])
+
+          if not report_path.exists():
+              summary_path.write_text(
+                  "## Pytest summary\n\nJUnit report was not generated.\n",
+                  encoding="utf-8",
+              )
+              raise SystemExit(0)
+
+          root = ET.parse(report_path).getroot()
+
+          if root.tag == "testsuites":
+              suites = root.findall("testsuite")
+              tests = sum(int(suite.attrib.get("tests", 0)) for suite in suites)
+              failures = sum(int(suite.attrib.get("failures", 0)) for suite in suites)
+              errors = sum(int(suite.attrib.get("errors", 0)) for suite in suites)
+              skipped = sum(int(suite.attrib.get("skipped", 0)) for suite in suites)
+              time_seconds = sum(float(suite.attrib.get("time", 0.0)) for suite in suites)
+          else:
+              tests = int(root.attrib.get("tests", 0))
+              failures = int(root.attrib.get("failures", 0))
+              errors = int(root.attrib.get("errors", 0))
+              skipped = int(root.attrib.get("skipped", 0))
+              time_seconds = float(root.attrib.get("time", 0.0))
+
+          passed = tests - failures - errors - skipped
+
+          summary_path.write_text(
+              "\n".join(
+                  [
+                      "## Pytest summary",
+                      "",
+                      f"- Total tests: `{tests}`",
+                      f"- Passed: `{passed}`",
+                      f"- Failed: `{failures}`",
+                      f"- Errors: `{errors}`",
+                      f"- Skipped: `{skipped}`",
+                      f"- Runtime seconds: `{time_seconds:.2f}`",
+                      "",
+                  ]
+              ),
+              encoding="utf-8",
+          )
+          PY_SUMMARY
+
+      - name: Upload pytest report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-results
+          path: reports/pytest-results.xml
+          if-no-files-found: warn
 
       - name: Build API Docker image
         run: |
