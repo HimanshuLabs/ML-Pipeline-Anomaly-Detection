@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Project 4 is the anomaly detection layer for the wider portfolio platform.
+Project 4 is the anomaly detection layer for the wider project platform.
 
 It now consumes real local outputs from:
 

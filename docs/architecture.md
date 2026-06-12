@@ -35,7 +35,7 @@ Project 2/3 sources:
 
 The source extractor intentionally avoids creating a fake identity join between Project 1 users and Project 2/3 customers.
 
-The confirmed local outputs do not prove that Project 1 `user_id` and Project 2/3 `customer_id` share the same natural key. A false join would make the portfolio less credible.
+The confirmed local outputs do not prove that Project 1 `user_id` and Project 2/3 `customer_id` share the same natural key. A false join would make the project less credible.
 
 Instead, the model trains on a unified anomaly-feature corpus with explicit lineage columns:
 

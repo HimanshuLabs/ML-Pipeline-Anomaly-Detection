@@ -13,7 +13,6 @@ This keeps Project 4 aligned with the wider platform:
 - Project 1 provides real-time behavioral and system-performance signals.
 - Project 2/3 provides trusted historical warehouse, marts, and customer/campaign/product aggregates.
 - Project 4 scores those features with a versioned anomaly model.
-- Project 5 can later query model versions, prediction evidence, drift events, and rollback history through the AI decision layer.
 
 ---
 
@@ -29,11 +28,11 @@ This keeps Project 4 aligned with the wider platform:
 | PostgreSQL prediction schema | Implemented | `sql/create_prediction_tables.sql` defines `ml.batch_predictions` and `ml.online_predictions`. |
 | Direct PostgreSQL insert from Python | Planned | Schema exists, but this checkpoint uses JSONL fallback first for deterministic local validation. |
 | Online FastAPI inference | Implemented | FastAPI service loads active `v002` model in memory and supports health, active model, single prediction, batch prediction, metrics, and rollback stub endpoints. |
-| Prometheus metrics | Planned | Added after online/batch prediction paths stabilize. |
-| Drift checks | Planned | Drift comparison comes after prediction evidence exists. |
-| Grafana dashboard | Planned | Dashboard panels will use prediction, drift, latency, and model-version metrics later. |
-| Alert events | Planned | Alerts will be generated after drift and runtime metrics exist. |
-| Rollback integration | Planned | Rollback controls already exist separately and will later connect to inference health signals. |
+| Prometheus metrics | Implemented | FastAPI exposes Prometheus-format runtime metrics through `/metrics`. |
+| Drift checks | Implemented | Mean/variance drift checks compare current feature windows against the active `v002` baseline. |
+| Grafana dashboards | Implemented locally | Operator and executive dashboard JSON files are stored under `monitoring/grafana/dashboards/`. |
+| Alert events | Implemented locally | Alert records are written for critical drift, anomaly-rate spikes, latency breaches, prediction-error breaches, and manual alerts. |
+| Rollback integration | Implemented locally | `/admin/rollback` supports dry-run and applied rollback to the previous stable model. |
 
 ---
 
@@ -201,7 +200,7 @@ Weaknesses:
 
 ### Online inference
 
-Online inference is planned for the next checkpoint through FastAPI.
+Online inference is implemented through FastAPI and loads the active `v002` model in memory.
 
 Best use cases:
 
@@ -302,7 +301,7 @@ Prometheus metrics
 drift checks
 Grafana dashboard
 alert events
-rollback integration with inference health
+rollback integration with inference health evidence
 ```
 
 Checkpoint 9 is complete only when the batch scorer, unit tests, and this document validate together.
@@ -336,7 +335,7 @@ The service loads the model once into memory through `OnlineInferenceService`. I
 | `POST /predict` | Implemented | Scores one model-ready feature payload with the active in-memory model. |
 | `POST /predict/batch` | Implemented | Scores multiple model-ready payloads through the same in-memory service. |
 | `GET /metrics` | Implemented | Exposes Prometheus-format counters and latency histogram. |
-| `POST /admin/rollback` | Stubbed | Returns planned rollback status without mutating the active model pointer. Real rollback is implemented later. |
+| `POST /admin/rollback` | Implemented locally | Supports dry-run validation and applied rollback to the previous stable model. |
 
 ### Prediction response contract
 
@@ -378,11 +377,11 @@ This is intentionally documented instead of hidden. Later threshold tuning can r
 
 | Area | Current state |
 |---|---|
-| Drift status | Returned as `not_evaluated`; full online drift integration is planned for the drift checkpoint. |
-| Prediction persistence | API response includes prediction evidence, but durable online prediction logging is planned for the prediction logging checkpoint. |
-| Rollback | `/admin/rollback` is intentionally a non-mutating stub. Real rollback controls are planned for the rollback checkpoint. |
+| Drift status | Returned by the online response contract; full per-request online drift evaluation remains planned hardening. Batch/current-window drift checks are implemented separately. |
+| Prediction persistence | Online and batch prediction evidence is persisted locally through JSONL logs. Direct PostgreSQL inserts remain planned hardening. |
+| Rollback | `/admin/rollback` supports dry-run and applied rollback. Applied rollback updates the active model pointer and writes rollback evidence. |
 | Threshold tuning | Uses fallback `0.0` because `v002` has no explicit threshold artifact yet. |
-| Authentication | Not implemented locally. This is acceptable for the local portfolio build, but would be required before real deployment. |
+| Authentication | Not implemented locally. This is acceptable for the local project build, but would be required before real deployment. |
 
 ### Validation evidence
 

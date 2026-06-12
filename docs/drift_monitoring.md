@@ -30,10 +30,10 @@ Database-ready but not wired yet:
 
 Planned later:
 
-- Prometheus drift metrics.
-- Grafana drift dashboard panels.
-- Alert events from critical drift.
-- Rollback review trigger when critical drift persists.
+- Prometheus drift metrics are implemented.
+- Grafana drift dashboard panels are implemented locally.
+- Alert events from critical drift are implemented locally.
+- Rollback review trigger evidence exists through alert and rollback contracts.
 - Scheduled batch drift evaluation over scored production windows.
 
 ## Active model baseline
@@ -296,11 +296,11 @@ Flow:
         ↓
     Prometheus metrics
         ↓
-    future Grafana panels
+    Grafana panels
         ↓
     future alert events
         ↓
-    future rollback review
+    rollback review
 
 This makes Project 4 more than a model-serving demo. It gives the platform a way to know when the data underneath the model has changed.
 
@@ -328,7 +328,7 @@ Current implementation status:
 - Metric definitions live in `src/anomaly_detection/metrics.py`.
 - Online inference records request, error, anomaly, latency, and active model metrics.
 - Drift metrics can be published from drift evaluation results through `publish_drift_evaluation_metrics`.
-- Rollback metrics are exposed as a contract now and will be wired to the real rollback mechanism in the rollback checkpoint.
+- Rollback metrics are wired to the local rollback mechanism.
 - `monitoring/prometheus.yml` provides a local scrape configuration for the FastAPI service on port `8004`.
 
 Operational interpretation:
@@ -338,13 +338,13 @@ Operational interpretation:
 - `prediction_latency_ms` proves whether online inference stays within the p95 latency budget.
 - `feature_mean_delta` and `feature_variance_delta` make drift visible instead of burying it in logs.
 - `active_model_version` connects runtime behavior to the model registry.
-- `model_rollback_total` will become rollback evidence once rollback controls are implemented.
+- `model_rollback_total` is rollback evidence emitted by the local rollback mechanism.
 
 Limitations:
 
 - Metrics are in-memory process metrics. Restarting the API resets counters unless Prometheus has already scraped them.
 - PostgreSQL persistence for current metric snapshots is not implemented in this checkpoint.
-- Grafana visualization is planned for the dashboard checkpoint.
+- Grafana visualization is implemented locally through dashboard JSON files.
 
 ## Grafana dashboards
 
@@ -372,7 +372,7 @@ http://localhost:8004/metrics
 | Dashboard | File | Audience | Purpose |
 |---|---|---|---|
 | Operator anomaly monitoring dashboard | `monitoring/grafana/dashboards/anomaly_detection_dashboard.json` | Data engineer, ML platform engineer, SRE-style reviewer | Detailed operational monitoring for model version, request volume, anomaly count, anomaly rate, latency, feature drift, prediction errors, rollback evidence, and drift status. |
-| Executive ML health dashboard | `monitoring/grafana/dashboards/anomaly_detection_executive_dashboard.json` | Interviewer, portfolio reviewer, business-facing stakeholder | Polished summary dashboard showing active model, request volume, anomaly rate, p95 latency, drift events, prediction errors, rollback count, and a business-readable operational readout. |
+| Executive ML health dashboard | `monitoring/grafana/dashboards/anomaly_detection_executive_dashboard.json` | Technical reviewer, technical reviewer, business-facing stakeholder | Polished summary dashboard showing active model, request volume, anomaly rate, p95 latency, drift events, prediction errors, rollback count, and a business-readable operational readout. |
 
 ### Operator dashboard
 
@@ -440,9 +440,9 @@ Implemented:
 
 Planned in later checkpoints:
 
-- Explicit alert-event metrics are handled in the alert events checkpoint.
-- Rollback execution is handled in the rollback checkpoint.
-- Until those checkpoints are complete, alert and rollback panels may show zero or proxy values.
+- Alert events are implemented locally and written as JSONL evidence.
+- Rollback execution is implemented locally through the `/admin/rollback` endpoint.
+- Alert and rollback panels may show zero values until local traffic, drift evaluation, alerts, or rollback actions are generated.
 
 ### Import flow
 
@@ -481,8 +481,8 @@ Unhealthy behavior:
 
 - Prometheus metrics are process-local. API restarts reset counters unless Prometheus has already scraped them.
 - The dashboards read metrics from Prometheus, not directly from PostgreSQL.
-- Alert proxy panels use drift metrics until explicit alert-event metrics are implemented.
-- Rollback panels are wired but only become operational evidence after rollback controls emit `model_rollback_total`.
+- Alert panels depend on emitted local alert evidence and Prometheus metrics.
+- Rollback panels become operational evidence when rollback controls emit `model_rollback_total`.
 - This is a local monitoring implementation, not a managed cloud Grafana deployment.
 
 ## Alert events
@@ -554,4 +554,4 @@ Failure-mode notes:
 
 Rollback relationship:
 
-Alert events are the input evidence layer for the next checkpoint. Rollback should not be implemented as blind automation. It should consume alert evidence, registry state, active model state, and previous stable model metadata before changing the active production pointer.
+Alert events are one input evidence layer for rollback review. Rollback is not blind automation. It consumes alert evidence, registry state, active model state, and previous stable model metadata before changing the active production pointer.

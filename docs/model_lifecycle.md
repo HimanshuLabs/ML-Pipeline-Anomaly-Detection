@@ -28,7 +28,7 @@ This makes the system reproducible, auditable, and recoverable.
 | Isolation Forest training | Implemented locally | Training consumes frozen snapshot files and writes versioned local artifacts under artifacts/models/. |
 | Model registry | Implemented locally | Local JSON registry links model versions to artifact paths, snapshot_id, training_dataset_id, status, and approval state. |
 | Baseline metrics | Implemented locally | Training writes baseline_stats.json with feature baselines, anomaly rate, score summary, latency placeholders, and label-availability notes. |
-| Promotion and rollback | Partially implemented | Production promotion and active_model.yaml pointer are implemented locally. Rollback controls are planned for the rollback checkpoint. |
+| Promotion and rollback | Implemented locally | Production promotion, active_model.yaml pointer updates, rollback target selection, dry-run rollback, applied rollback, and rollback evidence logging are implemented locally. |
 
 ---
 
@@ -248,7 +248,7 @@ The first promoted model is:
 
 Important limitation:
 
-The current v001 model is trained from a validated demo snapshot generated inside Project 4. It proves the lifecycle mechanics, artifact layout, baseline metrics, registry, and promotion flow. It is not yet trained from a live extract of Project 1 and Project 2/3 sources.
+The `v001` model was trained from a validated demo snapshot generated inside Project 4. It proved the lifecycle mechanics, artifact layout, baseline metrics, registry, and promotion flow. It is now archived and rollback-eligible after promotion of the real-source `v002` model.
 
 ---
 

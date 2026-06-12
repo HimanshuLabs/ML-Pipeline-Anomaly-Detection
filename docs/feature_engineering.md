@@ -523,6 +523,6 @@ This is intentional. Dependency warnings often become future failures, so the fe
 
 This feature layer makes Project 4 behave like a production ML system instead of a notebook.
 
-The model receives a versioned, numeric, validated feature contract. Upstream source instability is caught before model training or inference. This improves data quality, reliability, reproducibility, and the interview narrative around production ML systems.
+The model receives a versioned, numeric, validated feature contract. Upstream source instability is caught before model training or inference. This improves data quality, reliability, reproducibility, and operational confidence in the ML system.
 
 The feature contract is the steel gate before the model.

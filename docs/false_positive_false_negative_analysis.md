@@ -742,7 +742,7 @@ Project 4 must not claim:
 * cloud deployment if only local execution exists
 * real labels if only proxy metrics exist
 
-This is the line between credible engineering and portfolio fiction.
+This is the line between credible engineering and project fiction.
 
 Do not cross it.
 
