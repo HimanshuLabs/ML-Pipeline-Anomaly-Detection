@@ -288,3 +288,32 @@ def test_predict_batch_persists_online_prediction_evidence(
     assert all('"prediction_source":"online"' in record for record in records)
     assert '"entity_id":"test_user_001"' in records[0]
     assert '"entity_id":"logged_user_002"' in records[1]
+
+def test_predict_reports_latency_under_configured_budget(
+    client: TestClient,
+    valid_feature_payload: dict[str, float | str],
+) -> None:
+    """Verify /predict reports latency below the configured local budget."""
+
+    active_response = client.get("/model/active")
+    assert active_response.status_code == 200
+
+    latency_budget_ms = active_response.json()["latency_budget_p95_ms"]
+
+    assert latency_budget_ms == 200.0
+
+    response = client.post(
+        "/predict",
+        json={
+            "entity_id": "latency_budget_user_001",
+            "feature_payload": valid_feature_payload,
+        },
+    )
+
+    assert response.status_code == 200
+
+    body = response.json()
+
+    assert body["model_version"] == "v002"
+    assert body["latency_ms"] >= 0
+    assert body["latency_ms"] < latency_budget_ms
