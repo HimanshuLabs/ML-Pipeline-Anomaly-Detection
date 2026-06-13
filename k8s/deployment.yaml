@@ -1,0 +1,59 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: project4-anomaly-api
+  namespace: project4-ml
+  labels:
+    app.kubernetes.io/name: project4-anomaly-api
+    app.kubernetes.io/part-of: project4-ml-platform
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: project4-anomaly-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: project4-anomaly-api
+        app.kubernetes.io/part-of: project4-ml-platform
+    spec:
+      containers:
+        - name: anomaly-api
+          image: project4-anomaly-api:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8004
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: project4-anomaly-api-config
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8004
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8004
+            initialDelaySeconds: 20
+            periodSeconds: 20
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1"
+              memory: "1Gi"
+          volumeMounts:
+            - name: runtime-logs
+              mountPath: /app/logs
+      volumes:
+        - name: runtime-logs
+          emptyDir: {}
