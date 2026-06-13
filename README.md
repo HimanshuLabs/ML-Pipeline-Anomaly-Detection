@@ -534,7 +534,7 @@ Docker scope:
 | Prometheus metrics from containerized API | Implemented |
 | CI validation for API image build | Implemented |
 | CI validation for batch image build | Implemented |
-| Kubernetes runtime manifests | Implemented locally; live cluster rollout optional / not performed |
+| Kubernetes runtime manifests | Implemented and validated locally with kind, Metrics Server, and HPA |
 | Cloud deployment | Not implemented |
 
 ## CI/CD validation
@@ -738,6 +738,8 @@ Project 4 is complete when:
 - GitHub Actions passes on the remote branch
 - final documentation does not exaggerate implementation state
 
+- [Kubernetes runtime validation](docs/kubernetes_runtime_validation.md)
+
 ## Kubernetes runtime manifests
 
 Project 4 now includes local Kubernetes runtime manifests for the anomaly inference API.
@@ -760,8 +762,8 @@ Validation status:
 - Passed: cross-manifest consistency audit.
 - Passed: `kubectl kustomize k8s/` offline render validation.
 - Blocked: `kubectl apply --dry-run=client` because no Kubernetes context is configured.
-- Not performed: live cluster rollout.
-- Not implemented: cloud Kubernetes deployment.
+- Performed locally: kind rollout with replicated API pods, service routing, Metrics Server, and HPA validation.
+- Not implemented: cloud Kubernetes deployment, public ingress, managed load balancer, or managed cluster autoscaler.
 
 Run offline render validation:
 
