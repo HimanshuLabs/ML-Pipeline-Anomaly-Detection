@@ -2,7 +2,7 @@
 
 ## Current implementation status
 
-Rollback is implemented locally.
+Rollback is implemented locally and has been dry-run validated through the Kubernetes-hosted API.
 
 Implemented:
 
@@ -19,7 +19,7 @@ Planned hardening:
 - Direct PostgreSQL insert into `audit.rollback_events`.
 - Authentication/authorization for `/admin/rollback`.
 - Explicit in-process model reload after rollback.
-- Kubernetes manifests are implemented for local runtime deployment design. Config/image rollback can be performed through `Deployment` image/config changes after a live cluster is configured. Live cluster rollback was not performed in this checkpoint.
+- Kubernetes manifests have been validated on a local kind cluster. Rollback was dry-run validated through the Kubernetes-hosted API. An applied rollback that mutates the active production model pointer was not performed during Kubernetes validation.
 
 ## Purpose
 
@@ -228,7 +228,8 @@ Operational interpretation:
 - Implemented: ClusterIP Service on port `8004`.
 - Implemented: CPU-based HPA from 2 to 5 replicas.
 - Validated: YAML parse, manifest consistency, and offline `kubectl kustomize` render.
-- Not performed: live `kubectl apply`, rollout status check, or cluster rollback.
+- Performed locally: live `kubectl apply`, rollout status check, API validation, Metrics Server-backed HPA validation, and rollback dry-run through the Kubernetes-hosted API.
+- Not performed: applied cluster rollback that mutates the active production model pointer.
 - Reason: no Kubernetes context is configured in the current local environment.
 
 Rollback through Kubernetes remains a deployment operation, not a model-registry operation. The model rollback mechanism already updates the active model pointer; Kubernetes rollback would separately handle image/config rollout once a cluster is available.

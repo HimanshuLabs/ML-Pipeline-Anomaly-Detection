@@ -82,7 +82,7 @@ This benchmark proves local online scoring latency.
 It does not prove:
 
 - multi-client load-test performance
-- Kubernetes HPA manifest behavior; live metrics-server autoscaling validation remains optional / not performed
+- Kubernetes HPA behavior validated locally with Metrics Server; HPA target calculation, scale-up, and scale-down were observed on kind
 - cloud network latency
 - production database write latency
 - Project 1 feature API lookup latency
@@ -140,13 +140,13 @@ Validation performed:
 
 Validation not performed:
 
-- Live HPA behavior.
-- Metrics Server integration.
-- Load-driven autoscaling test.
+- Formal Kubernetes p95 latency benchmark.
+- Cloud or ingress-based latency benchmark.
+- Production-scale load test beyond local kind validation.
 - Cluster rollout.
 
 Reason: no Kubernetes context is configured in the current local environment.
 
 Latency budget implication:
 
-The implemented HPA manifest documents the intended scale-out policy, but the measured p95 latency budget remains based on the local FastAPI/Docker runtime validation. Live Kubernetes latency and autoscaling behavior must be measured separately after a local cluster is configured.
+The implemented HPA manifest has been validated locally on kind with Metrics Server. HPA target calculation, scale-up, and scale-down were observed. The measured p95 latency budget remains based on the local FastAPI/Docker runtime validation; a formal Kubernetes p95 latency benchmark is still a separate optional validation.
