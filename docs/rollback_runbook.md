@@ -19,7 +19,7 @@ Planned hardening:
 - Direct PostgreSQL insert into `audit.rollback_events`.
 - Authentication/authorization for `/admin/rollback`.
 - Explicit in-process model reload after rollback.
-- Optional Kubernetes config/image rollback.
+- Kubernetes manifests are implemented for local runtime deployment design. Config/image rollback can be performed through `Deployment` image/config changes after a live cluster is configured. Live cluster rollback was not performed in this checkpoint.
 
 ## Purpose
 
@@ -208,3 +208,27 @@ After rollback:
 - Review prediction evidence.
 - Compare baseline and current metrics.
 - Retrain or tune thresholds only after understanding the failure.
+
+## Kubernetes rollback scope
+
+Kubernetes manifests are implemented under `k8s/` for the anomaly inference API:
+
+- `namespace.yaml`
+- `configmap.yaml`
+- `deployment.yaml`
+- `service.yaml`
+- `hpa.yaml`
+- `kustomization.yaml`
+
+Operational interpretation:
+
+- Implemented: local Kubernetes deployment manifests.
+- Implemented: two-replica API Deployment using `project4-anomaly-api:local`.
+- Implemented: ConfigMap-driven runtime configuration for active model `v002`.
+- Implemented: ClusterIP Service on port `8004`.
+- Implemented: CPU-based HPA from 2 to 5 replicas.
+- Validated: YAML parse, manifest consistency, and offline `kubectl kustomize` render.
+- Not performed: live `kubectl apply`, rollout status check, or cluster rollback.
+- Reason: no Kubernetes context is configured in the current local environment.
+
+Rollback through Kubernetes remains a deployment operation, not a model-registry operation. The model rollback mechanism already updates the active model pointer; Kubernetes rollback would separately handle image/config rollout once a cluster is available.
