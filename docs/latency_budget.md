@@ -82,7 +82,7 @@ This benchmark proves local online scoring latency.
 It does not prove:
 
 - multi-client load-test performance
-- Kubernetes autoscaling behavior
+- Kubernetes HPA manifest behavior; live metrics-server autoscaling validation remains optional / not performed
 - cloud network latency
 - production database write latency
 - Project 1 feature API lookup latency
@@ -119,3 +119,34 @@ If future p95 latency exceeds `200 ms`, investigate in this order:
 Current status:
 
     Complete for local single-client latency smoke validation.
+
+## Kubernetes autoscaling scope
+
+Project 4 includes a Kubernetes HPA manifest for the anomaly inference API.
+
+Implemented:
+
+- `k8s/hpa.yaml` targets the `project4-anomaly-api` Deployment.
+- Minimum replicas: `2`.
+- Maximum replicas: `5`.
+- CPU utilization target: `70%`.
+- The API container defines CPU and memory requests/limits in `k8s/deployment.yaml`.
+
+Validation performed:
+
+- YAML parse validation.
+- Cross-manifest consistency audit.
+- Offline render validation with `kubectl kustomize k8s/`.
+
+Validation not performed:
+
+- Live HPA behavior.
+- Metrics Server integration.
+- Load-driven autoscaling test.
+- Cluster rollout.
+
+Reason: no Kubernetes context is configured in the current local environment.
+
+Latency budget implication:
+
+The implemented HPA manifest documents the intended scale-out policy, but the measured p95 latency budget remains based on the local FastAPI/Docker runtime validation. Live Kubernetes latency and autoscaling behavior must be measured separately after a local cluster is configured.

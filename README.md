@@ -534,7 +534,7 @@ Docker scope:
 | Prometheus metrics from containerized API | Implemented |
 | CI validation for API image build | Implemented |
 | CI validation for batch image build | Implemented |
-| Kubernetes deployment | Optional / not implemented |
+| Kubernetes runtime manifests | Implemented locally; live cluster rollout optional / not performed |
 | Cloud deployment | Not implemented |
 
 ## CI/CD validation
@@ -737,3 +737,38 @@ Project 4 is complete when:
 - rollback path remains recoverable
 - GitHub Actions passes on the remote branch
 - final documentation does not exaggerate implementation state
+
+## Kubernetes runtime manifests
+
+Project 4 now includes local Kubernetes runtime manifests for the anomaly inference API.
+
+Implemented Kubernetes files:
+
+| File | Purpose |
+|---|---|
+| `k8s/namespace.yaml` | Creates the `project4-ml` namespace |
+| `k8s/configmap.yaml` | Provides runtime configuration for model `v002` |
+| `k8s/deployment.yaml` | Runs two replicas of the FastAPI anomaly inference service |
+| `k8s/service.yaml` | Exposes the API internally as a `ClusterIP` service |
+| `k8s/hpa.yaml` | Defines CPU-based autoscaling from 2 to 5 replicas |
+| `k8s/kustomization.yaml` | Renders the Kubernetes resources together for offline validation |
+
+Validation status:
+
+- Implemented: Kubernetes manifests for local runtime deployment design.
+- Passed: YAML parsing validation.
+- Passed: cross-manifest consistency audit.
+- Passed: `kubectl kustomize k8s/` offline render validation.
+- Blocked: `kubectl apply --dry-run=client` because no Kubernetes context is configured.
+- Not performed: live cluster rollout.
+- Not implemented: cloud Kubernetes deployment.
+
+Run offline render validation:
+
+    kubectl kustomize k8s/ > /tmp/project4_k8s_rendered.yaml
+
+Run live deployment only after a local cluster such as kind, minikube, Docker Desktop Kubernetes, or another Kubernetes context is configured:
+
+    kubectl apply -f k8s/namespace.yaml
+    kubectl apply -k k8s/
+    kubectl -n project4-ml get pods,svc,hpa

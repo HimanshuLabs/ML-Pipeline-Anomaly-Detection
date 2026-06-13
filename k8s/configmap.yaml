@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: project4-anomaly-api-config
+  namespace: project4-ml
+  labels:
+    app.kubernetes.io/name: project4-anomaly-api
+    app.kubernetes.io/part-of: project4-ml-platform
+data:
+  PROJECT4_MODEL_NAME: "isolation_forest"
+  PROJECT4_ACTIVE_MODEL_VERSION: "v002"
+  PROJECT4_LOG_LEVEL: "INFO"
+  PROJECT4_ENVIRONMENT: "local-kubernetes"
+  PROJECT4_PREDICTION_LOG_DIR: "/app/logs/predictions"
+  PROJECT4_ALERT_LOG_DIR: "/app/logs/alerts"
