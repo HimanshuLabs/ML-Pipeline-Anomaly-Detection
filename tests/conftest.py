@@ -218,6 +218,7 @@ def trained_metadata_paths(tmp_path_factory: pytest.TempPathFactory) -> dict[str
             model_version=version,
             artifact_root_override=root / "artifacts",
             training_started_at_utc=datetime(2026, 6, 8, 12, 5, 0, tzinfo=UTC),
+            registry_path=root / "training_label_registry.json",
         )
         metadata_paths[version] = Path(artifact.metadata_path)
 

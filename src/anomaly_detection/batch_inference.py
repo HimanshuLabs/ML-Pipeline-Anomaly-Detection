@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -23,9 +24,12 @@ from uuid import uuid4
 import joblib
 import numpy as np
 import pandas as pd
+import sklearn
 import yaml
 
 from anomaly_detection.prediction_logging import write_batch_predictions_jsonl
+
+LOGGER = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -156,6 +160,29 @@ def hash_feature_payload(payload: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _log_training_runtime_versions(metadata: dict[str, Any], *, model_version: str) -> None:
+    """Compare the training scikit-learn version with the runtime; never fails loading."""
+
+    recorded_versions = metadata.get("runtime_versions")
+    if not isinstance(recorded_versions, dict):
+        LOGGER.info(
+            "Model %s metadata has no runtime_versions; training library versions were "
+            "not recorded",
+            model_version,
+        )
+        return
+
+    trained_sklearn = recorded_versions.get("scikit-learn")
+    if trained_sklearn and trained_sklearn != sklearn.__version__:
+        LOGGER.warning(
+            "Model %s was trained with scikit-learn %s but the runtime has scikit-learn %s; "
+            "predictions may differ",
+            model_version,
+            trained_sklearn,
+            sklearn.__version__,
+        )
+
+
 def load_active_model_artifacts(
     active_model_path: Path = DEFAULT_ACTIVE_MODEL_PATH,
 ) -> ActiveModelArtifacts:
@@ -224,6 +251,8 @@ def load_active_model_artifacts(
         raise BatchInferenceError(
             "feature_schema.json feature_count does not match metadata feature_names"
         )
+
+    _log_training_runtime_versions(metadata, model_version=model_version)
 
     model = joblib.load(model_path)
 

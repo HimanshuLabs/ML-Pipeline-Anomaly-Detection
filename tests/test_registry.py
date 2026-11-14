@@ -102,6 +102,7 @@ def _train_test_artifact(
         artifact_root_override=tmp_path / "artifacts",
         overwrite=True,
         training_started_at_utc=datetime(2026, 6, 8, 12, 5, 0, tzinfo=UTC),
+        registry_path=tmp_path / "training_label_registry.json",
     )
 
     return Path(artifact_metadata.metadata_path)
