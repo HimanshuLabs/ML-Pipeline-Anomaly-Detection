@@ -291,7 +291,20 @@ def prepare_feature_matrix(
             + details
         )
 
-    return matrix.astype(float)
+    matrix = matrix.astype(float)
+    non_finite_counts = (~np.isfinite(matrix)).sum()
+    columns_with_non_finite = non_finite_counts[non_finite_counts > 0]
+    if not columns_with_non_finite.empty:
+        details = ", ".join(
+            f"{column}={count}"
+            for column, count in columns_with_non_finite.items()
+        )
+        raise BatchInferenceError(
+            "Input batch contains non-finite (inf/-inf) model feature values: "
+            + details
+        )
+
+    return matrix
 
 
 def _get_entity_id(
