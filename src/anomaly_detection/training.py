@@ -10,8 +10,10 @@ later; this checkpoint proves the first reproducible training artifact.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
+import platform
 import re
 import shutil
 from dataclasses import asdict, dataclass, is_dataclass
@@ -20,12 +22,15 @@ from pathlib import Path
 from typing import Any
 
 import joblib
+import numpy
 import pandas as pd
+import sklearn
 import yaml
 from sklearn.ensemble import IsolationForest
 
 from anomaly_detection.evaluation import build_baseline_stats_payload
 from anomaly_detection.feature_validation import get_model_feature_matrix
+from anomaly_detection.registry import DEFAULT_REGISTRY_PATH, load_model_registry
 from anomaly_detection.training_snapshot import (
     load_training_snapshot_metadata,
     read_training_snapshot,
@@ -75,10 +80,70 @@ class ModelArtifactMetadata:
     training_snapshot_metadata: dict[str, Any]
     model_parameters: dict[str, Any]
     baseline_anomaly_rate: float
+    runtime_versions: dict[str, str]
+    feature_set_fingerprint: str
 
     def to_dict(self) -> dict[str, Any]:
         """Return JSON-safe metadata."""
         return asdict(self)
+
+
+def runtime_versions() -> dict[str, str]:
+    """Library versions of the running environment, recorded with each trained model."""
+
+    return {
+        "python": platform.python_version(),
+        "scikit-learn": sklearn.__version__,
+        "numpy": numpy.__version__,
+        "pandas": pd.__version__,
+        "joblib": joblib.__version__,
+    }
+
+
+def feature_set_fingerprint(feature_names: list[str]) -> str:
+    """sha256 of the ordered feature names, UTF-8, joined with newlines."""
+
+    return hashlib.sha256("\n".join(feature_names).encode("utf-8")).hexdigest()
+
+
+def ensure_feature_schema_version_is_unambiguous(
+    *,
+    feature_schema_version: str,
+    feature_names: list[str],
+    registry_path: str | Path = DEFAULT_REGISTRY_PATH,
+) -> None:
+    """Refuse a schema label that the registry already uses for a different feature list.
+
+    The comparison is on the ordered feature_names, so the same names in a
+    different order also count as a different feature set.
+    """
+
+    for entry in load_model_registry(registry_path):
+        if entry.feature_schema_version != feature_schema_version:
+            continue
+
+        metadata_path = Path(entry.metadata_path)
+        if not metadata_path.is_absolute():
+            metadata_path = PROJECT_ROOT / metadata_path
+
+        try:
+            registered_names = json.loads(metadata_path.read_text(encoding="utf-8")).get(
+                "feature_names"
+            )
+        except (OSError, json.JSONDecodeError) as exc:
+            raise TrainingError(
+                f"Cannot verify feature_schema_version {feature_schema_version!r}: "
+                f"metadata for {entry.model_name} {entry.model_version} is unreadable "
+                f"({entry.metadata_path})."
+            ) from exc
+
+        if registered_names != feature_names:
+            raise TrainingError(
+                f"feature_schema_version {feature_schema_version!r} is already used by "
+                f"{entry.model_name} {entry.model_version} for a different ordered "
+                "feature_names list. Configure a new feature_schema_version for this "
+                "feature set."
+            )
 
 
 def _utc_now() -> datetime:
@@ -403,6 +468,7 @@ def train_isolation_forest_from_snapshot(
     artifact_root_override: str | Path | None = None,
     overwrite: bool = False,
     training_started_at_utc: datetime | None = None,
+    registry_path: str | Path = DEFAULT_REGISTRY_PATH,
 ) -> ModelArtifactMetadata:
     """Train Isolation Forest from a frozen training snapshot.
 
@@ -414,6 +480,8 @@ def train_isolation_forest_from_snapshot(
         artifact_root_override: Optional artifact root for tests/local overrides.
         overwrite: Whether to replace an existing artifact directory.
         training_started_at_utc: Optional fixed timestamp for deterministic tests.
+        registry_path: Registry checked so a feature_schema_version label is never
+            reused for a different ordered feature list.
 
     Returns:
         ModelArtifactMetadata describing written artifacts.
@@ -448,6 +516,14 @@ def train_isolation_forest_from_snapshot(
     )
     if feature_matrix.empty:
         raise TrainingError("Validated model feature matrix must not be empty.")
+
+    feature_names = [str(column) for column in feature_matrix.columns]
+    ensure_feature_schema_version_is_unambiguous(
+        feature_schema_version=config.feature_schema_version,
+        feature_names=feature_names,
+        registry_path=registry_path,
+    )
+    fingerprint = feature_set_fingerprint(feature_names)
 
     model_root = config.artifact_root / config.model_name
     resolved_model_version = model_version or resolve_next_model_version(model_root)
@@ -490,13 +566,15 @@ def train_isolation_forest_from_snapshot(
 
     joblib.dump(model, model_path)
 
+    # Describe where the features actually came from: the training snapshot.
     feature_schema_payload = {
         "feature_schema_version": config.feature_schema_version,
-        "feature_names": list(feature_matrix.columns),
-        "feature_count": len(feature_matrix.columns),
+        "feature_names": feature_names,
+        "feature_count": len(feature_names),
+        "feature_set_fingerprint": fingerprint,
         "entity_key": "entity_id",
-        "timestamp_column": "feature_timestamp",
-        "source": "configs/model_config.yaml",
+        "timestamp_column": snapshot_metadata.get("timestamp_column"),
+        "source": snapshot_metadata.get("snapshot_id"),
     }
 
     artifact_metadata = ModelArtifactMetadata(
@@ -509,7 +587,7 @@ def train_isolation_forest_from_snapshot(
         feature_schema_path=str(feature_schema_path),
         baseline_stats_path=str(baseline_stats_path),
         feature_schema_version=config.feature_schema_version,
-        feature_names=list(feature_matrix.columns),
+        feature_names=feature_names,
         row_count=int(len(feature_matrix)),
         training_started_at_utc=_isoformat_utc(started_at),
         training_finished_at_utc=_isoformat_utc(finished_at),
@@ -521,6 +599,8 @@ def train_isolation_forest_from_snapshot(
             "random_state": config.random_state,
         },
         baseline_anomaly_rate=float(baseline_stats["baseline_anomaly_rate"]),
+        runtime_versions=runtime_versions(),
+        feature_set_fingerprint=fingerprint,
     )
 
     _write_json(feature_schema_path, feature_schema_payload)
