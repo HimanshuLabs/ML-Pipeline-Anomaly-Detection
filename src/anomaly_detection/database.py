@@ -11,6 +11,10 @@ CLI:
 from __future__ import annotations
 
 import argparse
+import base64
+import functools
+import hashlib
+import hmac
 import json
 import logging
 import os
@@ -40,7 +44,17 @@ SCHEMA_FILES = (
     "create_model_registry_tables.sql",
     "create_prediction_tables.sql",
     "create_monitoring_tables.sql",
+    "create_integration_views.sql",
 )
+INTEGRATION_SCHEMA = "integration"
+INTEGRATION_VIEWS = (
+    "integration.model_metadata",
+    "integration.prediction_outputs",
+    "integration.drift_validation_rollback",
+)
+PROJECT5_READER_ROLE = "project5_reader"
+ENV_P5_READER_PASSWORD = "PROJECT4_P5_READER_PASSWORD"
+SCRAM_ITERATIONS = 4096
 VALIDATION_QUERIES_FILE = "validation_queries.sql"
 PROJECT4_SCHEMAS = ("ml", "monitoring", "audit")
 
@@ -145,14 +159,121 @@ def get_engine(settings: DatabaseSettings | None = None) -> Engine:
     return create_engine(resolved_settings.url(), pool_pre_ping=True, hide_parameters=True)
 
 
+@functools.lru_cache(maxsize=4)
+def _shared_engine(settings: DatabaseSettings) -> Engine:
+    return create_engine(settings.url(), pool_pre_ping=True, hide_parameters=True)
+
+
+def get_shared_engine() -> Engine:
+    """A pooled engine reused across calls (per-request writes); raises when unconfigured."""
+
+    settings = load_settings()
+    if settings is None:
+        raise DatabaseConfigError(
+            "Project 4 database is not configured; set " + ", ".join(REQUIRED_ENV_VARS)
+        )
+    return _shared_engine(settings)
+
+
+def _insert_rows(table: str, rows: Sequence[Mapping[str, Any]]) -> int:
+    """Insert rows into one table in a single transaction; returns the row count."""
+
+    if not rows:
+        return 0
+    with get_shared_engine().begin() as connection:
+        for row in rows:
+            insert_row(connection, table, row)
+    return len(rows)
+
+
+def insert_online_predictions(records: Sequence[Any]) -> int:
+    """ml.online_predictions rows for one API request, in one transaction."""
+
+    return _insert_rows("ml.online_predictions", [online_prediction_row(r) for r in records])
+
+
+def insert_batch_predictions(records: Sequence[Any]) -> int:
+    """ml.batch_predictions rows for one batch run, in one transaction."""
+
+    return _insert_rows("ml.batch_predictions", [batch_prediction_row(r) for r in records])
+
+
+def insert_drift_events(events: Sequence[Any]) -> int:
+    """monitoring.drift_events rows, in one transaction."""
+
+    return _insert_rows("monitoring.drift_events", [drift_event_row(e) for e in events])
+
+
+def insert_alert_events(events: Sequence[Any]) -> int:
+    """monitoring.alert_events rows, in one transaction."""
+
+    return _insert_rows("monitoring.alert_events", [alert_event_row(e) for e in events])
+
+
 def schema_file_paths() -> list[Path]:
     """The DDL files in the order they must run."""
 
     return [SQL_DIR / name for name in SCHEMA_FILES]
 
 
-def apply_schema(engine: Engine) -> list[str]:
-    """Run every DDL file in order inside one transaction; safe to run repeatedly."""
+def scram_sha256_verifier(password: str, *, salt: bytes | None = None) -> str:
+    """PostgreSQL SCRAM-SHA-256 verifier, so the plain password never reaches the server."""
+
+    salt = salt if salt is not None else os.urandom(16)
+    salted = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, SCRAM_ITERATIONS)
+    client_key = hmac.new(salted, b"Client Key", hashlib.sha256).digest()
+    stored_key = hashlib.sha256(client_key).digest()
+    server_key = hmac.new(salted, b"Server Key", hashlib.sha256).digest()
+
+    def _b64(value: bytes) -> str:
+        return base64.b64encode(value).decode("ascii")
+
+    return (
+        f"SCRAM-SHA-256${SCRAM_ITERATIONS}:{_b64(salt)}"
+        f"${_b64(stored_key)}:{_b64(server_key)}"
+    )
+
+
+def configure_project5_reader(connection: Connection, password: str | None) -> str:
+    """Create/update the read-only role Project 5 uses: SELECT on integration views only.
+
+    With a password the role can log in (stored as a SCRAM verifier); without one
+    it is NOLOGIN. Returns a short status line that never contains the password.
+    """
+
+    role = PROJECT5_READER_ROLE
+    connection.exec_driver_sql(
+        "DO $$ BEGIN "
+        f"IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{role}') THEN "
+        f"CREATE ROLE {role} NOLOGIN; END IF; END $$"
+    )
+    if password:
+        connection.exec_driver_sql(
+            f"ALTER ROLE {role} WITH LOGIN PASSWORD %(verifier)s",
+            {"verifier": scram_sha256_verifier(password)},
+        )
+        status = f"role {role}: LOGIN (password from {ENV_P5_READER_PASSWORD})"
+    else:
+        connection.exec_driver_sql(f"ALTER ROLE {role} WITH NOLOGIN")
+        status = f"role {role}: NOLOGIN ({ENV_P5_READER_PASSWORD} is not set)"
+
+    for schema in PROJECT4_SCHEMAS:
+        connection.exec_driver_sql(f"REVOKE ALL ON ALL TABLES IN SCHEMA {schema} FROM {role}")
+        connection.exec_driver_sql(f"REVOKE ALL ON SCHEMA {schema} FROM {role}")
+    connection.exec_driver_sql(f"GRANT USAGE ON SCHEMA {INTEGRATION_SCHEMA} TO {role}")
+    for view in INTEGRATION_VIEWS:
+        connection.exec_driver_sql(f"GRANT SELECT ON {view} TO {role}")
+    return status
+
+
+def apply_schema(engine: Engine, *, reader_password: str | None = None) -> list[str]:
+    """Run every DDL file in order and configure project5_reader, in one transaction.
+
+    Safe to run repeatedly. reader_password defaults to PROJECT4_P5_READER_PASSWORD.
+    """
+
+    if reader_password is None:
+        reader_password = os.environ.get(ENV_P5_READER_PASSWORD) or None
 
     applied: list[str] = []
     with engine.begin() as connection:
@@ -160,11 +281,12 @@ def apply_schema(engine: Engine) -> list[str]:
             connection.exec_driver_sql(path.read_text(encoding="utf-8"))
             applied.append(path.name)
             LOGGER.info("Applied %s", path.name)
+        applied.append(configure_project5_reader(connection, reader_password))
     return applied
 
 
 def check(engine: Engine) -> dict[str, Any]:
-    """Connect and report the server version and the Project 4 tables."""
+    """Connect and report the server version, the Project 4 tables, and integration views."""
 
     with engine.connect() as connection:
         server_version = connection.execute(text("SHOW server_version")).scalar_one()
@@ -178,7 +300,22 @@ def check(engine: Engine) -> dict[str, Any]:
                 {"schemas": list(PROJECT4_SCHEMAS)},
             )
         ]
-    return {"connection": "ok", "server_version": server_version, "tables": tables}
+        views = [
+            f"{schema}.{view}"
+            for schema, view in connection.execute(
+                text(
+                    "SELECT table_schema, table_name FROM information_schema.views "
+                    "WHERE table_schema = :schema ORDER BY table_name"
+                ),
+                {"schema": INTEGRATION_SCHEMA},
+            )
+        ]
+    return {
+        "connection": "ok",
+        "server_version": server_version,
+        "tables": tables,
+        "views": views,
+    }
 
 
 def validation_statements() -> list[str]:
@@ -630,7 +767,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "apply-schema":
             for name in apply_schema(engine):
-                print(f"applied {name}")
+                print(name if name.startswith("role ") else f"applied {name}")
             return 0
 
         if args.command == "sync-from-files":
@@ -643,6 +780,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"server_version {report['server_version']}")
         for table in report["tables"]:
             print(f"table {table}")
+        for view in report["views"]:
+            print(f"view {view}")
         return 0
     except SQLAlchemyError as exc:
         detail = getattr(exc, "orig", None) or exc

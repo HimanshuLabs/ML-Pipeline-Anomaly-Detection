@@ -526,8 +526,33 @@ def run_batch_inference(
 
     if persist_jsonl:
         write_predictions_jsonl(predictions, output_path)
+        _write_batch_predictions_to_database(predictions, output_path)
 
     return predictions
+
+
+def _write_batch_predictions_to_database(
+    predictions: list[BatchPredictionRecord],
+    jsonl_path: Path,
+) -> None:
+    """In database mode, store one run's records in ml.batch_predictions in one transaction.
+
+    Runs after the JSONL write; a failure fails the run and names the sink that failed.
+    """
+
+    from anomaly_detection import database
+
+    if not predictions or not database.is_configured():
+        return
+
+    try:
+        database.insert_batch_predictions(predictions)
+    except Exception as exc:  # noqa: BLE001 - report which sink failed
+        raise BatchInferenceError(
+            f"Batch run {predictions[0].batch_run_id}: {len(predictions)} predictions were "
+            f"written to the JSONL sink ({jsonl_path}) but the postgres sink "
+            f"(ml.batch_predictions) failed: {type(exc).__name__}"
+        ) from exc
 
 
 def _build_parser() -> argparse.ArgumentParser:

@@ -106,6 +106,7 @@ def isolate_repo_state(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path_factory: pytest.TempPathFactory,
     caplog: pytest.LogCaptureFixture,
+    request: pytest.FixtureRequest,
 ) -> Iterator[Path]:
     """Redirect all mutable repo paths to a per-test mirror and guard the real ones."""
 
@@ -140,6 +141,12 @@ def isolate_repo_state(
     # Admin endpoints are disabled unless a test opts in through admin_headers.
     monkeypatch.delenv("ADMIN_TOKEN", raising=False)
 
+    # Each test starts outside any persistence failure burst, so the
+    # "Failed to persist" guard below always sees the first failure.
+    import api.main
+
+    monkeypatch.setattr(api.main, "PERSIST_FAILING", {"jsonl": False, "postgres": False})
+
     # File-backed registry and pointer unless a postgres test opts in explicitly;
     # this also keeps the API's pointer poller from ever starting in tests.
     for name in (
@@ -168,7 +175,7 @@ def isolate_repo_state(
         for record in caplog.records
         if record.name == "api.main" and "Failed to persist" in record.getMessage()
     ]
-    if persist_failures:
+    if persist_failures and request.node.get_closest_marker("expect_persist_failure") is None:
         pytest.fail(f"API failed to persist prediction evidence: {persist_failures}")
 
 

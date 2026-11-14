@@ -100,6 +100,7 @@ def test_schema_files_run_in_dependency_order() -> None:
         "create_model_registry_tables.sql",
         "create_prediction_tables.sql",
         "create_monitoring_tables.sql",
+        "create_integration_views.sql",
     )
     assert all(path.exists() for path in database.schema_file_paths())
 
@@ -442,7 +443,7 @@ def test_apply_schema_runs_files_in_order_in_one_transaction(
     transactions: list[int] = []
 
     class _FakeConnection:
-        def exec_driver_sql(self, sql_text: str) -> None:
+        def exec_driver_sql(self, sql_text: str, parameters=None) -> None:
             executed.append(sql_text)
 
     class _FakeEngine:
@@ -451,11 +452,14 @@ def test_apply_schema_runs_files_in_order_in_one_transaction(
             transactions.append(1)
             yield _FakeConnection()
 
-    applied = database.apply_schema(_FakeEngine())
+    applied = database.apply_schema(_FakeEngine(), reader_password="")
 
-    assert applied == list(database.SCHEMA_FILES)
+    assert applied[: len(database.SCHEMA_FILES)] == list(database.SCHEMA_FILES)
+    assert applied[len(database.SCHEMA_FILES):] == [
+        "role project5_reader: NOLOGIN (PROJECT4_P5_READER_PASSWORD is not set)"
+    ]
     assert len(transactions) == 1
-    assert executed == [
+    assert executed[: len(database.SCHEMA_FILES)] == [
         path.read_text(encoding="utf-8") for path in database.schema_file_paths()
     ]
 
@@ -1069,3 +1073,280 @@ def test_writes_refuse_an_empty_real_database_and_change_nothing(
         for table in sorted(database.INSERTABLE_TABLES):
             assert connection.execute(text(f"SELECT COUNT(*) FROM {table}")).scalar_one() == 0
     assert _mirror_files(isolate_repo_state) == files_before
+
+
+# --- stage 8b: integration views, project5_reader, persistence ------------------------
+
+P5_METADATA_COLUMNS = (
+    "source_project",
+    "source_system",
+    "source_entity",
+    "source_record_id",
+    "event_timestamp",
+    "schema_version",
+    "domain_tag",
+)
+VIEW_DOMAIN_TAGS = {
+    "integration.model_metadata": "ml_model_registry",
+    "integration.prediction_outputs": "anomaly_predictions",
+    "integration.drift_validation_rollback": "ml_observability",
+}
+
+
+def test_integration_views_expose_project5_metadata_columns() -> None:
+    sql_text = (database.SQL_DIR / "create_integration_views.sql").read_text(encoding="utf-8")
+
+    assert database.SCHEMA_FILES[-1] == "create_integration_views.sql"
+    for view, domain_tag in VIEW_DOMAIN_TAGS.items():
+        body = sql_text.split(f"CREATE OR REPLACE VIEW {view} AS", 1)[1].split(";", 1)[0]
+        first_select = body.split("UNION ALL", 1)[0]
+        for column in P5_METADATA_COLUMNS:
+            assert f"AS {column}" in first_select, f"{view}.{column}"
+        assert f"'{domain_tag}'::text AS domain_tag" in first_select
+        assert f"'{view.split('.')[1]}'::text AS source_entity" in first_select
+        assert "artifact_path" not in body
+
+
+def test_scram_verifier_is_postgres_format_and_hides_the_password() -> None:
+    verifier = database.scram_sha256_verifier(SECRET_PASSWORD, salt=b"0123456789abcdef")
+
+    assert re.fullmatch(r"SCRAM-SHA-256\$4096:[A-Za-z0-9+/=]+\$[A-Za-z0-9+/=]+:[A-Za-z0-9+/=]+",
+                        verifier)
+    assert SECRET_PASSWORD not in verifier
+    assert verifier == database.scram_sha256_verifier(SECRET_PASSWORD, salt=b"0123456789abcdef")
+    assert verifier != database.scram_sha256_verifier("other", salt=b"0123456789abcdef")
+
+
+def test_reader_role_setup_never_sends_or_returns_the_password() -> None:
+    statements: list[tuple[str, object]] = []
+
+    class _FakeConnection:
+        def exec_driver_sql(self, sql_text: str, parameters=None) -> None:
+            statements.append((sql_text, parameters))
+
+    status = database.configure_project5_reader(_FakeConnection(), SECRET_PASSWORD)
+
+    assert SECRET_PASSWORD not in status and "LOGIN" in status
+    for sql_text, parameters in statements:
+        assert SECRET_PASSWORD not in sql_text
+        assert SECRET_PASSWORD not in repr(parameters)
+    texts = [sql_text for sql_text, _ in statements]
+    assert "GRANT USAGE ON SCHEMA integration TO project5_reader" in texts
+    for view in database.INTEGRATION_VIEWS:
+        assert f"GRANT SELECT ON {view} TO project5_reader" in texts
+    assert not any(text.startswith("GRANT") and " ml." in text for text in texts)
+
+
+def _v002_feature_names() -> list[str]:
+    metadata_path = (
+        REPO_ROOT / "artifacts" / "models" / "isolation_forest" / "model_version=v002"
+    ) / "metadata.json"
+    return json.loads(metadata_path.read_text(encoding="utf-8"))["feature_names"]
+
+
+def _count(engine, sql: str, params: dict | None = None) -> int:
+    from sqlalchemy import text
+
+    with engine.connect() as connection:
+        return connection.execute(text(sql), params or {}).scalar_one()
+
+
+@pytest.mark.postgres
+def test_predict_and_predict_batch_write_online_rows_in_one_transaction(
+    initialized_database,
+) -> None:
+    from fastapi.testclient import TestClient
+
+    from api.main import app
+
+    payload = {name: 1.0 for name in _v002_feature_names()}
+    with TestClient(app) as client:
+        single = client.post("/predict", json={"feature_payload": payload})
+        batch = client.post("/predict/batch", json={"feature_payloads": [payload] * 3})
+
+    assert single.status_code == 200 and batch.status_code == 200
+    assert _count(
+        initialized_database,
+        "SELECT COUNT(*) FROM ml.online_predictions WHERE prediction_id = :id",
+        {"id": single.json()["prediction_id"]},
+    ) == 1
+    batch_ids = [prediction["prediction_id"] for prediction in batch.json()["predictions"]]
+    assert _count(
+        initialized_database,
+        "SELECT COUNT(*) FROM ml.online_predictions WHERE prediction_id::text = ANY(:ids)",
+        {"ids": batch_ids},
+    ) == 3
+    assert _count(
+        initialized_database,
+        "SELECT COUNT(DISTINCT xmin::text) FROM ml.online_predictions "
+        "WHERE prediction_id::text = ANY(:ids)",
+        {"ids": batch_ids},
+    ) == 1
+
+
+@pytest.mark.postgres
+def test_batch_inference_run_writes_all_rows_in_one_transaction(
+    initialized_database,
+    tmp_path: Path,
+) -> None:
+    import pandas as pd
+
+    from anomaly_detection.batch_inference import run_batch_inference
+
+    feature_names = _v002_feature_names()
+    features = pd.DataFrame(
+        [{"entity_id": f"customer_{index}", **dict.fromkeys(feature_names, float(index))}
+         for index in range(4)]
+    )
+
+    predictions = run_batch_inference(features, output_path=tmp_path / "batch.jsonl")
+
+    assert _count(
+        initialized_database,
+        "SELECT COUNT(*) FROM ml.batch_predictions WHERE batch_run_id = :run",
+        {"run": predictions[0].batch_run_id},
+    ) == 4
+    assert _count(
+        initialized_database,
+        "SELECT COUNT(DISTINCT xmin::text) FROM ml.batch_predictions WHERE batch_run_id = :run",
+        {"run": predictions[0].batch_run_id},
+    ) == 1
+
+
+def _v002_drift_and_alert():
+    from dataclasses import replace
+
+    drift_event = replace(_sample_drift_event(), model_version="v002")
+    alert_event = replace(
+        _sample_alert_event(drift_event.drift_event_id), model_version="v002"
+    )
+    return drift_event, alert_event
+
+
+@pytest.mark.postgres
+def test_drift_and_alert_database_writers_insert_valid_rows(initialized_database) -> None:
+    from anomaly_detection.alerts import insert_alert_events_database
+    from anomaly_detection.drift import insert_drift_events_database
+
+    drift_event, alert_event = _v002_drift_and_alert()
+
+    assert insert_drift_events_database([drift_event]) == 1
+    assert insert_alert_events_database([alert_event]) == 1
+    assert _count(initialized_database, "SELECT COUNT(*) FROM monitoring.drift_events") == 1
+    assert _count(
+        initialized_database,
+        "SELECT COUNT(*) FROM monitoring.alert_events WHERE drift_event_id = :id",
+        {"id": drift_event.drift_event_id},
+    ) == 1
+
+
+@pytest.mark.postgres
+def test_integration_views_return_expected_rows_and_columns(
+    initialized_database,
+    tmp_path: Path,
+) -> None:
+    import pandas as pd
+    from sqlalchemy import text
+
+    from anomaly_detection.alerts import insert_alert_events_database
+    from anomaly_detection.batch_inference import run_batch_inference
+    from anomaly_detection.drift import insert_drift_events_database
+
+    feature_names = _v002_feature_names()
+    database.insert_online_predictions(
+        [
+            {
+                **_sample_online_prediction().__dict__,
+                "model_version": "v002",
+                "dataset_snapshot_id": "real_source_20260610T060738Z",
+            }
+        ]
+    )
+    run_batch_inference(
+        pd.DataFrame([{"entity_id": "customer_1", **dict.fromkeys(feature_names, 1.0)}]),
+        output_path=tmp_path / "batch.jsonl",
+    )
+    drift_event, alert_event = _v002_drift_and_alert()
+    insert_drift_events_database([drift_event])
+    insert_alert_events_database([alert_event])
+    with initialized_database.begin() as connection:
+        database.insert_row(
+            connection,
+            "audit.rollback_events",
+            database.rollback_event_row(_sample_rollback_event()),
+        )
+
+    with initialized_database.connect() as connection:
+        models = connection.execute(
+            text("SELECT * FROM integration.model_metadata ORDER BY model_version")
+        ).mappings().all()
+        predictions = connection.execute(
+            text("SELECT * FROM integration.prediction_outputs")
+        ).mappings().all()
+        events = connection.execute(
+            text("SELECT * FROM integration.drift_validation_rollback")
+        ).mappings().all()
+
+    for view, rows in (
+        ("integration.model_metadata", models),
+        ("integration.prediction_outputs", predictions),
+        ("integration.drift_validation_rollback", events),
+    ):
+        assert rows, view
+        for row in rows:
+            for column in P5_METADATA_COLUMNS:
+                assert row[column] is not None, f"{view}.{column}"
+            assert row["source_project"] == "project4"
+            assert row["source_system"] == "postgresql"
+            assert row["source_entity"] == view.split(".")[1]
+            assert row["domain_tag"] == VIEW_DOMAIN_TAGS[view]
+
+    assert [(row["model_version"], row["is_active"]) for row in models] == [
+        ("v001", False),
+        ("v002", True),
+    ]
+    assert sorted(row["prediction_source"] for row in predictions) == ["batch", "online"]
+    assert sorted(row["event_type"] for row in events) == ["alert", "drift", "rollback"]
+
+
+@pytest.mark.postgres
+def test_project5_reader_reads_views_only(
+    initialized_database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.engine import make_url
+    from sqlalchemy.exc import ProgrammingError
+
+    reader_password = "project5-reader-test-password"
+    applied = database.apply_schema(initialized_database, reader_password=reader_password)
+    assert applied[-1].startswith("role project5_reader: LOGIN")
+    assert reader_password not in " ".join(applied)
+
+    reader_url = make_url(os.environ["PROJECT4_TEST_DATABASE_URL"]).set(
+        username=database.PROJECT5_READER_ROLE, password=reader_password
+    )
+    reader_engine = create_engine(reader_url)
+    try:
+        with reader_engine.connect() as connection:
+            for view in database.INTEGRATION_VIEWS:
+                connection.execute(text(f"SELECT * FROM {view}")).fetchall()
+        with reader_engine.connect() as connection, pytest.raises(
+            ProgrammingError, match="permission denied"
+        ):
+            connection.execute(text("SELECT * FROM ml.model_registry")).fetchall()
+    finally:
+        reader_engine.dispose()
+        database.apply_schema(initialized_database, reader_password="")
+
+
+@pytest.mark.postgres
+def test_apply_schema_twice_with_reader_password_stays_idempotent(database_mode) -> None:
+    for _ in range(2):
+        applied = database.apply_schema(database_mode, reader_password="idempotent-test-pw")
+        assert applied[-1].startswith("role project5_reader: LOGIN")
+
+    report = database.check(database_mode)
+    assert set(report["tables"]) == set(database.INSERTABLE_TABLES)
+    assert report["views"] == sorted(database.INTEGRATION_VIEWS)
+    database.apply_schema(database_mode, reader_password="")
