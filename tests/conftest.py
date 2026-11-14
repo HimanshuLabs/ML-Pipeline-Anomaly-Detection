@@ -140,6 +140,18 @@ def isolate_repo_state(
     # Admin endpoints are disabled unless a test opts in through admin_headers.
     monkeypatch.delenv("ADMIN_TOKEN", raising=False)
 
+    # File-backed registry and pointer unless a postgres test opts in explicitly;
+    # this also keeps the API's pointer poller from ever starting in tests.
+    for name in (
+        "PROJECT4_POSTGRES_HOST",
+        "PROJECT4_POSTGRES_PORT",
+        "PROJECT4_POSTGRES_DB",
+        "PROJECT4_POSTGRES_USER",
+        "PROJECT4_POSTGRES_PASSWORD",
+        "PROJECT4_POINTER_POLL_SECONDS",
+    ):
+        monkeypatch.delenv(name, raising=False)
+
     before = _snapshot_real_state()
 
     yield mirror_root

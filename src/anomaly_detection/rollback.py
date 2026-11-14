@@ -14,6 +14,7 @@ can be tested without requiring a live PostgreSQL dependency.
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
@@ -29,13 +30,24 @@ from anomaly_detection.registry import (
     ModelRegistryEntry,
     ModelStatus,
     RegistryError,
+    RegistryState,
+    RegistryStateSnapshot,
+    RegistryStorageError,
+    commit_registry_change,
+    database_enabled,
+    ensure_database_initialized,
     load_model_registry,
+    load_registry_state,
     load_verified_feature_names,
+    materialize_active_pointer,
+    restore_database_change,
     restore_registry_state,
     save_model_registry,
     snapshot_registry_state,
     write_active_model_pointer,
 )
+
+LOGGER = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -345,18 +357,31 @@ def rollback_active_model(
     registry_path = Path(registry_path)
     active_model_path = Path(active_model_path)
 
-    current_active_model = _read_yaml(active_model_path)
+    state: RegistryState | None = None
+    if database_enabled():
+        state = load_registry_state(
+            registry_path=registry_path,
+            active_model_path=active_model_path,
+        )
+        if not dry_run:
+            ensure_database_initialized(state)
+        current_model_version = state.active_model_version
+        model_name = state.model_name
+        if not current_model_version:
+            raise RollbackError(f"no active model pointer for {model_name} in the database")
+        entries = state.entries
+    else:
+        current_active_model = _read_yaml(active_model_path)
+        current_model_version = current_active_model.get("active_model_version")
+        model_name = current_active_model.get("model_name")
 
-    current_model_version = current_active_model.get("active_model_version")
-    model_name = current_active_model.get("model_name")
+        if not current_model_version:
+            raise RollbackError("active model pointer missing active_model_version")
 
-    if not current_model_version:
-        raise RollbackError("active model pointer missing active_model_version")
+        if not model_name:
+            raise RollbackError("active model pointer missing model_name")
 
-    if not model_name:
-        raise RollbackError("active model pointer missing model_name")
-
-    entries = load_model_registry(registry_path)
+        entries = load_model_registry(registry_path)
 
     rollback_target = select_previous_stable_model(
         entries,
@@ -397,6 +422,20 @@ def rollback_active_model(
 
     snapshot = snapshot_registry_state(registry_path, active_model_path)
 
+    if state is not None:
+        return _apply_with_database(
+            state=state,
+            event=event,
+            updated_entries=updated_entries,
+            target_entry=target_entry,
+            pointer_notes=pointer_notes,
+            file_snapshot=snapshot,
+            registry_path=registry_path,
+            active_model_path=active_model_path,
+            rollback_events_path=rollback_events_path,
+            verify_service=verify_service,
+        )
+
     save_model_registry(updated_entries, registry_path)
 
     try:
@@ -423,5 +462,72 @@ def rollback_active_model(
             ) from exc
 
     append_rollback_event_jsonl(event, rollback_events_path)
+
+    return event
+
+
+def _apply_with_database(
+    *,
+    state: RegistryState,
+    event: RollbackEvent,
+    updated_entries: list[ModelRegistryEntry],
+    target_entry: ModelRegistryEntry,
+    pointer_notes: str,
+    file_snapshot: RegistryStateSnapshot,
+    registry_path: Path,
+    active_model_path: Path,
+    rollback_events_path: Path,
+    verify_service: Callable[[Path], object] | None,
+) -> RollbackEvent:
+    """Commit registry, pointer, and the rollback event in one database transaction.
+
+    The file mirror is written after the commit. If the committed pointer then
+    fails to load, a new transaction restores the registry rows and the pointer,
+    marks the event 'failed', and the files are restored from their snapshot.
+    """
+
+    from anomaly_detection.database import mark_rollback_event_failed, rollback_event_row
+
+    try:
+        commit = commit_registry_change(
+            state=state,
+            updated_entries=updated_entries,
+            registry_path=registry_path,
+            active_model_path=active_model_path,
+            pointer_entry=target_entry,
+            notes=pointer_notes,
+            updated_by=event.triggered_by,
+            extra_rows=[("audit.rollback_events", rollback_event_row(event))],
+        )
+    except RegistryStorageError as exc:
+        raise RollbackServingError(
+            f"rollback to {event.to_model_version} could not be committed: {exc}"
+        ) from exc
+
+    if verify_service is not None:
+        try:
+            with TemporaryDirectory(prefix="project4_rollback_committed_") as committed_dir:
+                committed_pointer_path = Path(committed_dir) / "active_model.yaml"
+                materialize_active_pointer(committed_pointer_path, model_name=event.model_name)
+                verify_service(committed_pointer_path)
+        except Exception as exc:
+            if commit is not None:
+                restore_database_change(
+                    commit,
+                    updated_by=event.triggered_by,
+                    on_connection=lambda connection: mark_rollback_event_failed(
+                        connection, event.rollback_id
+                    ),
+                )
+            restore_registry_state(file_snapshot)
+            raise RollbackServingError(
+                f"rollback to {event.to_model_version} was committed but the committed "
+                f"pointer failed to load; registry and pointer restored: {exc}"
+            ) from exc
+
+    try:
+        append_rollback_event_jsonl(event, rollback_events_path)
+    except Exception:  # noqa: BLE001 - the database already holds the event
+        LOGGER.error("Rollback event committed to the database; JSONL mirror write failed")
 
     return event

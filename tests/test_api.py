@@ -440,6 +440,7 @@ def test_health_returns_503_with_same_fields_when_no_model_is_loaded(
         "service": "project4-online-anomaly-inference",
         "active_model_version": None,
         "model_loaded": False,
+        "pointer_source": "file",
     }
 
 
@@ -781,3 +782,158 @@ def test_non_admin_endpoints_need_no_token(
     predict_response = client.post("/predict", json={"feature_payload": valid_feature_payload})
     assert predict_response.status_code == 200
     assert client.get("/metrics").status_code == 200
+
+
+# --- shared pointer: pointer_source and the poller (no database needed) ---------------
+
+
+def test_file_mode_reports_pointer_source_file_and_starts_no_poller(
+    client: TestClient,
+) -> None:
+    assert client.get("/health").json()["pointer_source"] == "file"
+    assert client.get("/model/active").json()["pointer_source"] == "file"
+    assert state.poller is None
+
+
+class _FakeInfo:
+    def __init__(self, model_version: str) -> None:
+        self.model_name = "isolation_forest"
+        self.model_version = model_version
+
+
+class _FakeService:
+    def __init__(self, model_version: str) -> None:
+        self._info = _FakeInfo(model_version)
+
+    def active_model_info(self) -> _FakeInfo:
+        return self._info
+
+
+def _holder(model_version: str, pointer_version: int):
+    from api.main import AppState, swap_inference_service
+
+    holder = AppState()
+    swap_inference_service(
+        holder,
+        _FakeService(model_version),
+        pointer_version=pointer_version,
+        pointer_source="postgres",
+    )
+    return holder
+
+
+def _metric_value(name: str, labels: dict[str, str] | None = None) -> float:
+    from prometheus_client import REGISTRY
+
+    return REGISTRY.get_sample_value(name, labels or {}) or 0.0
+
+
+def test_poller_swaps_in_the_new_model_when_pointer_version_changes() -> None:
+    from api.main import PointerPoller
+
+    holder = _holder("v101", pointer_version=1)
+    loads: list[int] = []
+
+    def _load():
+        loads.append(1)
+        return _FakeService("v102"), 2
+
+    poller = PointerPoller(
+        holder, interval_seconds=30, read_version=lambda: 2, load_service=_load
+    )
+    successes_before = _metric_value("model_reload_total", {"result": "success"})
+
+    assert poller.poll_once() is True
+    assert holder.inference_service.active_model_info().model_version == "v102"
+    assert holder.pointer_version == 2
+    assert _metric_value("model_reload_total", {"result": "success"}) == successes_before + 1
+
+    assert poller.poll_once() is False
+    assert loads == [1]
+
+
+def test_poller_keeps_the_old_model_when_the_new_one_fails_to_load(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+
+    from api.main import PointerPoller
+
+    caplog.set_level(logging.ERROR, logger="api.main")
+    holder = _holder("v101", pointer_version=1)
+
+    def _broken_load():
+        raise RuntimeError("artifact missing")
+
+    poller = PointerPoller(
+        holder, interval_seconds=30, read_version=lambda: 2, load_service=_broken_load
+    )
+    failures_before = _metric_value("model_reload_total", {"result": "failed"})
+
+    assert poller.poll_once() is False
+    assert poller.poll_once() is False
+
+    assert holder.inference_service.active_model_info().model_version == "v101"
+    assert holder.pointer_version == 1
+    assert _metric_value("model_reload_total", {"result": "failed"}) == failures_before + 2
+    errors = [record for record in caplog.records if record.levelno == logging.ERROR]
+    assert len(errors) == 1
+
+
+def test_poller_keeps_serving_through_a_database_outage(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+
+    from api.main import PointerPoller
+
+    caplog.set_level(logging.INFO, logger="api.main")
+    holder = _holder("v101", pointer_version=1)
+    database_up = {"value": False}
+
+    def _read_version():
+        if not database_up["value"]:
+            raise ConnectionError("database unreachable")
+        return 1
+
+    poller = PointerPoller(
+        holder,
+        interval_seconds=30,
+        read_version=_read_version,
+        load_service=lambda: pytest.fail("must not reload during an outage"),
+    )
+    poll_failures_before = _metric_value("active_pointer_poll_failures_total")
+
+    for _ in range(3):
+        assert poller.poll_once() is False
+    database_up["value"] = True
+    assert poller.poll_once() is False
+
+    warnings = [record for record in caplog.records if record.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert any("reachable again" in record.getMessage() for record in caplog.records)
+    assert _metric_value("active_pointer_poll_failures_total") == poll_failures_before + 3
+    assert holder.inference_service.active_model_info().model_version == "v101"
+
+
+def test_poller_thread_starts_and_stops() -> None:
+    import time as time_module
+
+    from api.main import PointerPoller
+
+    holder = _holder("v101", pointer_version=1)
+    poller = PointerPoller(
+        holder,
+        interval_seconds=0.01,
+        read_version=lambda: 2,
+        load_service=lambda: (_FakeService("v102"), 2),
+    )
+
+    poller.start()
+    deadline = time_module.monotonic() + 5
+    while holder.pointer_version != 2 and time_module.monotonic() < deadline:
+        time_module.sleep(0.01)
+    poller.stop()
+
+    assert holder.inference_service.active_model_info().model_version == "v102"
+    assert poller._thread is None

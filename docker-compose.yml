@@ -10,6 +10,13 @@ services:
       PYTHONPATH: /app/src
       PYTHONUNBUFFERED: "1"
       ADMIN_TOKEN: ${PROJECT4_ADMIN_TOKEN:-}
+      # Shared registry/pointer in anomaly-postgres; with an empty password the API
+      # stays on the file pointer.
+      PROJECT4_POSTGRES_HOST: anomaly-postgres
+      PROJECT4_POSTGRES_PORT: "5432"
+      PROJECT4_POSTGRES_DB: project4_ml
+      PROJECT4_POSTGRES_USER: manshu
+      PROJECT4_POSTGRES_PASSWORD: ${PROJECT4_POSTGRES_PASSWORD:-}
     volumes:
       - ./logs:/app/logs
 
