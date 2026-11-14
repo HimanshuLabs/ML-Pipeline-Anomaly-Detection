@@ -4,18 +4,21 @@ This module is intentionally local-first for the portfolio build. PostgreSQL
 tables already exist for the production metadata shape, but this checkpoint
 uses JSON files so model versioning, promotion, and active-model pointers work
 without a database dependency.
+
+There is one stored registry schema (ModelRegistryEntry), one function that
+writes the registry file (save_model_registry), and one function that writes
+the active model pointer (write_active_model_pointer).
 """
 
 from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 import yaml
 
@@ -25,15 +28,35 @@ DEFAULT_REGISTRY_PATH = (
     PROJECT_ROOT / "artifacts" / "models" / "_registry" / "model_registry.json"
 )
 DEFAULT_ACTIVE_MODEL_PATH = PROJECT_ROOT / "configs" / "active_model.yaml"
+DEFAULT_MODEL_CONFIG_PATH = PROJECT_ROOT / "configs" / "model_config.yaml"
 
-VALID_MODEL_STATUSES = {
-    "candidate",
-    "staging",
-    "production",
-    "archived",
-    "rolled_back",
-    "failed_validation",
-}
+
+class ModelStatus(StrEnum):
+    """Supported lifecycle statuses for registered model versions."""
+
+    CANDIDATE = "candidate"
+    STAGING = "staging"
+    PRODUCTION = "production"
+    ARCHIVED = "archived"
+    ROLLED_BACK = "rolled_back"
+    RETIRED = "retired"
+
+
+VALID_MODEL_STATUSES = {status.value for status in ModelStatus}
+
+# Statuses a version may be created with; anything else goes through promote_model.
+REGISTRATION_STATUSES = {ModelStatus.CANDIDATE.value, ModelStatus.STAGING.value}
+
+# Registry metric fields that register_model() accepts through its metrics dict.
+REGISTRY_METRIC_FIELDS = (
+    "baseline_anomaly_rate",
+    "baseline_precision_proxy",
+    "baseline_recall_proxy",
+    "baseline_f1_proxy",
+    "latency_p50_ms",
+    "latency_p95_ms",
+    "threshold_used",
+)
 
 
 class RegistryError(ValueError):
@@ -72,9 +95,20 @@ class ModelRegistryEntry:
     created_at_utc: str
     notes: str | None
 
+    @property
+    def dataset_snapshot_id(self) -> str | None:
+        """Snapshot id under the name used by prediction and pointer records."""
+        return self.snapshot_id
+
     def to_dict(self) -> dict[str, Any]:
         """Return JSON-safe registry entry."""
         return asdict(self)
+
+
+# Former name of the lifecycle record; it is the same stored shape.
+ModelRegistryRecord = ModelRegistryEntry
+
+_ENTRY_FIELD_NAMES = {field.name for field in fields(ModelRegistryEntry)}
 
 
 @dataclass(frozen=True)
@@ -104,8 +138,11 @@ def _read_json(path: str | Path) -> dict[str, Any]:
     if not json_path.exists():
         raise RegistryError(f"JSON file does not exist: {json_path}")
 
-    with json_path.open("r", encoding="utf-8") as file:
-        payload = json.load(file)
+    try:
+        with json_path.open("r", encoding="utf-8") as file:
+            payload = json.load(file)
+    except json.JSONDecodeError as exc:
+        raise RegistryError(f"JSON file is not valid JSON: {json_path}: {exc}") from exc
 
     if not isinstance(payload, dict):
         raise RegistryError(f"JSON file must contain an object: {json_path}")
@@ -136,13 +173,20 @@ def _read_yaml(path: str | Path) -> dict[str, Any]:
     if not yaml_path.exists():
         raise RegistryError(f"YAML file does not exist: {yaml_path}")
 
-    with yaml_path.open("r", encoding="utf-8") as file:
-        payload = yaml.safe_load(file) or {}
+    try:
+        with yaml_path.open("r", encoding="utf-8") as file:
+            payload = yaml.safe_load(file) or {}
+    except yaml.YAMLError as exc:
+        raise RegistryError(f"YAML file is not valid YAML: {yaml_path}: {exc}") from exc
 
     if not isinstance(payload, dict):
         raise RegistryError(f"YAML file must contain a mapping: {yaml_path}")
 
     return payload
+
+
+def _status_value(status: ModelStatus | str) -> str:
+    return status.value if isinstance(status, ModelStatus) else str(status)
 
 
 def _validate_status(status: str) -> None:
@@ -175,6 +219,11 @@ def _to_registry_path(path_value: str) -> str:
         return str(resolved_path.relative_to(PROJECT_ROOT))
     except ValueError:
         return str(resolved_path)
+
+
+def _resolve_registry_path(path_value: str) -> Path:
+    path = Path(path_value)
+    return path if path.is_absolute() else PROJECT_ROOT / path
 
 
 def _as_optional_float(value: Any) -> float | None:
@@ -265,6 +314,16 @@ def load_model_registry(
     for raw_entry in raw_entries:
         if not isinstance(raw_entry, dict):
             raise RegistryError("Every registry entry must be an object.")
+
+        unexpected_fields = sorted(set(raw_entry) - _ENTRY_FIELD_NAMES)
+        missing_fields = sorted(_ENTRY_FIELD_NAMES - set(raw_entry))
+        if unexpected_fields or missing_fields:
+            raise RegistryError(
+                "Registry entry does not match the registry schema: "
+                f"model_version={raw_entry.get('model_version')!r}, "
+                f"unexpected fields={unexpected_fields}, missing fields={missing_fields}"
+            )
+
         entries.append(ModelRegistryEntry(**raw_entry))
 
     return entries
@@ -274,7 +333,10 @@ def save_model_registry(
     entries: list[ModelRegistryEntry],
     registry_path: str | Path = DEFAULT_REGISTRY_PATH,
 ) -> None:
-    """Persist local model registry entries."""
+    """Persist local model registry entries.
+
+    This is the only function that writes the registry file.
+    """
     payload = {
         "registry_backend": "local_json",
         "updated_at_utc": _utc_now_iso(),
@@ -295,6 +357,39 @@ def find_model_entry(
             return entry
 
     raise RegistryError(f"Model version not registered: {model_name} {model_version}")
+
+
+def _add_entry(
+    entry: ModelRegistryEntry,
+    *,
+    registry_path: str | Path,
+    replace_existing: bool,
+) -> ModelRegistryEntry:
+    entries = load_model_registry(registry_path)
+    existing_index = next(
+        (
+            index
+            for index, existing_entry in enumerate(entries)
+            if existing_entry.model_name == entry.model_name
+            and existing_entry.model_version == entry.model_version
+        ),
+        None,
+    )
+
+    if existing_index is not None and not replace_existing:
+        raise RegistryError(
+            "Model version is already registered: "
+            f"{entry.model_name} {entry.model_version}"
+        )
+
+    if existing_index is None:
+        entries.append(entry)
+    else:
+        entries[existing_index] = entry
+
+    save_model_registry(entries, registry_path)
+
+    return entry
 
 
 def register_model_from_artifacts(
@@ -362,31 +457,156 @@ def register_model_from_artifacts(
         notes=notes,
     )
 
-    entries = load_model_registry(registry_path)
-    existing_index = next(
-        (
-            index
-            for index, existing_entry in enumerate(entries)
-            if existing_entry.model_name == entry.model_name
-            and existing_entry.model_version == entry.model_version
-        ),
-        None,
-    )
+    return _add_entry(entry, registry_path=registry_path, replace_existing=replace_existing)
 
-    if existing_index is not None and not replace_existing:
+
+def register_model(
+    *,
+    model_name: str,
+    model_version: str,
+    artifact_path: str,
+    dataset_snapshot_id: str,
+    feature_schema_version: str,
+    training_timestamp: str,
+    metrics: dict[str, Any] | None = None,
+    status: ModelStatus | str = ModelStatus.CANDIDATE,
+    approved_for_prod: bool = False,
+    registry_path: str | Path | None = None,
+) -> ModelRegistryEntry:
+    """Register a model version from explicit fields, in the registry schema.
+
+    The artifact's sibling files (metadata.json, feature_schema.json,
+    baseline_stats.json) are recorded by the standard artifact layout.
+    Registration only creates candidate or staging versions; production
+    approval happens through promote_model.
+    """
+    normalized_status = _status_value(status)
+
+    if normalized_status not in REGISTRATION_STATUSES:
         raise RegistryError(
-            "Model version is already registered: "
-            f"{entry.model_name} {entry.model_version}"
+            f"register_model only accepts status {sorted(REGISTRATION_STATUSES)}; "
+            f"got {normalized_status!r}. Use promote_model to change status."
         )
 
-    if existing_index is None:
-        entries.append(entry)
-    else:
-        entries[existing_index] = entry
+    if approved_for_prod:
+        raise RegistryError(
+            "register_model cannot set approved_for_prod=True. "
+            "Use promote_model to promote a version to production."
+        )
 
-    save_model_registry(entries, registry_path)
+    artifact = Path(artifact_path)
+    if not artifact.exists():
+        raise RegistryError(f"Model artifact does not exist: {artifact_path}")
 
-    return entry
+    metric_values = dict(metrics or {})
+    unknown_metrics = sorted(set(metric_values) - set(REGISTRY_METRIC_FIELDS))
+    if unknown_metrics:
+        raise RegistryError(
+            f"Unsupported registry metrics: {unknown_metrics}. "
+            f"Supported metrics: {list(REGISTRY_METRIC_FIELDS)}"
+        )
+
+    artifact_dir = artifact.parent
+    metadata_path = artifact_dir / "metadata.json"
+    artifact_metadata = _read_json(metadata_path) if metadata_path.exists() else {}
+    training_snapshot_metadata = artifact_metadata.get("training_snapshot_metadata") or {}
+
+    entry = ModelRegistryEntry(
+        model_id=_stable_model_id(model_name, model_version),
+        model_name=model_name,
+        model_version=model_version,
+        algorithm=str(artifact_metadata.get("algorithm") or "unknown"),
+        artifact_path=_to_registry_path(str(artifact)),
+        artifact_dir=_to_registry_path(str(artifact_dir)),
+        metadata_path=_to_registry_path(str(metadata_path)),
+        feature_schema_path=_to_registry_path(str(artifact_dir / "feature_schema.json")),
+        baseline_stats_path=_to_registry_path(str(artifact_dir / "baseline_stats.json")),
+        snapshot_id=dataset_snapshot_id,
+        training_dataset_id=_extract_training_dataset_id(training_snapshot_metadata),
+        feature_schema_version=feature_schema_version,
+        training_started_at_utc=artifact_metadata.get("training_started_at_utc"),
+        training_finished_at_utc=training_timestamp,
+        **{
+            field_name: _as_optional_float(metric_values.get(field_name))
+            for field_name in REGISTRY_METRIC_FIELDS
+        },
+        status=normalized_status,
+        approved_for_prod=approved_for_prod,
+        promoted_at_utc=_utc_now_iso() if normalized_status == ModelStatus.PRODUCTION else None,
+        archived_at_utc=None,
+        created_at_utc=_utc_now_iso(),
+        notes=None,
+    )
+
+    return _add_entry(
+        entry,
+        registry_path=registry_path or DEFAULT_REGISTRY_PATH,
+        replace_existing=False,
+    )
+
+
+def _load_artifact_metadata(entry: ModelRegistryEntry) -> dict[str, Any]:
+    metadata_path = _resolve_registry_path(entry.metadata_path)
+    if not metadata_path.exists():
+        return {}
+    return _read_json(metadata_path)
+
+
+def _load_latency_budget(
+    model_config_path: str | Path = DEFAULT_MODEL_CONFIG_PATH,
+) -> dict[str, Any] | None:
+    path = Path(model_config_path)
+    if not path.exists():
+        return None
+    latency_budget = _read_yaml(path).get("latency_budget")
+    return dict(latency_budget) if isinstance(latency_budget, dict) else None
+
+
+def build_active_model_pointer(
+    entry: ModelRegistryEntry,
+    artifact_metadata: dict[str, Any],
+    *,
+    notes: str | None = None,
+    latency_budget: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build the full active model pointer from the target entry and its metadata only.
+
+    Nothing is carried over from a previous pointer, so every lineage field
+    describes the model the pointer activates.
+    """
+    training_snapshot_metadata = artifact_metadata.get("training_snapshot_metadata") or {}
+    feature_names = artifact_metadata.get("feature_names")
+    source_projects = training_snapshot_metadata.get("source_projects")
+    source_tables = training_snapshot_metadata.get("source_tables")
+    baseline_anomaly_rate = entry.baseline_anomaly_rate
+    if baseline_anomaly_rate is None:
+        baseline_anomaly_rate = _as_optional_float(
+            artifact_metadata.get("baseline_anomaly_rate")
+        )
+    now = _utc_now_iso()
+
+    pointer: dict[str, Any] = {
+        "model_name": entry.model_name,
+        "active_model_version": entry.model_version,
+        "artifact_path": entry.artifact_path,
+        "feature_schema_version": entry.feature_schema_version,
+        "status": entry.status,
+        "dataset_snapshot_id": entry.snapshot_id,
+        "training_dataset_id": entry.training_dataset_id,
+        "feature_count": len(feature_names) if isinstance(feature_names, list) else None,
+        "baseline_anomaly_rate": baseline_anomaly_rate,
+        "source_projects": list(source_projects) if isinstance(source_projects, list) else [],
+        "source_tables": list(source_tables) if isinstance(source_tables, list) else [],
+        "snapshot_type": training_snapshot_metadata.get("snapshot_type"),
+        "last_updated_at": now,
+        "updated_at": now,
+        "notes": notes or f"Active production model set to {entry.model_version}.",
+    }
+
+    if latency_budget is not None:
+        pointer["latency_budget"] = latency_budget
+
+    return pointer
 
 
 def write_active_model_pointer(
@@ -395,7 +615,10 @@ def write_active_model_pointer(
     active_model_path: str | Path = DEFAULT_ACTIVE_MODEL_PATH,
     notes: str | None = None,
 ) -> ActiveModelPointer:
-    """Write active model YAML pointer from a registry entry."""
+    """Write the active model pointer for a production registry entry.
+
+    This is the only function that writes the active model pointer.
+    """
     if entry.status != "production":
         raise RegistryError(
             "Only a production model can become the active model pointer. "
@@ -405,19 +628,24 @@ def write_active_model_pointer(
     if not entry.approved_for_prod:
         raise RegistryError("Production active model must be approved_for_prod=True.")
 
-    pointer = ActiveModelPointer(
-        model_name=entry.model_name,
-        active_model_version=entry.model_version,
-        artifact_path=entry.artifact_path,
-        feature_schema_version=entry.feature_schema_version,
-        status=entry.status,
-        last_updated_at=_utc_now_iso(),
-        notes=notes or f"Active production model set to {entry.model_version}.",
+    pointer_payload = build_active_model_pointer(
+        entry,
+        _load_artifact_metadata(entry),
+        notes=notes,
+        latency_budget=_load_latency_budget(),
     )
 
-    _write_yaml(active_model_path, pointer.to_dict())
+    _write_yaml(active_model_path, pointer_payload)
 
-    return pointer
+    return ActiveModelPointer(
+        model_name=pointer_payload["model_name"],
+        active_model_version=pointer_payload["active_model_version"],
+        artifact_path=pointer_payload["artifact_path"],
+        feature_schema_version=pointer_payload["feature_schema_version"],
+        status=pointer_payload["status"],
+        last_updated_at=pointer_payload["last_updated_at"],
+        notes=pointer_payload["notes"],
+    )
 
 
 def read_active_model_pointer(
@@ -436,6 +664,52 @@ def read_active_model_pointer(
         status=str(payload.get("status", "not_deployed")),
         last_updated_at=payload.get("last_updated_at"),
         notes=payload.get("notes"),
+    )
+
+
+def _set_entry_status(
+    *,
+    model_name: str,
+    model_version: str,
+    status: str,
+    registry_path: str | Path,
+    active_model_path: str | Path,
+) -> ModelRegistryEntry:
+    """Change a version's status outside the production promotion path."""
+    _validate_status(status)
+    entries = load_model_registry(registry_path)
+    if not any(
+        entry.model_name == model_name and entry.model_version == model_version
+        for entry in entries
+    ):
+        raise RegistryError(f"Model version not registered: {model_name} {model_version}")
+
+    if Path(active_model_path).exists():
+        pointer = read_active_model_pointer(active_model_path)
+        if pointer.model_name == model_name and pointer.active_model_version == model_version:
+            raise RegistryError(
+                f"Cannot change status of {model_name} {model_version} to {status!r}: "
+                "it is the active model version. Promote another version first."
+            )
+
+    def _with_status(entry: ModelRegistryEntry) -> ModelRegistryEntry:
+        changes: dict[str, Any] = {"status": status}
+        if status == ModelStatus.ARCHIVED and entry.archived_at_utc is None:
+            changes["archived_at_utc"] = _utc_now_iso()
+        return ModelRegistryEntry(**{**entry.to_dict(), **changes})
+
+    updated_entries = [
+        _with_status(entry)
+        if entry.model_name == model_name and entry.model_version == model_version
+        else entry
+        for entry in entries
+    ]
+    save_model_registry(updated_entries, registry_path)
+
+    return find_model_entry(
+        model_name=model_name,
+        model_version=model_version,
+        registry_path=registry_path,
     )
 
 
@@ -519,6 +793,40 @@ def promote_model_version(
     return promoted_entry
 
 
+def promote_model(
+    *,
+    model_name: str,
+    model_version: str,
+    target_status: ModelStatus | str = ModelStatus.PRODUCTION,
+    registry_path: str | Path | None = None,
+    active_model_config_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """Move a model version to target_status; production also updates the pointer."""
+
+    normalized_status = _status_value(target_status)
+    _validate_status(normalized_status)
+    resolved_registry_path = registry_path or DEFAULT_REGISTRY_PATH
+    resolved_active_model_path = active_model_config_path or DEFAULT_ACTIVE_MODEL_PATH
+
+    if normalized_status == ModelStatus.PRODUCTION:
+        entry = promote_model_version(
+            model_name=model_name,
+            model_version=model_version,
+            registry_path=resolved_registry_path,
+            active_model_path=resolved_active_model_path,
+        )
+    else:
+        entry = _set_entry_status(
+            model_name=model_name,
+            model_version=model_version,
+            status=normalized_status,
+            registry_path=resolved_registry_path,
+            active_model_path=resolved_active_model_path,
+        )
+
+    return entry.to_dict()
+
+
 def list_model_versions(
     *,
     model_name: str | None = None,
@@ -540,224 +848,12 @@ def list_model_versions(
     return entries
 
 
-# ---------------------------------------------------------------------------
-# Production lifecycle API
-# ---------------------------------------------------------------------------
-# This compatibility layer adds explicit model lifecycle operations while
-# preserving the existing registry implementation above.
-
-
-
-class ModelStatus(StrEnum):
-    """Supported lifecycle statuses for registered model versions."""
-
-    CANDIDATE = "candidate"
-    STAGING = "staging"
-    PRODUCTION = "production"
-    ARCHIVED = "archived"
-    ROLLED_BACK = "rolled_back"
-    FAILED_VALIDATION = "failed_validation"
-
-
-@dataclass(frozen=True)
-class ModelRegistryRecord:
-    """Metadata required to treat a trained model as a governed production asset."""
-
-    model_name: str
-    model_version: str
-    status: str
-    artifact_path: str
-    dataset_snapshot_id: str
-    feature_schema_version: str
-    training_timestamp: str
-    metrics: dict[str, Any]
-    approved_for_prod: bool = False
-    registry_id: str = ""
-    created_at: str = ""
-
-    def to_dict(self) -> dict[str, Any]:
-        record = asdict(self)
-        if not record["registry_id"]:
-            record["registry_id"] = str(uuid4())
-        if not record["created_at"]:
-            record["created_at"] = datetime.now(UTC).isoformat()
-        return record
-
-
-def _registry_path() -> Path:
-    return Path("artifacts/models/_registry/model_registry.json")
-
-
-def _active_model_config_path() -> Path:
-    return Path("configs/active_model.yaml")
-
-
-def _load_registry_document(registry_path: Path | None = None) -> dict[str, Any]:
-    path = registry_path or _registry_path()
-    if not path.exists():
-        return {"models": []}
-
-    try:
-        import json
-
-        with path.open("r", encoding="utf-8") as file:
-            payload = json.load(file)
-    except Exception as exc:  # noqa: BLE001
-        raise ValueError(f"Failed to read model registry JSON at {path}: {exc}") from exc
-
-    if isinstance(payload, list):
-        return {"models": payload}
-
-    if isinstance(payload, dict):
-        if "models" not in payload:
-            payload["models"] = []
-        if not isinstance(payload["models"], list):
-            raise ValueError("Model registry field 'models' must be a list.")
-        return payload
-
-    raise ValueError("Model registry must be a JSON object or list.")
-
-
-def _write_registry_document(payload: dict[str, Any], registry_path: Path | None = None) -> None:
-    import json
-
-    path = registry_path or _registry_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    with path.open("w", encoding="utf-8") as file:
-        json.dump(payload, file, indent=2, sort_keys=True)
-
-
-def _find_model_record(
-    payload: dict[str, Any],
-    *,
-    model_name: str,
-    model_version: str,
-) -> dict[str, Any]:
-    for record in payload.get("models", []):
-        if (
-            record.get("model_name") == model_name
-            and record.get("model_version") == model_version
-        ):
-            return record
-
-    raise ValueError(f"Model version not found: {model_name}/{model_version}")
-
-
-def register_model(
-    *,
-    model_name: str,
-    model_version: str,
-    artifact_path: str,
-    dataset_snapshot_id: str,
-    feature_schema_version: str,
-    training_timestamp: str,
-    metrics: dict[str, Any] | None = None,
-    status: ModelStatus | str = ModelStatus.CANDIDATE,
-    approved_for_prod: bool = False,
-    registry_path: Path | None = None,
-) -> ModelRegistryRecord:
-    """Register a trained model version as a lifecycle-controlled asset."""
-
-    normalized_status = ModelStatus(status).value
-    payload = _load_registry_document(registry_path)
-
-    duplicate_exists = any(
-        record.get("model_name") == model_name
-        and record.get("model_version") == model_version
-        for record in payload.get("models", [])
-    )
-    if duplicate_exists:
-        raise ValueError(f"Model version already registered: {model_name}/{model_version}")
-
-    artifact = Path(artifact_path)
-    if not artifact.exists():
-        raise FileNotFoundError(f"Model artifact does not exist: {artifact_path}")
-
-    record = ModelRegistryRecord(
-        model_name=model_name,
-        model_version=model_version,
-        status=normalized_status,
-        artifact_path=artifact_path,
-        dataset_snapshot_id=dataset_snapshot_id,
-        feature_schema_version=feature_schema_version,
-        training_timestamp=training_timestamp,
-        metrics=metrics or {},
-        approved_for_prod=approved_for_prod,
-    )
-
-    payload.setdefault("models", []).append(record.to_dict())
-    _write_registry_document(payload, registry_path)
-
-    return record
-
-
-def promote_model(
-    *,
-    model_name: str,
-    model_version: str,
-    target_status: ModelStatus | str = ModelStatus.PRODUCTION,
-    registry_path: Path | None = None,
-    active_model_config_path: Path | None = None,
-) -> dict[str, Any]:
-    """Promote a model version and update the active model pointer for production."""
-
-    normalized_status = ModelStatus(target_status).value
-    payload = _load_registry_document(registry_path)
-    target_record = _find_model_record(
-        payload,
-        model_name=model_name,
-        model_version=model_version,
-    )
-
-    if normalized_status == ModelStatus.PRODUCTION.value:
-        for record in payload.get("models", []):
-            same_model = record.get("model_name") == model_name
-            currently_production = record.get("status") == ModelStatus.PRODUCTION.value
-            same_version = record.get("model_version") == model_version
-
-            if same_model and currently_production and not same_version:
-                record["status"] = ModelStatus.ARCHIVED.value
-                record["approved_for_prod"] = True
-
-        target_record["approved_for_prod"] = True
-
-    target_record["status"] = normalized_status
-    target_record["promoted_at"] = datetime.now(UTC).isoformat()
-
-    _write_registry_document(payload, registry_path)
-
-    if normalized_status == ModelStatus.PRODUCTION.value:
-        config_path = active_model_config_path or _active_model_config_path()
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-
-        active_config = {
-            "model_name": target_record["model_name"],
-            "active_model_version": target_record["model_version"],
-            "status": target_record["status"],
-            "artifact_path": target_record["artifact_path"],
-            "dataset_snapshot_id": target_record["dataset_snapshot_id"],
-            "feature_schema_version": target_record["feature_schema_version"],
-            "updated_at": target_record["promoted_at"],
-        }
-
-        with config_path.open("w", encoding="utf-8") as file:
-            yaml.safe_dump(active_config, file, sort_keys=False)
-
-    return target_record
-
-
 def get_active_model(
-    active_model_config_path: Path | None = None,
+    active_model_config_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Load the active production model pointer from configs/active_model.yaml."""
 
-    config_path = active_model_config_path or _active_model_config_path()
-    if not config_path.exists():
-        raise FileNotFoundError(f"Active model config does not exist: {config_path}")
-
-    with config_path.open("r", encoding="utf-8") as file:
-        payload = yaml.safe_load(file) or {}
+    payload = _read_yaml(active_model_config_path or DEFAULT_ACTIVE_MODEL_PATH)
 
     required_fields = {
         "model_name",
@@ -769,7 +865,7 @@ def get_active_model(
     }
     missing_fields = sorted(required_fields - set(payload))
     if missing_fields:
-        raise ValueError(
+        raise RegistryError(
             f"Active model config is missing required fields: {missing_fields}"
         )
 

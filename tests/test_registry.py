@@ -434,3 +434,197 @@ def test_promoting_new_production_model_archives_previous_production(tmp_path):
     assert records_by_version["v904"]["approved_for_prod"] is True
     assert records_by_version["v905"]["status"] == "production"
     assert records_by_version["v905"]["approved_for_prod"] is True
+
+
+REAL_REGISTRY_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "artifacts"
+    / "models"
+    / "_registry"
+    / "model_registry.json"
+)
+
+
+def test_register_model_round_trips_through_load_and_list(tmp_path: Path) -> None:
+    from anomaly_detection.registry import register_model
+
+    registry_path = tmp_path / "model_registry.json"
+    artifact_path = tmp_path / "model.joblib"
+    artifact_path.write_text("fake model artifact", encoding="utf-8")
+
+    register_model(
+        model_name="isolation_forest",
+        model_version="v910",
+        artifact_path=str(artifact_path),
+        dataset_snapshot_id="snapshot_v910",
+        feature_schema_version="feature_schema_v001",
+        training_timestamp="2026-06-10T10:00:00+00:00",
+        metrics={"baseline_anomaly_rate": 0.04},
+        registry_path=registry_path,
+    )
+
+    loaded_entries = load_model_registry(registry_path)
+    listed_entries = list_model_versions(
+        model_name="isolation_forest",
+        registry_path=registry_path,
+    )
+
+    assert [entry.model_version for entry in loaded_entries] == ["v910"]
+    assert [entry.model_version for entry in listed_entries] == ["v910"]
+    assert listed_entries[0].snapshot_id == "snapshot_v910"
+    assert listed_entries[0].baseline_anomaly_rate == 0.04
+    assert listed_entries[0].status == "candidate"
+
+
+def test_register_promote_get_active_model_uses_target_model_metadata(
+    tmp_path: Path,
+) -> None:
+    from anomaly_detection.registry import get_active_model, promote_model, register_model
+
+    registry_path = tmp_path / "registry" / "model_registry.json"
+    active_model_path = tmp_path / "configs" / "active_model.yaml"
+    metadata_path = _train_test_artifact(tmp_path=tmp_path, model_version="v911")
+    artifact_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+
+    register_model(
+        model_name="isolation_forest",
+        model_version="v911",
+        artifact_path=artifact_metadata["model_path"],
+        dataset_snapshot_id="snapshot_v911",
+        feature_schema_version="feature_schema_v001",
+        training_timestamp="2026-06-10T10:00:00+00:00",
+        registry_path=registry_path,
+    )
+    promote_model(
+        model_name="isolation_forest",
+        model_version="v911",
+        registry_path=registry_path,
+        active_model_config_path=active_model_path,
+    )
+
+    active_model = get_active_model(active_model_path)
+
+    assert active_model["active_model_version"] == "v911"
+    assert active_model["status"] == "production"
+    assert active_model["dataset_snapshot_id"] == "snapshot_v911"
+    assert active_model["feature_count"] == len(artifact_metadata["feature_names"])
+
+
+def _register_fake_model(registry_path: Path, artifact_dir: Path, model_version: str) -> None:
+    from anomaly_detection.registry import register_model
+
+    artifact_dir.mkdir(parents=True)
+    artifact_path = artifact_dir / "model.joblib"
+    artifact_path.write_text("fake model artifact", encoding="utf-8")
+
+    register_model(
+        model_name="isolation_forest",
+        model_version=model_version,
+        artifact_path=str(artifact_path),
+        dataset_snapshot_id=f"snapshot_{model_version}",
+        feature_schema_version="feature_schema_v001",
+        training_timestamp="2026-06-10T10:00:00+00:00",
+        registry_path=registry_path,
+    )
+
+
+def test_register_model_rejects_production_status(tmp_path: Path) -> None:
+    from anomaly_detection.registry import register_model
+
+    registry_path = tmp_path / "model_registry.json"
+    _register_fake_model(registry_path, tmp_path / "v920", "v920")
+    registry_before = registry_path.read_bytes()
+
+    artifact_path = tmp_path / "v921" / "model.joblib"
+    artifact_path.parent.mkdir()
+    artifact_path.write_text("fake model artifact", encoding="utf-8")
+
+    with pytest.raises(RegistryError, match="promote_model"):
+        register_model(
+            model_name="isolation_forest",
+            model_version="v921",
+            artifact_path=str(artifact_path),
+            dataset_snapshot_id="snapshot_v921",
+            feature_schema_version="feature_schema_v001",
+            training_timestamp="2026-06-10T10:00:00+00:00",
+            status="production",
+            approved_for_prod=True,
+            registry_path=registry_path,
+        )
+
+    assert registry_path.read_bytes() == registry_before
+
+
+def test_promote_model_refuses_status_change_of_active_version(tmp_path: Path) -> None:
+    from anomaly_detection.registry import promote_model
+
+    registry_path = tmp_path / "model_registry.json"
+    active_model_path = tmp_path / "active_model.yaml"
+    _register_fake_model(registry_path, tmp_path / "v930", "v930")
+    promote_model(
+        model_name="isolation_forest",
+        model_version="v930",
+        registry_path=registry_path,
+        active_model_config_path=active_model_path,
+    )
+    registry_before = registry_path.read_bytes()
+    pointer_before = active_model_path.read_bytes()
+
+    with pytest.raises(RegistryError, match="active"):
+        promote_model(
+            model_name="isolation_forest",
+            model_version="v930",
+            target_status="archived",
+            registry_path=registry_path,
+            active_model_config_path=active_model_path,
+        )
+
+    assert registry_path.read_bytes() == registry_before
+    assert active_model_path.read_bytes() == pointer_before
+
+
+def test_promote_model_archives_non_active_version_with_timestamp(tmp_path: Path) -> None:
+    from anomaly_detection.registry import promote_model
+
+    registry_path = tmp_path / "model_registry.json"
+    active_model_path = tmp_path / "active_model.yaml"
+    _register_fake_model(registry_path, tmp_path / "v940", "v940")
+    _register_fake_model(registry_path, tmp_path / "v941", "v941")
+    promote_model(
+        model_name="isolation_forest",
+        model_version="v940",
+        registry_path=registry_path,
+        active_model_config_path=active_model_path,
+    )
+
+    archived = promote_model(
+        model_name="isolation_forest",
+        model_version="v941",
+        target_status="archived",
+        registry_path=registry_path,
+        active_model_config_path=active_model_path,
+    )
+
+    stored = find_model_entry(
+        model_name="isolation_forest",
+        model_version="v941",
+        registry_path=registry_path,
+    )
+    assert archived["status"] == "archived"
+    assert stored.status == "archived"
+    assert stored.archived_at_utc is not None
+
+
+def test_real_registry_loads_and_saves_losslessly(tmp_path: Path) -> None:
+    from anomaly_detection.registry import save_model_registry
+
+    raw_models = json.loads(REAL_REGISTRY_PATH.read_text(encoding="utf-8"))["models"]
+
+    entries = load_model_registry(REAL_REGISTRY_PATH)
+    copy_path = tmp_path / "model_registry.json"
+    save_model_registry(entries, copy_path)
+
+    saved_models = json.loads(copy_path.read_text(encoding="utf-8"))["models"]
+
+    assert [entry.to_dict() for entry in entries] == raw_models
+    assert saved_models == raw_models

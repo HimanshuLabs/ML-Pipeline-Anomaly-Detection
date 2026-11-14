@@ -216,6 +216,27 @@ def test_rollback_endpoint_validates_previous_stable_model_without_mutation(
     assert before_payload == after_payload
 
 
+def test_rollback_endpoint_returns_400_for_registry_errors(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from anomaly_detection.registry import RegistryError
+    from api import main as api_main
+
+    def _broken_registry(**_kwargs):
+        raise RegistryError("registry entry has unexpected fields")
+
+    monkeypatch.setattr(api_main, "list_model_versions", _broken_registry)
+
+    response = TestClient(app, raise_server_exceptions=False).post(
+        "/admin/rollback",
+        json={"dry_run": True},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "registry entry has unexpected fields"
+
+
 def test_predict_rejects_missing_required_model_features(client: TestClient) -> None:
     response = client.post(
         "/predict",

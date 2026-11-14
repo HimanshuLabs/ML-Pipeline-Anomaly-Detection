@@ -27,7 +27,11 @@ from anomaly_detection.online_inference import (
     prediction_to_dict,
 )
 from anomaly_detection.prediction_logging import write_online_predictions_jsonl
-from anomaly_detection.registry import list_model_versions, read_active_model_pointer
+from anomaly_detection.registry import (
+    RegistryError,
+    list_model_versions,
+    read_active_model_pointer,
+)
 from anomaly_detection.rollback import RollbackError, rollback_active_model
 from api.schemas import (
     ActiveModelResponse,
@@ -308,5 +312,5 @@ def rollback_model(request: RollbackRequest | None = None) -> dict[str, Any]:
             "rollback_event_path": rollback_event.rollback_event_path,
         }
 
-    except RollbackError as exc:
+    except (RollbackError, RegistryError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
