@@ -28,6 +28,14 @@ spec:
           envFrom:
             - configMapRef:
                 name: project4-anomaly-api-config
+          env:
+            # Without the secret the pod still starts; /admin/* then returns 503.
+            - name: ADMIN_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: project4-admin
+                  key: admin-token
+                  optional: true
           readinessProbe:
             httpGet:
               path: /health

@@ -137,6 +137,9 @@ def isolate_repo_state(
     # feature_validation default config) resolve inside the mirror.
     monkeypatch.chdir(mirror_root)
 
+    # Admin endpoints are disabled unless a test opts in through admin_headers.
+    monkeypatch.delenv("ADMIN_TOKEN", raising=False)
+
     before = _snapshot_real_state()
 
     yield mirror_root
@@ -219,6 +222,17 @@ def trained_metadata_paths(tmp_path_factory: pytest.TempPathFactory) -> dict[str
         metadata_paths[version] = Path(artifact.metadata_path)
 
     return metadata_paths
+
+
+TEST_ADMIN_TOKEN = "pytest-admin-token-0123456789abcdef"
+
+
+@pytest.fixture()
+def admin_headers(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
+    """Enable /admin/* with a test token and return the header that authorizes it."""
+
+    monkeypatch.setenv("ADMIN_TOKEN", TEST_ADMIN_TOKEN)
+    return {"X-Admin-Token": TEST_ADMIN_TOKEN}
 
 
 @pytest.fixture()

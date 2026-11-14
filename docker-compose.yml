@@ -9,6 +9,7 @@ services:
     environment:
       PYTHONPATH: /app/src
       PYTHONUNBUFFERED: "1"
+      ADMIN_TOKEN: ${PROJECT4_ADMIN_TOKEN:-}
     volumes:
       - ./logs:/app/logs
 

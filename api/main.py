@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import hmac
 import logging
+import os
 import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Response
 
 from anomaly_detection.metrics import (
     ACTIVE_MODEL_VERSION,
@@ -53,6 +55,39 @@ SERVICE_NAME = "project4-online-anomaly-inference"
 # Serializes /admin/rollback so two rollbacks can never interleave.
 ROLLBACK_LOCK = threading.Lock()
 
+ADMIN_TOKEN_ENV = "ADMIN_TOKEN"
+MIN_ADMIN_TOKEN_LENGTH = 16
+
+
+def _configured_admin_token() -> str | None:
+    """The server's admin token, or None when admin endpoints are disabled."""
+
+    token = os.environ.get(ADMIN_TOKEN_ENV, "")
+    return token if len(token) >= MIN_ADMIN_TOKEN_LENGTH else None
+
+
+def require_admin_token(
+    x_admin_token: Annotated[str | None, Header()] = None,
+) -> None:
+    """Authorize /admin/* requests by the X-Admin-Token header.
+
+    The token is read from the environment on every request and is never logged
+    or returned.
+    """
+
+    configured_token = _configured_admin_token()
+    if configured_token is None:
+        raise HTTPException(status_code=503, detail="admin disabled")
+
+    if x_admin_token is None or not hmac.compare_digest(
+        x_admin_token.encode("utf-8"),
+        configured_token.encode("utf-8"),
+    ):
+        raise HTTPException(status_code=401, detail="invalid admin token")
+
+
+admin_router = APIRouter(prefix="/admin", dependencies=[Depends(require_admin_token)])
+
 
 class AppState:
     """Mutable application state."""
@@ -89,6 +124,12 @@ def get_inference_service() -> OnlineInferenceService:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Load active production model once during API startup."""
+
+    if _configured_admin_token() is None:
+        logger.warning(
+            "%s is not set or is too short; /admin endpoints are disabled",
+            ADMIN_TOKEN_ENV,
+        )
 
     try:
         state.inference_service = OnlineInferenceService()
@@ -279,7 +320,7 @@ def metrics() -> Response:
     )
 
 
-@app.post("/admin/rollback", response_model=RollbackResponse)
+@admin_router.post("/rollback", response_model=RollbackResponse)
 def rollback_model(request: RollbackRequest | None = None) -> dict[str, Any]:
     """Validate or apply rollback to the previous stable approved model.
 
@@ -353,3 +394,6 @@ def rollback_model(request: RollbackRequest | None = None) -> dict[str, Any]:
         except RollbackServingError as exc:
             logger.error("Rollback refused or undone: %s", exc)
             raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+app.include_router(admin_router)
