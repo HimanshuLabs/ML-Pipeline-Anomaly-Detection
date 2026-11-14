@@ -14,6 +14,7 @@ class HealthResponse(BaseModel):
     service: str
     active_model_version: str | None
     model_loaded: bool
+    pointer_source: str | None = None
 
 
 class ActiveModelResponse(BaseModel):
@@ -33,6 +34,7 @@ class ActiveModelResponse(BaseModel):
     snapshot_type: str | None
     latency_budget_p95_ms: float | None
     loaded_at: str
+    pointer_source: str | None = None
 
 
 class PredictRequest(BaseModel):

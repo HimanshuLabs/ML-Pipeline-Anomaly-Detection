@@ -13,8 +13,10 @@ the active model pointer (write_active_model_pointer).
 from __future__ import annotations
 
 import json
+import logging
 import stat
 import uuid
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, fields
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -24,6 +26,8 @@ from typing import Any
 
 import joblib
 import yaml
+
+LOGGER = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -448,6 +452,359 @@ def restore_registry_state(snapshot: RegistryStateSnapshot) -> None:
             _write_bytes_atomic(path, data)
 
 
+# --- storage: Postgres when configured, files otherwise ----------------------------
+#
+# With PROJECT4_POSTGRES_* configured, Postgres is the source of truth for the
+# registry and the active pointer; the JSON registry and YAML pointer are kept as
+# a mirror after every committed change. Without a database, the files are the
+# store, exactly as before.
+
+POINTER_SOURCE_POSTGRES = "postgres"
+POINTER_SOURCE_FILE = "file"
+
+
+class RegistryStorageError(RegistryError):
+    """The database could not be read or written; nothing was changed."""
+
+
+@dataclass(frozen=True)
+class RegistryState:
+    """Registry entries and active pointer as read from the current store."""
+
+    entries: list[ModelRegistryEntry]
+    model_name: str | None
+    active_model_version: str | None
+    pointer_version: int | None
+    source: str
+
+
+@dataclass(frozen=True)
+class RegistryCommit:
+    """What a committed database change replaced, so it can be undone."""
+
+    model_name: str
+    previous_entries: list[ModelRegistryEntry]
+    previous_pointer: dict[str, Any] | None
+    pointer_version: int | None
+
+
+def _database() -> Any:
+    from anomaly_detection import database
+
+    return database
+
+
+def database_enabled() -> bool:
+    """True when the PROJECT4_POSTGRES_* settings are configured."""
+
+    return bool(_database().is_configured())
+
+
+def default_model_name(model_config_path: str | Path = DEFAULT_MODEL_CONFIG_PATH) -> str:
+    """The configured model name (configs/model_config.yaml model.name)."""
+
+    path = Path(model_config_path)
+    if path.exists():
+        name = (_read_yaml(path).get("model") or {}).get("name")
+        if name:
+            return str(name)
+    return "isolation_forest"
+
+
+def _entry_key(entry: ModelRegistryEntry) -> tuple[str, str]:
+    return entry.model_name, entry.model_version
+
+
+def load_registry_state(
+    *,
+    registry_path: str | Path = DEFAULT_REGISTRY_PATH,
+    active_model_path: str | Path = DEFAULT_ACTIVE_MODEL_PATH,
+    model_name: str | None = None,
+) -> RegistryState:
+    """Read registry entries and the active pointer from the configured store."""
+
+    if not database_enabled():
+        pointer_name: str | None = None
+        pointer_version_name: str | None = None
+        if Path(active_model_path).exists():
+            pointer = read_active_model_pointer(active_model_path)
+            pointer_name = pointer.model_name
+            pointer_version_name = pointer.active_model_version
+        return RegistryState(
+            entries=load_model_registry(registry_path),
+            model_name=model_name or pointer_name,
+            active_model_version=pointer_version_name,
+            pointer_version=None,
+            source=POINTER_SOURCE_FILE,
+        )
+
+    database = _database()
+    resolved_name = model_name or default_model_name()
+    engine = database.get_engine()
+    try:
+        with engine.connect() as connection:
+            entries = [
+                ModelRegistryEntry(**values)
+                for values in database.read_registry_entries(connection)
+            ]
+            pointer_row = database.read_active_pointer(connection, resolved_name)
+    except Exception as exc:  # noqa: BLE001 - any database failure means "cannot read"
+        raise RegistryStorageError(
+            f"registry database could not be read: {type(exc).__name__}"
+        ) from exc
+    finally:
+        engine.dispose()
+
+    return RegistryState(
+        entries=entries,
+        model_name=resolved_name,
+        active_model_version=pointer_row["model_version"] if pointer_row else None,
+        pointer_version=int(pointer_row["pointer_version"]) if pointer_row else None,
+        source=POINTER_SOURCE_POSTGRES,
+    )
+
+
+def ensure_database_initialized(state: RegistryState, model_name: str | None = None) -> None:
+    """Refuse a database write until sync-from-files has seeded the registry and pointer.
+
+    Without this, the first write would mirror an empty or partial database
+    registry over the committed JSON/YAML files. File-backed state passes.
+    """
+
+    if state.source != POINTER_SOURCE_POSTGRES:
+        return
+
+    name = model_name or state.model_name
+    has_entries = any(entry.model_name == name for entry in state.entries)
+    if not has_entries or state.pointer_version is None:
+        raise RegistryStorageError(
+            f"Project 4 database is not initialized for {name}; "
+            "run: python -m anomaly_detection.database sync-from-files"
+        )
+
+
+def snapshot_rows_for_entry(entry: ModelRegistryEntry) -> list[tuple[str, dict[str, Any]]]:
+    """Database rows a registry entry's snapshot FK needs, from its metadata.json."""
+
+    if not entry.snapshot_id:
+        return []
+
+    snapshot_metadata = _load_artifact_metadata(entry).get("training_snapshot_metadata") or {}
+    if snapshot_metadata.get("snapshot_id") != entry.snapshot_id:
+        raise RegistryError(
+            f"Snapshot {entry.snapshot_id!r} of {entry.model_name} {entry.model_version} "
+            "is not described by its metadata.json, so it cannot be stored in the database."
+        )
+    return _database().snapshot_rows_for_training_metadata(snapshot_metadata)
+
+
+def _write_file_mirror(
+    *,
+    entries: list[ModelRegistryEntry],
+    registry_path: str | Path,
+    pointer_entry: ModelRegistryEntry | None,
+    active_model_path: str | Path,
+    notes: str | None,
+) -> None:
+    """Write the JSON/YAML mirror after a committed database change; never raises."""
+
+    try:
+        save_model_registry(entries, registry_path)
+        if pointer_entry is not None:
+            write_active_model_pointer(
+                entry=pointer_entry,
+                active_model_path=active_model_path,
+                notes=notes,
+            )
+    except Exception:  # noqa: BLE001 - the database is authoritative; report and continue
+        LOGGER.error(
+            "Registry change committed to the database but the file mirror write failed",
+            exc_info=True,
+        )
+        from anomaly_detection.metrics import record_registry_mirror_write_failure
+
+        record_registry_mirror_write_failure()
+
+
+def commit_registry_change(
+    *,
+    state: RegistryState,
+    updated_entries: list[ModelRegistryEntry],
+    registry_path: str | Path,
+    active_model_path: str | Path,
+    pointer_entry: ModelRegistryEntry | None = None,
+    notes: str | None = None,
+    updated_by: str = "registry",
+    extra_rows: Sequence[tuple[str, Mapping[str, Any]]] = (),
+) -> RegistryCommit | None:
+    """Persist a registry change to the store of `state`.
+
+    Files: the registry file, then the pointer (as before). Postgres: one
+    transaction (snapshot rows, changed registry rows, pointer with
+    pointer_version + 1, extra rows), then the file mirror. Returns what the
+    database change replaced, or None for the file store.
+    """
+
+    if state.source == POINTER_SOURCE_FILE:
+        save_model_registry(updated_entries, registry_path)
+        if pointer_entry is not None:
+            write_active_model_pointer(
+                entry=pointer_entry,
+                active_model_path=active_model_path,
+                notes=notes,
+            )
+        return None
+
+    model_name = (pointer_entry.model_name if pointer_entry else None) or state.model_name
+    if model_name is None:
+        raise RegistryError("no model name for the registry change")
+    ensure_database_initialized(state, model_name)
+    database = _database()
+
+    before = {_entry_key(entry): entry for entry in state.entries}
+    changed = [
+        entry
+        for entry in updated_entries
+        if before.get(_entry_key(entry)) is None
+        or before[_entry_key(entry)].to_dict() != entry.to_dict()
+    ]
+    snapshot_rows = [row for entry in changed for row in snapshot_rows_for_entry(entry)]
+
+    engine = database.get_engine()
+    try:
+        with engine.begin() as connection:
+            locked_version = database.lock_active_pointer(connection, model_name)
+            if locked_version != state.pointer_version:
+                raise RegistryStorageError(
+                    f"the active pointer of {model_name} changed concurrently "
+                    f"({state.pointer_version} -> {locked_version}); nothing was changed, retry"
+                )
+            previous_pointer = database.read_active_pointer(connection, model_name)
+
+            for table, row in snapshot_rows:
+                database.insert_row_if_absent(connection, table, row)
+            for entry in changed:
+                database.upsert_model_registry_row(connection, database.model_registry_row(entry))
+
+            pointer_version = state.pointer_version
+            if pointer_entry is not None:
+                pointer_version, _changed = database.set_active_pointer(
+                    connection,
+                    model_name=pointer_entry.model_name,
+                    model_version=pointer_entry.model_version,
+                    artifact_path=pointer_entry.artifact_path,
+                    updated_by=updated_by,
+                    notes=notes,
+                )
+
+            for table, row in extra_rows:
+                database.insert_row(connection, table, row)
+    except RegistryStorageError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - the transaction rolled back; nothing changed
+        raise RegistryStorageError(
+            f"registry database write failed; nothing was changed: {type(exc).__name__}"
+        ) from exc
+    finally:
+        engine.dispose()
+
+    _write_file_mirror(
+        entries=updated_entries,
+        registry_path=registry_path,
+        pointer_entry=pointer_entry,
+        active_model_path=active_model_path,
+        notes=notes,
+    )
+
+    return RegistryCommit(
+        model_name=model_name,
+        previous_entries=[
+            before[_entry_key(entry)] for entry in changed if _entry_key(entry) in before
+        ],
+        previous_pointer=previous_pointer,
+        pointer_version=pointer_version,
+    )
+
+
+def restore_database_change(
+    commit: RegistryCommit,
+    *,
+    updated_by: str,
+    on_connection: Callable[[Any], None] | None = None,
+) -> None:
+    """Undo a committed database change in a new transaction.
+
+    The replaced registry rows are written back and the pointer returns to its
+    previous model (as a new pointer_version, so pollers notice).
+    """
+
+    database = _database()
+    engine = database.get_engine()
+    try:
+        with engine.begin() as connection:
+            for entry in commit.previous_entries:
+                database.upsert_model_registry_row(connection, database.model_registry_row(entry))
+            if commit.previous_pointer is not None:
+                database.set_active_pointer(
+                    connection,
+                    model_name=commit.model_name,
+                    model_version=commit.previous_pointer["model_version"],
+                    artifact_path=commit.previous_pointer["artifact_path"],
+                    updated_by=updated_by,
+                    notes=commit.previous_pointer.get("notes"),
+                )
+            if on_connection is not None:
+                on_connection(connection)
+    finally:
+        engine.dispose()
+
+
+def materialize_active_pointer(
+    target_path: str | Path,
+    *,
+    model_name: str | None = None,
+) -> int:
+    """Write the full pointer YAML for the database's active model; its pointer_version.
+
+    Used to build a serving model from the shared pointer (API startup, the
+    pointer poller, and post-commit rollback verification).
+    """
+
+    state = load_registry_state(model_name=model_name)
+    if state.source != POINTER_SOURCE_POSTGRES:
+        raise RegistryError("the shared pointer needs the database to be configured")
+    if state.active_model_version is None or state.pointer_version is None:
+        raise RegistryError(f"no active model pointer for {state.model_name} in the database")
+
+    active_entry = next(
+        (
+            entry
+            for entry in state.entries
+            if entry.model_name == state.model_name
+            and entry.model_version == state.active_model_version
+        ),
+        None,
+    )
+    if active_entry is None:
+        raise RegistryError(
+            f"active model {state.model_name} {state.active_model_version} is not in the registry"
+        )
+
+    write_active_model_pointer(entry=active_entry, active_model_path=target_path)
+    return state.pointer_version
+
+
+def read_shared_pointer_version(model_name: str | None = None) -> int | None:
+    """Current pointer_version in the database (raises when it cannot be read)."""
+
+    database = _database()
+    engine = database.get_engine()
+    try:
+        return database.read_pointer_version(engine, model_name or default_model_name())
+    finally:
+        engine.dispose()
+
+
 def find_model_entry(
     *,
     model_name: str,
@@ -468,7 +825,9 @@ def _add_entry(
     registry_path: str | Path,
     replace_existing: bool,
 ) -> ModelRegistryEntry:
-    entries = load_model_registry(registry_path)
+    state = load_registry_state(registry_path=registry_path, model_name=entry.model_name)
+    ensure_database_initialized(state, entry.model_name)
+    entries = list(state.entries)
     existing_index = next(
         (
             index
@@ -490,7 +849,13 @@ def _add_entry(
     else:
         entries[existing_index] = entry
 
-    save_model_registry(entries, registry_path)
+    commit_registry_change(
+        state=state,
+        updated_entries=entries,
+        registry_path=registry_path,
+        active_model_path=DEFAULT_ACTIVE_MODEL_PATH,
+        updated_by="registration",
+    )
 
     return entry
 
@@ -780,20 +1145,24 @@ def _set_entry_status(
 ) -> ModelRegistryEntry:
     """Change a version's status outside the production promotion path."""
     _validate_status(status)
-    entries = load_model_registry(registry_path)
+    state = load_registry_state(
+        registry_path=registry_path,
+        active_model_path=active_model_path,
+        model_name=model_name,
+    )
+    ensure_database_initialized(state, model_name)
+    entries = state.entries
     if not any(
         entry.model_name == model_name and entry.model_version == model_version
         for entry in entries
     ):
         raise RegistryError(f"Model version not registered: {model_name} {model_version}")
 
-    if Path(active_model_path).exists():
-        pointer = read_active_model_pointer(active_model_path)
-        if pointer.model_name == model_name and pointer.active_model_version == model_version:
-            raise RegistryError(
-                f"Cannot change status of {model_name} {model_version} to {status!r}: "
-                "it is the active model version. Promote another version first."
-            )
+    if state.model_name == model_name and state.active_model_version == model_version:
+        raise RegistryError(
+            f"Cannot change status of {model_name} {model_version} to {status!r}: "
+            "it is the active model version. Promote another version first."
+        )
 
     def _with_status(entry: ModelRegistryEntry) -> ModelRegistryEntry:
         changes: dict[str, Any] = {"status": status}
@@ -807,12 +1176,18 @@ def _set_entry_status(
         else entry
         for entry in entries
     ]
-    save_model_registry(updated_entries, registry_path)
-
-    return find_model_entry(
-        model_name=model_name,
-        model_version=model_version,
+    commit_registry_change(
+        state=state,
+        updated_entries=updated_entries,
         registry_path=registry_path,
+        active_model_path=active_model_path,
+        updated_by="status-change",
+    )
+
+    return next(
+        entry
+        for entry in updated_entries
+        if entry.model_name == model_name and entry.model_version == model_version
     )
 
 
@@ -831,7 +1206,13 @@ def promote_model_version(
     must load and its metadata.json must list feature_names before anything is
     written.
     """
-    entries = load_model_registry(registry_path)
+    state = load_registry_state(
+        registry_path=registry_path,
+        active_model_path=active_model_path,
+        model_name=model_name,
+    )
+    ensure_database_initialized(state, model_name)
+    entries = state.entries
 
     if not entries:
         raise RegistryError("No registered models found.")
@@ -883,18 +1264,20 @@ def promote_model_version(
         else:
             updated_entries.append(entry)
 
-    save_model_registry(updated_entries, registry_path)
-
-    promoted_entry = find_model_entry(
-        model_name=model_name,
-        model_version=model_version,
-        registry_path=registry_path,
+    promoted_entry = next(
+        entry
+        for entry in updated_entries
+        if entry.model_name == model_name and entry.model_version == model_version
     )
 
-    write_active_model_pointer(
-        entry=promoted_entry,
+    commit_registry_change(
+        state=state,
+        updated_entries=updated_entries,
+        registry_path=registry_path,
         active_model_path=active_model_path,
+        pointer_entry=promoted_entry,
         notes=notes or f"Active production model set to {model_version}.",
+        updated_by="promotion",
     )
 
     return promoted_entry

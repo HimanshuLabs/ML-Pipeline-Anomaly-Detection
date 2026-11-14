@@ -603,6 +603,14 @@ def test_one_row_per_table_then_every_validation_query_passes(
                 "ml.model_registry",
                 database.model_registry_row(_registry_entry(version)),
             )
+        database.set_active_pointer(
+            connection,
+            model_name="isolation_forest",
+            model_version="v001",
+            artifact_path="artifacts/models/isolation_forest/model_version=v001/model.joblib",
+            updated_by="pytest",
+            notes=None,
+        )
         database.insert_row(
             connection,
             "ml.model_metrics",
@@ -658,3 +666,406 @@ def test_one_row_per_table_then_every_validation_query_passes(
     finally:
         transaction.rollback()
         connection.close()
+
+
+# --- stage 8a: shared registry and pointer -------------------------------------------
+
+
+def test_real_source_snapshot_row_matches_feature_snapshots_columns() -> None:
+    metadata_path = (
+        REPO_ROOT / "artifacts" / "models" / "isolation_forest" / "model_version=v002"
+    ) / "metadata.json"
+    snapshot_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))[
+        "training_snapshot_metadata"
+    ]
+
+    row = database.real_source_snapshot_row(snapshot_metadata)
+
+    assert set(row) == _columns("ml.feature_snapshots")
+    assert row["snapshot_id"] == "real_source_20260610T060738Z"
+    assert row["source_project"] == "project_1+project_2_3"
+    assert row["feature_count"] == 51
+    for not_null in ("snapshot_name", "source_layer", "feature_schema_version", "row_count"):
+        assert row[not_null] is not None
+
+
+def test_snapshot_rows_exist_for_every_real_registry_entry() -> None:
+    from anomaly_detection.registry import snapshot_rows_for_entry
+
+    for entry in load_model_registry(REAL_REGISTRY_PATH):
+        rows = snapshot_rows_for_entry(entry)
+
+        assert rows, entry.model_version
+        assert rows[0][0] == "ml.feature_snapshots"
+        assert rows[0][1]["snapshot_id"] == entry.snapshot_id
+        for table, row in rows:
+            assert set(row) == _columns(table)
+
+
+def test_registry_rows_round_trip_back_to_entries() -> None:
+    import uuid
+    from decimal import Decimal
+
+    for entry in load_model_registry(REAL_REGISTRY_PATH):
+        row = database.model_registry_row(entry)
+        stored = {
+            **row,
+            "model_id": uuid.UUID(row["model_id"]),
+            "artifact_uri": None,
+            "created_by": "manshu",
+        }
+        for column in ("training_started_at", "training_finished_at", "promoted_at",
+                       "archived_at", "created_at"):
+            if stored[column] is not None:
+                stored[column] = datetime.fromisoformat(stored[column])
+        for column in ("baseline_anomaly_rate", "latency_p50_ms", "latency_p95_ms"):
+            if stored[column] is not None:
+                stored[column] = Decimal(repr(stored[column]))
+
+        assert database.registry_entry_values(stored) == entry.to_dict()
+
+
+@pytest.fixture()
+def database_mode(postgres_engine, monkeypatch: pytest.MonkeyPatch):
+    """Empty, schema-applied test database used as the registry store."""
+
+    from sqlalchemy import text
+    from sqlalchemy.engine import make_url
+
+    url = make_url(os.environ["PROJECT4_TEST_DATABASE_URL"])
+    monkeypatch.setenv(database.ENV_HOST, url.host or "127.0.0.1")
+    monkeypatch.setenv(database.ENV_PORT, str(url.port or 5432))
+    monkeypatch.setenv(database.ENV_DATABASE, url.database or "")
+    monkeypatch.setenv(database.ENV_USER, url.username or "")
+    monkeypatch.setenv(database.ENV_PASSWORD, url.password or "")
+
+    database.apply_schema(postgres_engine)
+    with postgres_engine.begin() as connection:
+        connection.execute(
+            text(f"TRUNCATE {', '.join(sorted(database.INSERTABLE_TABLES))} CASCADE")
+        )
+    return postgres_engine
+
+
+@pytest.fixture()
+def initialized_database(database_mode):
+    """database_mode seeded by sync-from-files (v001, v002, pointer v002 at version 1)."""
+
+    database.sync_from_files(database_mode)
+    return database_mode
+
+
+def _database_entries(engine) -> dict[str, ModelRegistryEntry]:
+    with engine.connect() as connection:
+        return {
+            values["model_version"]: ModelRegistryEntry(**values)
+            for values in database.read_registry_entries(connection)
+        }
+
+
+def _database_pointer(engine, model_name: str = "isolation_forest"):
+    with engine.connect() as connection:
+        return database.read_active_pointer(connection, model_name)
+
+
+def _register_trained(trained_metadata_paths, versions) -> None:
+    from anomaly_detection.registry import register_model_from_artifacts
+
+    for version in versions:
+        register_model_from_artifacts(metadata_path=trained_metadata_paths[version])
+
+
+def _assert_mirror_matches_database(engine, isolate_repo_state: Path) -> None:
+    import yaml
+
+    mirror_registry = isolate_repo_state / REAL_REGISTRY_PATH.relative_to(REPO_ROOT)
+    mirror_pointer = yaml.safe_load(
+        (isolate_repo_state / "configs" / "active_model.yaml").read_text(encoding="utf-8")
+    )
+    assert {
+        entry.model_version: entry.to_dict() for entry in load_model_registry(mirror_registry)
+    } == {version: entry.to_dict() for version, entry in _database_entries(engine).items()}
+    assert mirror_pointer["active_model_version"] == _database_pointer(engine)["model_version"]
+
+
+@pytest.mark.postgres
+def test_sync_from_files_is_idempotent_and_never_touches_the_files(
+    database_mode,
+    isolate_repo_state: Path,
+) -> None:
+    mirror_registry = isolate_repo_state / REAL_REGISTRY_PATH.relative_to(REPO_ROOT)
+    mirror_pointer = isolate_repo_state / "configs" / "active_model.yaml"
+    files_before = (mirror_registry.read_bytes(), mirror_pointer.read_bytes())
+
+    first = database.sync_from_files(database_mode)
+    second = database.sync_from_files(database_mode)
+
+    assert first["registry_inserted"] == 2
+    assert first["pointer_version"] == 1 and first["pointer_changed"] is True
+    assert second["registry_unchanged"] == 2
+    assert second["snapshot_rows_inserted"] == 0
+    assert second["pointer_version"] == 1 and second["pointer_changed"] is False
+    assert (mirror_registry.read_bytes(), mirror_pointer.read_bytes()) == files_before
+    assert {
+        version: entry.to_dict() for version, entry in _database_entries(database_mode).items()
+    } == {entry.model_version: entry.to_dict() for entry in load_model_registry(mirror_registry)}
+
+
+@pytest.mark.postgres
+def test_promotion_and_rollback_commit_registry_pointer_and_event_together(
+    initialized_database,
+    isolate_repo_state: Path,
+    trained_metadata_paths: dict[str, Path],
+) -> None:
+    from sqlalchemy import text
+
+    from anomaly_detection.registry import promote_model_version
+    from anomaly_detection.rollback import rollback_active_model
+
+    _register_trained(trained_metadata_paths, ["v101", "v102"])
+    promote_model_version(model_name="isolation_forest", model_version="v101")
+    promote_model_version(model_name="isolation_forest", model_version="v102")
+
+    pointer = _database_pointer(initialized_database)
+    assert (pointer["model_version"], pointer["pointer_version"]) == ("v102", 3)
+    _assert_mirror_matches_database(initialized_database, isolate_repo_state)
+
+    event = rollback_active_model(rollback_reason="pytest", triggered_by="pytest")
+
+    entries = _database_entries(initialized_database)
+    pointer = _database_pointer(initialized_database)
+    with initialized_database.connect() as connection:
+        stored_event = connection.execute(
+            text("SELECT validation_status FROM audit.rollback_events WHERE rollback_id = :id"),
+            {"id": event.rollback_id},
+        ).scalar_one()
+    assert (entries["v101"].status, entries["v102"].status) == ("production", "rolled_back")
+    assert (pointer["model_version"], pointer["pointer_version"]) == ("v101", 4)
+    assert pointer["updated_by"] == "pytest"
+    assert stored_event == "applied"
+    _assert_mirror_matches_database(initialized_database, isolate_repo_state)
+
+
+@pytest.mark.postgres
+def test_forced_database_failure_changes_neither_database_nor_files(
+    initialized_database,
+    isolate_repo_state: Path,
+    trained_metadata_paths: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from anomaly_detection.registry import RegistryStorageError, promote_model_version
+
+    _register_trained(trained_metadata_paths, ["v101", "v102"])
+    promote_model_version(model_name="isolation_forest", model_version="v101")
+    mirror_registry = isolate_repo_state / REAL_REGISTRY_PATH.relative_to(REPO_ROOT)
+    mirror_pointer = isolate_repo_state / "configs" / "active_model.yaml"
+    files_before = (mirror_registry.read_bytes(), mirror_pointer.read_bytes())
+    entries_before = {
+        version: entry.to_dict()
+        for version, entry in _database_entries(initialized_database).items()
+    }
+    pointer_before = _database_pointer(initialized_database)
+
+    def _failing_pointer_write(*_args, **_kwargs):
+        raise RuntimeError("simulated failure inside the transaction")
+
+    monkeypatch.setattr(database, "set_active_pointer", _failing_pointer_write)
+
+    with pytest.raises(RegistryStorageError, match="nothing was changed"):
+        promote_model_version(model_name="isolation_forest", model_version="v102")
+
+    assert {
+        version: entry.to_dict()
+        for version, entry in _database_entries(initialized_database).items()
+    } == entries_before
+    assert _database_pointer(initialized_database) == pointer_before
+    assert (mirror_registry.read_bytes(), mirror_pointer.read_bytes()) == files_before
+
+
+@pytest.mark.postgres
+def test_two_serving_processes_converge_on_a_new_pointer_version(
+    initialized_database,
+    trained_metadata_paths: dict[str, Path],
+) -> None:
+    import time as time_module
+
+    from anomaly_detection.registry import promote_model_version
+    from api.main import (
+        AppState,
+        PointerPoller,
+        load_service_from_shared_pointer,
+        swap_inference_service,
+    )
+
+    _register_trained(trained_metadata_paths, ["v101", "v102"])
+    promote_model_version(model_name="isolation_forest", model_version="v101")
+
+    processes = []
+    for _ in range(2):
+        holder = AppState()
+        service, pointer_version = load_service_from_shared_pointer()
+        swap_inference_service(
+            holder, service, pointer_version=pointer_version, pointer_source="postgres"
+        )
+        poller = PointerPoller(holder, interval_seconds=0.1)
+        poller.start()
+        processes.append((holder, poller))
+
+    try:
+        assert {h.inference_service.active_model_info().model_version for h, _ in processes} == {
+            "v101"
+        }
+
+        promote_model_version(model_name="isolation_forest", model_version="v102")
+
+        deadline = time_module.monotonic() + 20
+        while time_module.monotonic() < deadline and any(
+            holder.inference_service.active_model_info().model_version != "v102"
+            for holder, _ in processes
+        ):
+            time_module.sleep(0.1)
+    finally:
+        for _holder, poller in processes:
+            poller.stop()
+
+    for holder, _ in processes:
+        assert holder.inference_service.active_model_info().model_version == "v102"
+        assert holder.pointer_version == _database_pointer(initialized_database)["pointer_version"]
+
+
+@pytest.mark.postgres
+def test_poller_keeps_serving_when_the_database_becomes_unreachable(
+    initialized_database,
+    trained_metadata_paths: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from anomaly_detection.registry import promote_model_version
+    from api.main import (
+        AppState,
+        PointerPoller,
+        load_service_from_shared_pointer,
+        swap_inference_service,
+    )
+
+    _register_trained(trained_metadata_paths, ["v101"])
+    promote_model_version(model_name="isolation_forest", model_version="v101")
+    holder = AppState()
+    service, pointer_version = load_service_from_shared_pointer()
+    swap_inference_service(
+        holder, service, pointer_version=pointer_version, pointer_source="postgres"
+    )
+
+    monkeypatch.setenv(database.ENV_PORT, "1")  # nothing listens there: an outage
+
+    poller = PointerPoller(holder, interval_seconds=30)
+    assert poller.poll_once() is False
+    assert holder.inference_service is service
+    assert holder.inference_service.active_model_info().model_version == "v101"
+
+
+# --- stage 8a follow-up: refuse writes to an uninitialized database ------------------
+
+NOT_INITIALIZED = "Project 4 database is not initialized for isolation_forest"
+
+
+def _write_attempts(trained_metadata_paths: dict[str, Path]):
+    from anomaly_detection.registry import (
+        promote_model,
+        promote_model_version,
+        register_model_from_artifacts,
+    )
+    from anomaly_detection.rollback import rollback_active_model
+
+    return {
+        "register": lambda: register_model_from_artifacts(
+            metadata_path=trained_metadata_paths["v101"]
+        ),
+        "promote": lambda: promote_model_version(
+            model_name="isolation_forest", model_version="v002"
+        ),
+        "status_change": lambda: promote_model(
+            model_name="isolation_forest", model_version="v001", target_status="archived"
+        ),
+        "rollback": lambda: rollback_active_model(
+            rollback_reason="pytest", triggered_by="pytest"
+        ),
+    }
+
+
+def _mirror_files(isolate_repo_state: Path) -> tuple[bytes, bytes]:
+    return (
+        (isolate_repo_state / REAL_REGISTRY_PATH.relative_to(REPO_ROOT)).read_bytes(),
+        (isolate_repo_state / "configs" / "active_model.yaml").read_bytes(),
+    )
+
+
+@pytest.mark.parametrize(
+    ("entries_kind", "pointer_version"),
+    [
+        pytest.param("none", None, id="empty_registry_no_pointer"),
+        pytest.param("real", None, id="entries_but_no_pointer"),
+        pytest.param("none", 1, id="pointer_but_empty_registry"),
+    ],
+)
+@pytest.mark.parametrize("attempt", ["register", "promote", "status_change", "rollback"])
+def test_writes_refuse_an_uninitialized_database_without_touching_anything(
+    attempt: str,
+    entries_kind: str,
+    pointer_version: int | None,
+    isolate_repo_state: Path,
+    trained_metadata_paths: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from anomaly_detection import registry, rollback
+    from anomaly_detection.registry import RegistryState, RegistryStorageError
+
+    entries = [] if entries_kind == "none" else load_model_registry(REAL_REGISTRY_PATH)
+    fake_state = RegistryState(
+        entries=entries,
+        model_name="isolation_forest",
+        active_model_version="v002" if pointer_version else None,
+        pointer_version=pointer_version,
+        source=registry.POINTER_SOURCE_POSTGRES,
+    )
+
+    def _fake_load_registry_state(**_kwargs):
+        return fake_state
+
+    def _no_database_access():
+        raise AssertionError("an uninitialized database must not be written to")
+
+    monkeypatch.setattr(registry, "database_enabled", lambda: True)
+    monkeypatch.setattr(rollback, "database_enabled", lambda: True)
+    monkeypatch.setattr(registry, "load_registry_state", _fake_load_registry_state)
+    monkeypatch.setattr(rollback, "load_registry_state", _fake_load_registry_state)
+    monkeypatch.setattr(registry, "_database", _no_database_access)
+    files_before = _mirror_files(isolate_repo_state)
+
+    with pytest.raises(RegistryStorageError, match=NOT_INITIALIZED) as error:
+        _write_attempts(trained_metadata_paths)[attempt]()
+
+    assert "sync-from-files" in str(error.value)
+    assert _mirror_files(isolate_repo_state) == files_before
+
+
+@pytest.mark.postgres
+@pytest.mark.parametrize("attempt", ["register", "promote", "status_change", "rollback"])
+def test_writes_refuse_an_empty_real_database_and_change_nothing(
+    attempt: str,
+    database_mode,
+    isolate_repo_state: Path,
+    trained_metadata_paths: dict[str, Path],
+) -> None:
+    from sqlalchemy import text
+
+    from anomaly_detection.registry import RegistryStorageError
+
+    files_before = _mirror_files(isolate_repo_state)
+
+    with pytest.raises(RegistryStorageError, match=NOT_INITIALIZED):
+        _write_attempts(trained_metadata_paths)[attempt]()
+
+    with database_mode.connect() as connection:
+        for table in sorted(database.INSERTABLE_TABLES):
+            assert connection.execute(text(f"SELECT COUNT(*) FROM {table}")).scalar_one() == 0
+    assert _mirror_files(isolate_repo_state) == files_before

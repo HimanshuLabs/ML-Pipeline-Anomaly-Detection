@@ -104,6 +104,41 @@ MODEL_ROLLBACK_TOTAL = Counter(
 )
 
 
+ACTIVE_POINTER_POLL_FAILURES_TOTAL = Counter(
+    "active_pointer_poll_failures_total",
+    "Polls of the shared active model pointer that could not reach the database.",
+)
+
+MODEL_RELOAD_TOTAL = Counter(
+    "model_reload_total",
+    "Reloads of the served model triggered by a changed shared pointer.",
+    ["result"],
+)
+
+REGISTRY_MIRROR_WRITE_FAILURES_TOTAL = Counter(
+    "registry_mirror_write_failures_total",
+    "Failed writes of the registry/pointer file mirror after a committed database change.",
+)
+
+
+def record_pointer_poll_failure() -> None:
+    """Count a pointer poll that could not reach the database."""
+
+    ACTIVE_POINTER_POLL_FAILURES_TOTAL.inc()
+
+
+def record_model_reload(*, result: str) -> None:
+    """Count a pointer-triggered model reload ('success' or 'failed')."""
+
+    MODEL_RELOAD_TOTAL.labels(result=result).inc()
+
+
+def record_registry_mirror_write_failure() -> None:
+    """Count a failed file-mirror write after a committed database change."""
+
+    REGISTRY_MIRROR_WRITE_FAILURES_TOTAL.inc()
+
+
 def _clean_label(value: str | None) -> str:
     """Return a safe Prometheus label value."""
 
