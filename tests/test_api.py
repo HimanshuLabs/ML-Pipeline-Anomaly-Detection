@@ -168,28 +168,23 @@ def test_metrics_endpoint_exposes_prometheus_metrics(
     assert "active_model_version" in response.text
 
 
-def test_rollback_endpoint_validates_previous_stable_model_without_mutation(
+def test_rollback_endpoint_dry_run_rejects_incompatible_targets_without_mutation(
     client: TestClient,
     active_model_version: str,
+    isolate_repo_state: Path,
 ) -> None:
-    # Previous stable model: the most recently archived prod-approved version.
+    # The real registry has no compatible rollback target for the active model
+    # (v001 is retired and has different feature_names), so the dry run must refuse.
     registry_models = json.loads(REAL_REGISTRY_PATH.read_text(encoding="utf-8"))["models"]
-    archived_models = [
-        model
+    other_versions = [
+        model["model_version"]
         for model in registry_models
-        if model["status"] == "archived"
-        and model["approved_for_prod"]
-        and model["model_version"] != active_model_version
+        if model["model_version"] != active_model_version
     ]
-    assert archived_models, "registry has no archived prod-approved model to roll back to"
-    expected_target_version = max(
-        archived_models,
-        key=lambda model: model["archived_at_utc"],
-    )["model_version"]
-
-    # CWD is the per-test mirror, so this is the pointer copy the endpoint uses.
-    active_model_path = Path("configs/active_model.yaml")
-    before_payload = active_model_path.read_text(encoding="utf-8")
+    pointer_path = isolate_repo_state / "configs" / "active_model.yaml"
+    registry_path = isolate_repo_state / REAL_REGISTRY_PATH.relative_to(REPO_ROOT)
+    pointer_before = pointer_path.read_bytes()
+    registry_before = registry_path.read_bytes()
 
     response = client.post(
         "/admin/rollback",
@@ -200,33 +195,24 @@ def test_rollback_endpoint_validates_previous_stable_model_without_mutation(
         },
     )
 
-    after_payload = active_model_path.read_text(encoding="utf-8")
-
-    assert response.status_code == 200
-
-    body = response.json()
-
-    assert body["status"] == "validated"
-    assert body["action_taken"] is False
-    assert body["from_model_version"] == active_model_version
-    assert body["to_model_version"] == expected_target_version
-    assert body["validation_status"] == "dry_run_validated"
-    assert body["dry_run"] is True
-    assert body["active_model_version"] == active_model_version
-    assert before_payload == after_payload
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert detail.startswith("No compatible rollback target for isolation_forest")
+    for version in other_versions:
+        assert version in detail
+    assert pointer_path.read_bytes() == pointer_before
+    assert registry_path.read_bytes() == registry_before
+    assert client.get("/model/active").json()["model_version"] == active_model_version
 
 
 def test_rollback_endpoint_returns_400_for_registry_errors(
     client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
+    isolate_repo_state: Path,
 ) -> None:
-    from anomaly_detection.registry import RegistryError
-    from api import main as api_main
-
-    def _broken_registry(**_kwargs):
-        raise RegistryError("registry entry has unexpected fields")
-
-    monkeypatch.setattr(api_main, "list_model_versions", _broken_registry)
+    registry_path = isolate_repo_state / REAL_REGISTRY_PATH.relative_to(REPO_ROOT)
+    registry_payload = json.loads(registry_path.read_text(encoding="utf-8"))
+    registry_payload["models"][0]["unexpected_field"] = "not in the registry schema"
+    registry_path.write_text(json.dumps(registry_payload), encoding="utf-8")
 
     response = TestClient(app, raise_server_exceptions=False).post(
         "/admin/rollback",
@@ -234,7 +220,39 @@ def test_rollback_endpoint_returns_400_for_registry_errors(
     )
 
     assert response.status_code == 400
-    assert response.json()["detail"] == "registry entry has unexpected fields"
+    assert "does not match the registry schema" in response.json()["detail"]
+    assert "unexpected_field" in response.json()["detail"]
+
+
+def test_rollback_and_promotion_do_not_depend_on_working_directory(
+    client: TestClient,
+    active_model_version: str,
+    isolate_repo_state: Path,
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from anomaly_detection.registry import promote_model_version
+
+    pointer_path = isolate_repo_state / "configs" / "active_model.yaml"
+    registry_path = isolate_repo_state / REAL_REGISTRY_PATH.relative_to(REPO_ROOT)
+    unrelated_directory = tmp_path_factory.mktemp("unrelated_cwd")
+    monkeypatch.chdir(unrelated_directory)
+
+    response = client.post("/admin/rollback", json={"dry_run": True})
+
+    # The dry run reached target selection, so it read the project-root pointer
+    # and registry, not configs/ under the unrelated working directory.
+    assert response.status_code == 400
+    assert "No compatible rollback target" in response.json()["detail"]
+
+    pointer_before = pointer_path.read_bytes()
+    registry_before = registry_path.read_bytes()
+
+    promote_model_version(model_name="isolation_forest", model_version=active_model_version)
+
+    assert pointer_path.read_bytes() != pointer_before
+    assert registry_path.read_bytes() != registry_before
+    assert list(unrelated_directory.iterdir()) == []
 
 
 def test_predict_rejects_missing_required_model_features(client: TestClient) -> None:

@@ -6,6 +6,7 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+import joblib
 import pandas as pd
 import pytest
 import yaml
@@ -62,6 +63,18 @@ def _sample_feature_frame(row_count: int = 48) -> pd.DataFrame:
         )
 
     return pd.DataFrame(rows)
+
+
+def _write_loadable_artifact(
+    artifact_path: Path,
+    feature_names: tuple[str, ...] = ("feature_a", "feature_b"),
+) -> None:
+    """Write a joblib-loadable stand-in model plus a metadata.json beside it."""
+    joblib.dump({"fake_model": artifact_path.name}, artifact_path)
+    (artifact_path.parent / "metadata.json").write_text(
+        json.dumps({"feature_names": list(feature_names)}),
+        encoding="utf-8",
+    )
 
 
 def _train_test_artifact(
@@ -318,7 +331,7 @@ def test_promote_model_updates_active_model_pointer(tmp_path):
     registry_path = tmp_path / "model_registry.json"
     active_model_path = tmp_path / "active_model.yaml"
     artifact_path = tmp_path / "model.joblib"
-    artifact_path.write_text("fake model artifact", encoding="utf-8")
+    _write_loadable_artifact(artifact_path)
 
     register_model(
         model_name="isolation_forest",
@@ -393,8 +406,8 @@ def test_promoting_new_production_model_archives_previous_production(tmp_path):
 
     artifact_v1 = tmp_path / "model_v1.joblib"
     artifact_v2 = tmp_path / "model_v2.joblib"
-    artifact_v1.write_text("fake v1 model artifact", encoding="utf-8")
-    artifact_v2.write_text("fake v2 model artifact", encoding="utf-8")
+    _write_loadable_artifact(artifact_v1)
+    _write_loadable_artifact(artifact_v2)
 
     for version, artifact in [("v904", artifact_v1), ("v905", artifact_v2)]:
         register_model(
@@ -515,7 +528,7 @@ def _register_fake_model(registry_path: Path, artifact_dir: Path, model_version:
 
     artifact_dir.mkdir(parents=True)
     artifact_path = artifact_dir / "model.joblib"
-    artifact_path.write_text("fake model artifact", encoding="utf-8")
+    _write_loadable_artifact(artifact_path)
 
     register_model(
         model_name="isolation_forest",
@@ -613,6 +626,112 @@ def test_promote_model_archives_non_active_version_with_timestamp(tmp_path: Path
     assert archived["status"] == "archived"
     assert stored.status == "archived"
     assert stored.archived_at_utc is not None
+
+
+def _register_without_promoting(
+    tmp_path: Path,
+    *,
+    write_artifact,
+) -> Path:
+    from anomaly_detection.registry import register_model
+
+    registry_path = tmp_path / "model_registry.json"
+    artifact_path = tmp_path / "v950" / "model.joblib"
+    artifact_path.parent.mkdir()
+    write_artifact(artifact_path)
+
+    register_model(
+        model_name="isolation_forest",
+        model_version="v950",
+        artifact_path=str(artifact_path),
+        dataset_snapshot_id="snapshot_v950",
+        feature_schema_version="feature_schema_v001",
+        training_timestamp="2026-06-10T10:00:00+00:00",
+        registry_path=registry_path,
+    )
+    return registry_path
+
+
+def _loadable_without_metadata(artifact_path: Path) -> None:
+    joblib.dump({"fake_model": "v950"}, artifact_path)
+
+
+def _unloadable_with_metadata(artifact_path: Path) -> None:
+    artifact_path.write_text("this is not a joblib file", encoding="utf-8")
+    (artifact_path.parent / "metadata.json").write_text(
+        json.dumps({"feature_names": ["feature_a"]}),
+        encoding="utf-8",
+    )
+
+
+def _loadable_with_empty_feature_names(artifact_path: Path) -> None:
+    _write_loadable_artifact(artifact_path, feature_names=())
+
+
+@pytest.mark.parametrize(
+    ("write_artifact", "expected_message"),
+    [
+        pytest.param(_loadable_without_metadata, "metadata.json", id="no_metadata"),
+        pytest.param(_unloadable_with_metadata, "does not load", id="unloadable_artifact"),
+        pytest.param(
+            _loadable_with_empty_feature_names,
+            "feature_names",
+            id="empty_feature_names",
+        ),
+    ],
+)
+def test_promotion_requires_loadable_artifact_and_feature_names(
+    tmp_path: Path,
+    write_artifact,
+    expected_message: str,
+) -> None:
+    registry_path = _register_without_promoting(tmp_path, write_artifact=write_artifact)
+    active_model_path = tmp_path / "active_model.yaml"
+    registry_before = registry_path.read_bytes()
+
+    with pytest.raises(RegistryError, match=expected_message):
+        promote_model_version(
+            model_name="isolation_forest",
+            model_version="v950",
+            registry_path=registry_path,
+            active_model_path=active_model_path,
+        )
+
+    assert registry_path.read_bytes() == registry_before
+    assert not active_model_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("existing_mode", "expected_mode"),
+    [
+        pytest.param(0o664, 0o664, id="existing_pointer_keeps_mode"),
+        pytest.param(None, 0o644, id="new_pointer_gets_0644"),
+    ],
+)
+def test_pointer_write_preserves_or_sets_file_mode(
+    tmp_path: Path,
+    existing_mode: int | None,
+    expected_mode: int,
+) -> None:
+    import stat
+
+    registry_path = tmp_path / "model_registry.json"
+    active_model_path = tmp_path / "configs" / "active_model.yaml"
+    _register_fake_model(registry_path, tmp_path / "v960", "v960")
+
+    if existing_mode is not None:
+        active_model_path.parent.mkdir(parents=True)
+        active_model_path.write_text("model_name: isolation_forest\n", encoding="utf-8")
+        active_model_path.chmod(existing_mode)
+
+    promote_model_version(
+        model_name="isolation_forest",
+        model_version="v960",
+        registry_path=registry_path,
+        active_model_path=active_model_path,
+    )
+
+    assert stat.S_IMODE(active_model_path.stat().st_mode) == expected_mode
 
 
 def test_real_registry_loads_and_saves_losslessly(tmp_path: Path) -> None:

@@ -13,13 +13,16 @@ the active model pointer (write_active_model_pointer).
 from __future__ import annotations
 
 import json
+import stat
 import uuid
 from dataclasses import asdict, dataclass, fields
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from typing import Any
 
+import joblib
 import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -160,11 +163,29 @@ def _write_json(path: str | Path, payload: dict[str, Any]) -> None:
 
 
 def _write_yaml(path: str | Path, payload: dict[str, Any]) -> None:
+    """Write YAML atomically: a failed write leaves the previous file intact."""
     yaml_path = Path(path)
     yaml_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with yaml_path.open("w", encoding="utf-8") as file:
-        yaml.safe_dump(payload, file, sort_keys=False)
+    with NamedTemporaryFile(
+        "w",
+        encoding="utf-8",
+        dir=yaml_path.parent,
+        prefix=f".{yaml_path.name}.",
+        delete=False,
+    ) as tmp_file:
+        tmp_path = Path(tmp_file.name)
+        try:
+            yaml.safe_dump(payload, tmp_file, sort_keys=False)
+        except BaseException:
+            tmp_file.close()
+            tmp_path.unlink(missing_ok=True)
+            raise
+
+    # NamedTemporaryFile creates 0600; keep the target's mode, or 0644 for a new file.
+    target_mode = stat.S_IMODE(yaml_path.stat().st_mode) if yaml_path.exists() else 0o644
+    tmp_path.chmod(target_mode)
+    tmp_path.replace(yaml_path)
 
 
 def _read_yaml(path: str | Path) -> dict[str, Any]:
@@ -201,7 +222,7 @@ def _path_exists(path_value: str | None, *, label: str) -> None:
     if not path_value:
         raise RegistryError(f"{label} is missing from artifact metadata.")
 
-    path = Path(path_value)
+    path = _resolve_registry_path(path_value)
     if not path.exists():
         raise RegistryError(f"{label} does not exist: {path}")
 
@@ -211,9 +232,10 @@ def _to_registry_path(path_value: str) -> str:
 
     Absolute local paths are poison in source-controlled config because they only
     work on one machine. If an artifact lives inside this repository, store it
-    relative to PROJECT_ROOT. External paths remain absolute.
+    relative to PROJECT_ROOT. External paths remain absolute. Relative input
+    paths are taken as relative to PROJECT_ROOT, never to the working directory.
     """
-    resolved_path = Path(path_value).resolve()
+    resolved_path = _resolve_registry_path(path_value).resolve()
 
     try:
         return str(resolved_path.relative_to(PROJECT_ROOT))
@@ -221,9 +243,43 @@ def _to_registry_path(path_value: str) -> str:
         return str(resolved_path)
 
 
-def _resolve_registry_path(path_value: str) -> Path:
+def _resolve_registry_path(path_value: str | Path) -> Path:
     path = Path(path_value)
     return path if path.is_absolute() else PROJECT_ROOT / path
+
+
+def load_verified_feature_names(entry: ModelRegistryEntry) -> list[str]:
+    """Check a version can serve: its artifact loads and metadata lists its features.
+
+    Returns the ordered feature_names from the version's metadata.json.
+    Raises RegistryError with a short reason otherwise.
+    """
+    artifact_path = _resolve_registry_path(entry.artifact_path)
+    if not artifact_path.exists():
+        raise RegistryError(f"artifact does not exist: {entry.artifact_path}")
+
+    try:
+        joblib.load(artifact_path)
+    except Exception as exc:  # noqa: BLE001 - any load failure makes the artifact unusable
+        raise RegistryError(
+            f"artifact does not load: {entry.artifact_path} ({type(exc).__name__})"
+        ) from exc
+
+    metadata_path = _resolve_registry_path(entry.metadata_path)
+    if not metadata_path.exists():
+        raise RegistryError(f"metadata.json does not exist: {entry.metadata_path}")
+
+    feature_names = _read_json(metadata_path).get("feature_names")
+    if (
+        not isinstance(feature_names, list)
+        or not feature_names
+        or not all(isinstance(name, str) for name in feature_names)
+    ):
+        raise RegistryError(
+            f"metadata.json has no non-empty feature_names list: {entry.metadata_path}"
+        )
+
+    return feature_names
 
 
 def _as_optional_float(value: Any) -> float | None:
@@ -332,14 +388,17 @@ def load_model_registry(
 def save_model_registry(
     entries: list[ModelRegistryEntry],
     registry_path: str | Path = DEFAULT_REGISTRY_PATH,
+    *,
+    updated_at_utc: str | None = None,
 ) -> None:
     """Persist local model registry entries.
 
-    This is the only function that writes the registry file.
+    This is the only function that writes the registry file. Passing
+    updated_at_utc restores a previous registry state exactly (rollback undo).
     """
     payload = {
         "registry_backend": "local_json",
-        "updated_at_utc": _utc_now_iso(),
+        "updated_at_utc": updated_at_utc or _utc_now_iso(),
         "models": [entry.to_dict() for entry in entries],
     }
     _write_json(registry_path, payload)
@@ -447,7 +506,7 @@ def register_model_from_artifacts(
     _path_exists(artifact_metadata.get("feature_schema_path"), label="feature_schema_path")
     _path_exists(artifact_metadata.get("baseline_stats_path"), label="baseline_stats_path")
 
-    baseline_stats = _read_json(artifact_metadata["baseline_stats_path"])
+    baseline_stats = _read_json(_resolve_registry_path(artifact_metadata["baseline_stats_path"]))
 
     entry = _build_entry_from_artifact_metadata(
         artifact_metadata=artifact_metadata,
@@ -494,7 +553,7 @@ def register_model(
             "Use promote_model to promote a version to production."
         )
 
-    artifact = Path(artifact_path)
+    artifact = _resolve_registry_path(artifact_path)
     if not artifact.exists():
         raise RegistryError(f"Model artifact does not exist: {artifact_path}")
 
@@ -724,7 +783,9 @@ def promote_model_version(
     """Promote a registered model version to production.
 
     Any existing production version for the same model is archived. This gives
-    rollback logic a clean previous-stable trail later.
+    rollback logic a clean previous-stable trail later. The target's artifact
+    must load and its metadata.json must list feature_names before anything is
+    written.
     """
     entries = load_model_registry(registry_path)
 
@@ -741,6 +802,8 @@ def promote_model_version(
 
     if target_index is None:
         raise RegistryError(f"Model version not registered: {model_name} {model_version}")
+
+    load_verified_feature_names(entries[target_index])
 
     for entry in entries:
         if (

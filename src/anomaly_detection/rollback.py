@@ -2,8 +2,9 @@
 
 Rollback is intentionally implemented as a controlled operation, not a blind
 automation. The module reads the active production model pointer, selects a
-previous stable approved model from registry-like records, updates the active
-pointer, and writes durable rollback audit evidence.
+previous stable approved model that can serve the same feature contract,
+updates the registry and the active pointer through the registry's single
+writers, and writes durable rollback audit evidence.
 
 Database support is planned through audit.rollback_events. The current
 implementation is local-first and writes JSONL rollback evidence so the behavior
@@ -14,20 +15,28 @@ from __future__ import annotations
 
 import json
 import uuid
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from tempfile import NamedTemporaryFile
 from typing import Any
 
 import yaml
+
+from anomaly_detection.registry import (
+    DEFAULT_REGISTRY_PATH,
+    ModelRegistryEntry,
+    ModelStatus,
+    RegistryError,
+    load_model_registry,
+    load_verified_feature_names,
+    save_model_registry,
+    write_active_model_pointer,
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 DEFAULT_ACTIVE_MODEL_PATH = PROJECT_ROOT / "configs" / "active_model.yaml"
 DEFAULT_ROLLBACK_EVENTS_PATH = PROJECT_ROOT / "logs" / "alerts" / "rollback_events.jsonl"
-
-STABLE_ROLLBACK_STATUSES = {"archived", "rolled_back", "production"}
 
 
 class RollbackError(RuntimeError):
@@ -79,26 +88,6 @@ def _read_yaml(path: Path) -> dict[str, Any]:
         raise RollbackError(f"active model pointer must be a YAML object: {path}")
 
     return payload
-
-
-def _write_yaml_atomic(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    with NamedTemporaryFile(
-        "w",
-        encoding="utf-8",
-        dir=path.parent,
-        delete=False,
-    ) as tmp_file:
-        yaml.safe_dump(
-            payload,
-            tmp_file,
-            sort_keys=False,
-            allow_unicode=True,
-        )
-        tmp_path = Path(tmp_file.name)
-
-    tmp_path.replace(path)
 
 
 def _json_safe(value: Any) -> Any:
@@ -161,180 +150,172 @@ def read_rollback_events_jsonl(path: Path) -> list[dict[str, Any]]:
     return records
 
 
-def _record_to_dict(record: Any) -> dict[str, Any]:
-    if isinstance(record, dict):
-        return record
+def _rejection_reason(
+    entry: ModelRegistryEntry,
+    active_feature_names: list[str],
+) -> str | None:
+    """Return why a version cannot be a rollback target, or None if it can."""
 
-    if hasattr(record, "model_dump"):
-        payload = record.model_dump()
-        if isinstance(payload, dict):
-            return payload
+    if entry.status != ModelStatus.ARCHIVED:
+        return f"status {entry.status!r} is not 'archived'"
 
-    if hasattr(record, "__dict__"):
-        return {
-            key: value
-            for key, value in vars(record).items()
-            if not key.startswith("_")
-        }
+    if not entry.approved_for_prod:
+        return "not approved_for_prod"
 
-    raise RollbackError(f"unsupported registry record type: {type(record)!r}")
+    try:
+        feature_names = load_verified_feature_names(entry)
+    except RegistryError as exc:
+        return str(exc)
 
+    if feature_names != active_feature_names:
+        return (
+            f"feature_names differ from the active model "
+            f"({len(feature_names)} vs {len(active_feature_names)} features)"
+        )
 
-def _parse_sort_timestamp(record: dict[str, Any]) -> str:
-    """Return best available timestamp-like value for stable ordering."""
-
-    for key in (
-        "promoted_at_utc",
-        "archived_at_utc",
-        "registered_at_utc",
-        "created_at_utc",
-        "training_finished_at",
-        "training_finished_at_utc",
-        "updated_at",
-        "last_updated_at",
-    ):
-        value = record.get(key)
-        if value:
-            return str(value)
-
-    return ""
+    return None
 
 
 def select_previous_stable_model(
-    registry_records: list[Any],
+    registry_records: list[ModelRegistryEntry],
     *,
     current_model_version: str,
-    model_name: str | None = None,
+    model_name: str,
 ) -> RollbackTarget:
-    """Select the latest previous stable approved model.
+    """Select the latest previous stable model that can serve the active contract.
 
     A rollback target must:
-    - not be the currently active version
-    - match model_name when provided
-    - be approved for production
-    - have a stable status such as archived, rolled_back, or production
-    - include model_version and artifact_path
+    - have the same model_name and a different version from the active one
+    - have status 'archived' and be approved for production
+    - have an artifact that exists and loads with joblib
+    - have metadata.json whose feature_names equal the active model's, in order
+
+    Among eligible versions the most recently archived one is selected.
     """
 
     if not current_model_version:
         raise RollbackError("current_model_version is required")
 
-    normalized_records = [_record_to_dict(record) for record in registry_records]
-
-    candidates: list[dict[str, Any]] = []
-
-    for record in normalized_records:
-        record_model_name = record.get("model_name")
-        record_version = record.get("model_version")
-        status = str(record.get("status", "")).lower()
-        approved_for_prod = bool(record.get("approved_for_prod", False))
-        artifact_path = record.get("artifact_path")
-
-        if model_name and record_model_name != model_name:
-            continue
-
-        if record_version == current_model_version:
-            continue
-
-        if status not in STABLE_ROLLBACK_STATUSES:
-            continue
-
-        if not approved_for_prod:
-            continue
-
-        if not record_version or not artifact_path:
-            continue
-
-        candidates.append(record)
-
-    if not candidates:
+    same_model = [entry for entry in registry_records if entry.model_name == model_name]
+    active_entry = next(
+        (entry for entry in same_model if entry.model_version == current_model_version),
+        None,
+    )
+    if active_entry is None:
         raise RollbackError(
-            "no previous stable approved model found for rollback"
+            f"active model {model_name} {current_model_version} is not in the registry"
         )
 
-    candidates.sort(
-        key=lambda item: (
-            _parse_sort_timestamp(item),
-            str(item.get("model_version", "")),
-        ),
-        reverse=True,
-    )
+    try:
+        active_feature_names = load_verified_feature_names(active_entry)
+    except RegistryError as exc:
+        raise RollbackError(
+            f"active model {model_name} {current_model_version} cannot be checked: {exc}"
+        ) from exc
 
-    selected = candidates[0]
+    eligible: list[ModelRegistryEntry] = []
+    rejections: list[str] = []
+
+    for entry in same_model:
+        if entry.model_version == current_model_version:
+            continue
+
+        reason = _rejection_reason(entry, active_feature_names)
+        if reason is None:
+            eligible.append(entry)
+        else:
+            rejections.append(f"{entry.model_version}: {reason}")
+
+    if not eligible:
+        details = "; ".join(rejections) or "no other registered versions"
+        raise RollbackError(f"No compatible rollback target for {model_name}: {details}")
+
+    selected = max(eligible, key=lambda entry: entry.archived_at_utc or "")
 
     return RollbackTarget(
-        model_name=str(selected.get("model_name") or model_name or ""),
-        model_version=str(selected["model_version"]),
-        artifact_path=str(selected["artifact_path"]),
-        dataset_snapshot_id=(
-            str(selected["dataset_snapshot_id"])
-            if selected.get("dataset_snapshot_id") is not None
-            else None
-        ),
-        feature_schema_version=(
-            str(selected["feature_schema_version"])
-            if selected.get("feature_schema_version") is not None
-            else None
-        ),
-        status="production",
+        model_name=selected.model_name,
+        model_version=selected.model_version,
+        artifact_path=selected.artifact_path,
+        dataset_snapshot_id=selected.snapshot_id,
+        feature_schema_version=selected.feature_schema_version,
+        status=ModelStatus.PRODUCTION.value,
         approved_for_prod=True,
-        selected_from_status=str(selected.get("status", "")),
+        selected_from_status=selected.status,
     )
 
 
-def build_rollback_active_model_payload(
+def _apply_registry_and_pointer(
     *,
-    current_active_model: dict[str, Any],
-    rollback_target: RollbackTarget,
-) -> dict[str, Any]:
-    """Build the replacement active_model.yaml payload."""
+    entries: list[ModelRegistryEntry],
+    registry_path: Path,
+    active_model_path: Path,
+    model_name: str,
+    from_model_version: str,
+    to_model_version: str,
+    rollback_reason: str,
+) -> None:
+    """Commit the rollback: registry statuses first, then the pointer.
 
-    model_name = rollback_target.model_name or current_active_model.get("model_name")
+    If the pointer write fails, the registry is restored to its previous content.
+    """
 
-    if not model_name:
-        raise RollbackError("rollback target model_name is missing")
-
-    payload = dict(current_active_model)
-
-    payload.update(
-        {
-            "model_name": model_name,
-            "active_model_version": rollback_target.model_version,
-            "artifact_path": rollback_target.artifact_path,
-            "status": "production",
-            "approved_for_prod": True,
-            "last_updated_at": _utc_now(),
-            "updated_at": _utc_now(),
-            "rollback": {
-                "rolled_back_from_model_version": current_active_model.get(
-                    "active_model_version"
-                ),
-                "rolled_back_to_model_version": rollback_target.model_version,
-                "rollback_applied_at_utc": _utc_now(),
-                "selected_from_status": rollback_target.selected_from_status,
-            },
-        }
+    previous_updated_at = json.loads(registry_path.read_text(encoding="utf-8")).get(
+        "updated_at_utc"
     )
+    now = _utc_now()
+    updated_entries: list[ModelRegistryEntry] = []
+    target_entry: ModelRegistryEntry | None = None
 
-    if rollback_target.dataset_snapshot_id is not None:
-        payload["dataset_snapshot_id"] = rollback_target.dataset_snapshot_id
+    for entry in entries:
+        if entry.model_name == model_name and entry.model_version == from_model_version:
+            updated_entries.append(replace(entry, status=ModelStatus.ROLLED_BACK.value))
+        elif entry.model_name == model_name and entry.model_version == to_model_version:
+            target_entry = replace(
+                entry,
+                status=ModelStatus.PRODUCTION.value,
+                approved_for_prod=True,
+                promoted_at_utc=now,
+                archived_at_utc=None,
+            )
+            updated_entries.append(target_entry)
+        else:
+            updated_entries.append(entry)
 
-    if rollback_target.feature_schema_version is not None:
-        payload["feature_schema_version"] = rollback_target.feature_schema_version
+    if target_entry is None:
+        raise RollbackError(f"rollback target {to_model_version} is not in the registry")
 
-    return payload
+    save_model_registry(updated_entries, registry_path)
+
+    try:
+        write_active_model_pointer(
+            entry=target_entry,
+            active_model_path=active_model_path,
+            notes=(
+                f"Rolled back from {from_model_version} to {to_model_version}: "
+                f"{rollback_reason}"
+            ),
+        )
+    except Exception as exc:
+        save_model_registry(entries, registry_path, updated_at_utc=previous_updated_at)
+        raise RollbackError(
+            f"rollback to {to_model_version} failed while writing the active pointer; "
+            f"registry restored: {exc}"
+        ) from exc
 
 
 def rollback_active_model(
-    registry_records: list[Any],
     *,
+    registry_path: Path = DEFAULT_REGISTRY_PATH,
     active_model_path: Path = DEFAULT_ACTIVE_MODEL_PATH,
     rollback_events_path: Path = DEFAULT_ROLLBACK_EVENTS_PATH,
     rollback_reason: str,
     triggered_by: str = "manual",
     dry_run: bool = False,
 ) -> RollbackEvent:
-    """Rollback active model pointer to the previous stable approved version."""
+    """Rollback the active model to the previous compatible stable version.
+
+    A dry run performs exactly the same target checks and writes nothing.
+    """
 
     rollback_reason = rollback_reason.strip()
     triggered_by = triggered_by.strip()
@@ -345,6 +326,9 @@ def rollback_active_model(
     if not triggered_by:
         raise RollbackError("triggered_by is required")
 
+    registry_path = Path(registry_path)
+    active_model_path = Path(active_model_path)
+
     current_active_model = _read_yaml(active_model_path)
 
     current_model_version = current_active_model.get("active_model_version")
@@ -353,20 +337,20 @@ def rollback_active_model(
     if not current_model_version:
         raise RollbackError("active model pointer missing active_model_version")
 
-    rollback_target = select_previous_stable_model(
-        registry_records,
-        current_model_version=str(current_model_version),
-        model_name=str(model_name) if model_name else None,
-    )
+    if not model_name:
+        raise RollbackError("active model pointer missing model_name")
 
-    next_active_model = build_rollback_active_model_payload(
-        current_active_model=current_active_model,
-        rollback_target=rollback_target,
+    entries = load_model_registry(registry_path)
+
+    rollback_target = select_previous_stable_model(
+        entries,
+        current_model_version=str(current_model_version),
+        model_name=str(model_name),
     )
 
     event = RollbackEvent(
         rollback_id=f"rollback_{uuid.uuid4().hex}",
-        model_name=str(model_name or rollback_target.model_name),
+        model_name=str(model_name),
         from_model_version=str(current_model_version),
         to_model_version=rollback_target.model_version,
         rollback_reason=rollback_reason,
@@ -381,7 +365,15 @@ def rollback_active_model(
     if dry_run:
         return event
 
-    _write_yaml_atomic(active_model_path, next_active_model)
+    _apply_registry_and_pointer(
+        entries=entries,
+        registry_path=registry_path,
+        active_model_path=active_model_path,
+        model_name=str(model_name),
+        from_model_version=str(current_model_version),
+        to_model_version=rollback_target.model_version,
+        rollback_reason=rollback_reason,
+    )
     append_rollback_event_jsonl(event, rollback_events_path)
 
     return event

@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import time
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Response
@@ -27,11 +26,7 @@ from anomaly_detection.online_inference import (
     prediction_to_dict,
 )
 from anomaly_detection.prediction_logging import write_online_predictions_jsonl
-from anomaly_detection.registry import (
-    RegistryError,
-    list_model_versions,
-    read_active_model_pointer,
-)
+from anomaly_detection.registry import RegistryError, read_active_model_pointer
 from anomaly_detection.rollback import RollbackError, rollback_active_model
 from api.schemas import (
     ActiveModelResponse,
@@ -274,14 +269,7 @@ def rollback_model(request: RollbackRequest | None = None) -> dict[str, Any]:
     rollback_request = request or RollbackRequest()
 
     try:
-        active_pointer_before = read_active_model_pointer()
-        registry_records = list_model_versions(
-            model_name=active_pointer_before.model_name,
-        )
-
         rollback_event = rollback_active_model(
-            registry_records,
-            active_model_path=Path("configs/active_model.yaml"),
             rollback_reason=rollback_request.rollback_reason,
             triggered_by=rollback_request.triggered_by,
             dry_run=rollback_request.dry_run,

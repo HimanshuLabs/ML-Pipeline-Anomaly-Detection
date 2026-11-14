@@ -23,6 +23,8 @@ from sqlalchemy.engine import Engine
 
 LOGGER = logging.getLogger(__name__)
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
 MODEL_FEATURE_COLUMNS = [
     "total_events",
     "page_view_count",
@@ -616,7 +618,12 @@ def write_snapshot(
     snapshot_prefix = config.get("output_snapshot_prefix", "real_source")
     snapshot_id = f"{snapshot_prefix}_{now.strftime('%Y%m%dT%H%M%SZ')}"
 
-    root = Path(output_root or config["output"]["root"])
+    if output_root is not None:
+        root = Path(output_root)
+    else:
+        # Relative roots in the config file are relative to the project, not the CWD.
+        configured_root = Path(config["output"]["root"])
+        root = configured_root if configured_root.is_absolute() else PROJECT_ROOT / configured_root
     snapshot_path = root / f"snapshot_date={snapshot_date}" / f"snapshot_id={snapshot_id}"
     snapshot_path.mkdir(parents=True, exist_ok=False)
 

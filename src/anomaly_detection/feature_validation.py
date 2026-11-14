@@ -16,7 +16,8 @@ import numpy as np
 import pandas as pd
 import yaml
 
-DEFAULT_CONFIG_PATH = Path("configs/model_config.yaml")
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_CONFIG_PATH = PROJECT_ROOT / "configs" / "model_config.yaml"
 
 
 class FeatureValidationError(ValueError):
