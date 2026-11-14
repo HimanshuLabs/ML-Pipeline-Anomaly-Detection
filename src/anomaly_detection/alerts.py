@@ -541,6 +541,35 @@ def append_alert_events_jsonl(
     return output_path
 
 
+def insert_alert_events_database(alert_events: list[AlertEvent]) -> int:
+    """Store alert events in monitoring.alert_events (one transaction).
+
+    The database counterpart of append_alert_events_jsonl.
+    """
+
+    from anomaly_detection import database
+
+    if not alert_events:
+        raise AlertingError("no alert events supplied")
+    for alert_event in alert_events:
+        _validate_alert_event(alert_event)
+    return database.insert_alert_events(alert_events)
+
+
+def persist_alert_events(
+    alert_events: list[AlertEvent],
+    output_path: Path = DEFAULT_ALERT_EVENTS_PATH,
+) -> dict[str, Any]:
+    """JSONL always, plus monitoring.alert_events when the database is configured."""
+
+    from anomaly_detection import database
+
+    written: dict[str, Any] = {"jsonl": append_alert_events_jsonl(alert_events, output_path)}
+    if database.is_configured():
+        written["postgres"] = insert_alert_events_database(alert_events)
+    return written
+
+
 def read_alert_events_jsonl(path: Path) -> list[dict[str, Any]]:
     """Read alert events from a JSONL file."""
 

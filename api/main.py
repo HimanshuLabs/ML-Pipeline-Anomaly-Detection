@@ -13,8 +13,17 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException, Response
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    FastAPI,
+    Header,
+    HTTPException,
+    Response,
+)
 
+from anomaly_detection.database import insert_online_predictions
 from anomaly_detection.metrics import (
     ACTIVE_MODEL_VERSION,
     observe_prediction_latency_ms,
@@ -24,6 +33,7 @@ from anomaly_detection.metrics import (
     record_model_rollback,
     record_pointer_poll_failure,
     record_prediction_error,
+    record_prediction_persist_failure,
     record_prediction_request,
     render_prometheus_metrics,
     set_active_model_version,
@@ -262,15 +272,38 @@ class PointerPoller:
 state = AppState()
 
 
+# Per sink: True while writes keep failing, so one ERROR is logged per failure burst.
+PERSIST_FAILING: dict[str, bool] = {"jsonl": False, "postgres": False}
+
+
+def _persist_to_sink(sink: str, write: Callable[[], object]) -> None:
+    try:
+        write()
+    except Exception:  # noqa: BLE001 - evidence persistence must never affect responses
+        record_prediction_persist_failure(sink=sink)
+        if not PERSIST_FAILING[sink]:
+            logger.exception("Failed to persist online prediction evidence to %s", sink)
+            PERSIST_FAILING[sink] = True
+        return
+
+    if PERSIST_FAILING[sink]:
+        logger.info("Online prediction evidence persists to %s again", sink)
+        PERSIST_FAILING[sink] = False
+
+
 def persist_online_prediction_evidence(
     prediction_records: list[dict[str, Any]],
 ) -> None:
-    """Persist online prediction evidence without breaking the API response path."""
+    """Persist online prediction evidence: JSONL always, Postgres in database mode.
 
-    try:
-        write_online_predictions_jsonl(prediction_records)
-    except Exception:
-        logger.exception("Failed to persist online prediction evidence")
+    Runs as a background task after the response is sent; failures are counted
+    and logged but never reach the client.
+    """
+
+    _persist_to_sink("jsonl", lambda: write_online_predictions_jsonl(prediction_records))
+
+    if database_enabled():
+        _persist_to_sink("postgres", lambda: insert_online_predictions(prediction_records))
 
 
 def get_inference_service() -> OnlineInferenceService:
@@ -395,8 +428,8 @@ def active_model() -> ActiveModelResponse:
 
 
 @app.post("/predict", response_model=PredictionResponse)
-def predict(request: PredictRequest) -> PredictionResponse:
-    """Score one model-ready feature payload."""
+def predict(request: PredictRequest, background_tasks: BackgroundTasks) -> PredictionResponse:
+    """Score one model-ready feature payload; evidence is persisted after the response."""
 
     service = get_inference_service()
     model_version = service.active_model_info().model_version
@@ -428,7 +461,7 @@ def predict(request: PredictRequest) -> PredictionResponse:
         )
 
         prediction_payload = prediction_to_dict(prediction)
-        persist_online_prediction_evidence([prediction_payload])
+        background_tasks.add_task(persist_online_prediction_evidence, [prediction_payload])
 
         return PredictionResponse(**prediction_payload)
 
@@ -446,8 +479,11 @@ def predict(request: PredictRequest) -> PredictionResponse:
 
 
 @app.post("/predict/batch", response_model=BatchPredictionResponse)
-def predict_batch(request: BatchPredictRequest) -> BatchPredictionResponse:
-    """Score multiple model-ready feature payloads."""
+def predict_batch(
+    request: BatchPredictRequest,
+    background_tasks: BackgroundTasks,
+) -> BatchPredictionResponse:
+    """Score multiple payloads; evidence is persisted after the response (one transaction)."""
 
     service = get_inference_service()
     model_version = service.active_model_info().model_version
@@ -482,7 +518,7 @@ def predict_batch(request: BatchPredictRequest) -> BatchPredictionResponse:
             prediction_to_dict(prediction)
             for prediction in predictions
         ]
-        persist_online_prediction_evidence(prediction_payloads)
+        background_tasks.add_task(persist_online_prediction_evidence, prediction_payloads)
 
         return BatchPredictionResponse(
             predictions=[

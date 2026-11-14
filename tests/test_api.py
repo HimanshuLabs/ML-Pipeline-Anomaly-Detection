@@ -937,3 +937,107 @@ def test_poller_thread_starts_and_stops() -> None:
 
     assert holder.inference_service.active_model_info().model_version == "v102"
     assert poller._thread is None
+
+
+# --- prediction evidence persistence (background tasks) -----------------------------
+
+
+def test_predict_persists_evidence_in_a_background_task(
+    client: TestClient,
+    valid_feature_payload: dict[str, float | str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api import main as api_main
+
+    persisted: list[list[dict]] = []
+    monkeypatch.setattr(
+        api_main,
+        "persist_online_prediction_evidence",
+        lambda records: persisted.append(records),
+    )
+
+    single = client.post("/predict", json={"feature_payload": valid_feature_payload})
+    batch = client.post(
+        "/predict/batch",
+        json={"feature_payloads": [valid_feature_payload, valid_feature_payload]},
+    )
+
+    assert single.status_code == 200 and batch.status_code == 200
+    assert [len(records) for records in persisted] == [1, 2]
+    assert persisted[0][0]["prediction_id"] == single.json()["prediction_id"]
+    assert [record["prediction_id"] for record in persisted[1]] == [
+        prediction["prediction_id"] for prediction in batch.json()["predictions"]
+    ]
+
+
+@pytest.mark.expect_persist_failure
+def test_jsonl_persist_failures_are_counted_logged_once_per_burst_and_never_returned(
+    client: TestClient,
+    valid_feature_payload: dict[str, float | str],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+
+    from api import main as api_main
+
+    caplog.set_level(logging.INFO, logger="api.main")
+    sink_up = {"value": False}
+    real_writer = api_main.write_online_predictions_jsonl
+
+    def _flaky_writer(records):
+        if not sink_up["value"]:
+            raise OSError("disk full")
+        return real_writer(records)
+
+    monkeypatch.setattr(api_main, "write_online_predictions_jsonl", _flaky_writer)
+    failures_before = _metric_value("prediction_persist_failures_total", {"sink": "jsonl"})
+    postgres_before = _metric_value("prediction_persist_failures_total", {"sink": "postgres"})
+
+    def _predict() -> int:
+        return client.post("/predict", json={"feature_payload": valid_feature_payload}).status_code
+
+    statuses = [_predict(), _predict()]
+    sink_up["value"] = True
+    statuses.append(_predict())
+    sink_up["value"] = False
+    statuses.append(_predict())
+
+    errors = [
+        record
+        for record in caplog.records
+        if record.levelno == logging.ERROR and "Failed to persist" in record.getMessage()
+    ]
+    assert statuses == [200, 200, 200, 200]
+    assert _metric_value("prediction_persist_failures_total", {"sink": "jsonl"}) == (
+        failures_before + 3
+    )
+    assert len(errors) == 2
+    assert any("persists to jsonl again" in record.getMessage() for record in caplog.records)
+    # File mode never touches the postgres sink.
+    assert _metric_value("prediction_persist_failures_total", {"sink": "postgres"}) == (
+        postgres_before
+    )
+
+
+@pytest.mark.expect_persist_failure
+def test_postgres_persist_failure_is_counted_and_never_returned(
+    client: TestClient,
+    valid_feature_payload: dict[str, float | str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api import main as api_main
+
+    def _unreachable(_records):
+        raise ConnectionError("database unreachable")
+
+    monkeypatch.setattr(api_main, "database_enabled", lambda: True)
+    monkeypatch.setattr(api_main, "insert_online_predictions", _unreachable)
+    failures_before = _metric_value("prediction_persist_failures_total", {"sink": "postgres"})
+
+    response = client.post("/predict", json={"feature_payload": valid_feature_payload})
+
+    assert response.status_code == 200
+    assert _metric_value("prediction_persist_failures_total", {"sink": "postgres"}) == (
+        failures_before + 1
+    )

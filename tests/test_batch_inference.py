@@ -351,3 +351,35 @@ def test_loading_model_without_recorded_versions_logs_info_and_loads(
     assert artifacts.model_version == "vtest"
     assert len(infos) == 1
     assert _runtime_version_records(caplog, logging.WARNING) == []
+
+
+def test_batch_run_fails_naming_the_postgres_sink_after_jsonl_is_written(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from anomaly_detection import database
+    from anomaly_detection.batch_inference import run_batch_inference
+
+    active_path = _build_artifact_bundle(tmp_path)
+    output_path = tmp_path / "batch_predictions.jsonl"
+
+    def _broken_insert(_records):
+        raise ConnectionError("database unreachable")
+
+    monkeypatch.setattr(database, "is_configured", lambda: True)
+    monkeypatch.setattr(database, "insert_batch_predictions", _broken_insert)
+
+    features = pd.DataFrame(
+        [
+            {"entity_id": "customer_001", "feature_a": 1.0, "feature_b": 2.0},
+            {"entity_id": "customer_002", "feature_a": 3.0, "feature_b": 4.0},
+        ]
+    )
+
+    with pytest.raises(BatchInferenceError) as error:
+        run_batch_inference(features, active_model_path=active_path, output_path=output_path)
+
+    message = str(error.value)
+    assert "postgres sink (ml.batch_predictions) failed" in message
+    assert str(output_path) in message
+    assert len(output_path.read_text(encoding="utf-8").splitlines()) == 2

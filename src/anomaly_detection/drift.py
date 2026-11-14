@@ -598,6 +598,33 @@ def append_drift_events_jsonl(
     return output_path
 
 
+def insert_drift_events_database(drift_events: list[FeatureDriftEvent]) -> int:
+    """Store drift events in monitoring.drift_events (one transaction).
+
+    The database counterpart of append_drift_events_jsonl.
+    """
+
+    from anomaly_detection import database
+
+    if not drift_events:
+        raise DriftMonitoringError("no drift events supplied")
+    return database.insert_drift_events(drift_events)
+
+
+def persist_drift_events(
+    drift_events: list[FeatureDriftEvent],
+    output_path: Path = DEFAULT_DRIFT_EVENTS_PATH,
+) -> dict[str, Any]:
+    """JSONL always, plus monitoring.drift_events when the database is configured."""
+
+    from anomaly_detection import database
+
+    written: dict[str, Any] = {"jsonl": append_drift_events_jsonl(drift_events, output_path)}
+    if database.is_configured():
+        written["postgres"] = insert_drift_events_database(drift_events)
+    return written
+
+
 def read_drift_events_jsonl(path: Path) -> list[dict[str, Any]]:
     """Read drift event JSONL records for tests and smoke validation."""
 

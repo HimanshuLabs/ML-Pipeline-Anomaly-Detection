@@ -121,6 +121,19 @@ REGISTRY_MIRROR_WRITE_FAILURES_TOTAL = Counter(
 )
 
 
+PREDICTION_PERSIST_FAILURES_TOTAL = Counter(
+    "prediction_persist_failures_total",
+    "Prediction evidence that could not be persisted, by sink.",
+    ["sink"],
+)
+
+
+def record_prediction_persist_failure(*, sink: str) -> None:
+    """Count a failed prediction evidence write to one sink ('jsonl' or 'postgres')."""
+
+    PREDICTION_PERSIST_FAILURES_TOTAL.labels(sink=sink).inc()
+
+
 def record_pointer_poll_failure() -> None:
     """Count a pointer poll that could not reach the database."""
 
