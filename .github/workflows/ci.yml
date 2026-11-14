@@ -16,6 +16,22 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
+    # Disposable database for the schema checks; same image tag as docker-compose.yml.
+    services:
+      postgres:
+        image: postgres:16.14
+        env:
+          POSTGRES_USER: manshu
+          POSTGRES_PASSWORD: project4_ci_only
+          POSTGRES_DB: project4_ml
+        ports:
+          - 5435:5432
+        options: >-
+          --health-cmd "pg_isready -U manshu -d project4_ml"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
@@ -88,38 +104,24 @@ jobs:
           print("OK: no basic secret patterns found")
           PY
 
-      - name: Run SQL smoke checks
+      - name: Apply PostgreSQL schema twice (idempotency) and check
+        env:
+          PROJECT4_POSTGRES_HOST: 127.0.0.1
+          PROJECT4_POSTGRES_PORT: "5435"
+          PROJECT4_POSTGRES_DB: project4_ml
+          PROJECT4_POSTGRES_USER: manshu
+          PROJECT4_POSTGRES_PASSWORD: project4_ci_only
         run: |
-          python - <<'PY'
-          from __future__ import annotations
+          PYTHONPATH=src python -m anomaly_detection.database apply-schema
+          PYTHONPATH=src python -m anomaly_detection.database apply-schema
+          PYTHONPATH=src python -m anomaly_detection.database check
 
-          from pathlib import Path
-
-          required_sql_files = [
-              Path("sql/create_ml_schemas.sql"),
-              Path("sql/create_feature_tables.sql"),
-              Path("sql/create_model_registry_tables.sql"),
-              Path("sql/create_prediction_tables.sql"),
-              Path("sql/create_monitoring_tables.sql"),
-              Path("sql/validation_queries.sql"),
-          ]
-
-          for path in required_sql_files:
-              if not path.exists():
-                  raise SystemExit(f"Missing SQL file: {path}")
-
-              text = path.read_text(encoding="utf-8").strip()
-              if not text:
-                  raise SystemExit(f"Empty SQL file: {path}")
-
-              lowered = text.lower()
-              if not any(keyword in lowered for keyword in ["create schema", "create table", "select"]):
-                  raise SystemExit(f"SQL smoke check failed for {path}")
-
-              print(f"OK: {path}")
-
-          print("OK: SQL smoke checks passed")
-          PY
+      - name: Run PostgreSQL integration tests
+        env:
+          PROJECT4_TEST_DATABASE_URL: postgresql+psycopg2://manshu:project4_ci_only@127.0.0.1:5435/project4_ml
+          PROJECT4_REQUIRE_TEST_DATABASE: "1"
+        run: |
+          PYTHONPATH=src pytest -m postgres tests/test_database.py -q
 
       - name: Run training smoke tests
         run: |

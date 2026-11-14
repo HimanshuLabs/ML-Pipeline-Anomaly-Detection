@@ -146,7 +146,20 @@ CREATE TABLE IF NOT EXISTS audit.rollback_events (
     dry_run BOOLEAN NOT NULL DEFAULT FALSE,
     active_model_path TEXT NOT NULL,
     rollback_event_path TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT rollback_events_from_model_version_fk
+        FOREIGN KEY (model_name, from_model_version)
+        REFERENCES ml.model_registry(model_name, model_version)
+        ON DELETE RESTRICT,
+
+    CONSTRAINT rollback_events_to_model_version_fk
+        FOREIGN KEY (model_name, to_model_version)
+        REFERENCES ml.model_registry(model_name, model_version)
+        ON DELETE RESTRICT,
+
+    CONSTRAINT rollback_events_versions_different_chk
+        CHECK (from_model_version <> to_model_version)
 );
 
 CREATE INDEX IF NOT EXISTS idx_drift_events_model_version
@@ -183,10 +196,10 @@ CREATE INDEX IF NOT EXISTS idx_rollback_events_from_to_versions
     ON audit.rollback_events(from_model_version, to_model_version);
 
 CREATE INDEX IF NOT EXISTS idx_rollback_events_status
-    ON audit.rollback_events(rollback_status);
+    ON audit.rollback_events(validation_status);
 
 CREATE INDEX IF NOT EXISTS idx_rollback_events_triggered_at
-    ON audit.rollback_events(triggered_at);
+    ON audit.rollback_events(triggered_at_utc);
 
 COMMENT ON TABLE monitoring.drift_events IS
 'Stores mean/variance feature drift events comparing approved baseline statistics against current runtime or batch feature statistics.';
@@ -200,6 +213,3 @@ COMMENT ON TABLE audit.rollback_events IS
 
 CREATE INDEX IF NOT EXISTS idx_rollback_events_model_time
     ON audit.rollback_events (model_name, triggered_at_utc DESC);
-
-CREATE INDEX IF NOT EXISTS idx_rollback_events_versions
-    ON audit.rollback_events (from_model_version, to_model_version);

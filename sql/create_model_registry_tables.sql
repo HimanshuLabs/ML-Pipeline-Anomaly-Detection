@@ -8,7 +8,11 @@ CREATE TABLE IF NOT EXISTS ml.model_registry (
     algorithm TEXT NOT NULL,
     artifact_path TEXT NOT NULL,
     artifact_uri TEXT,
-    snapshot_id UUID REFERENCES ml.feature_snapshots(snapshot_id) ON DELETE SET NULL,
+    artifact_dir TEXT,
+    metadata_path TEXT,
+    feature_schema_path TEXT,
+    baseline_stats_path TEXT,
+    snapshot_id TEXT REFERENCES ml.feature_snapshots(snapshot_id) ON DELETE SET NULL,
     training_dataset_id UUID REFERENCES ml.training_datasets(training_dataset_id) ON DELETE SET NULL,
     feature_schema_version TEXT NOT NULL,
     training_started_at TIMESTAMPTZ,
@@ -40,7 +44,7 @@ CREATE TABLE IF NOT EXISTS ml.model_registry (
                 'production',
                 'archived',
                 'rolled_back',
-                'failed_validation'
+                'retired'
             )
         ),
     approved_for_prod BOOLEAN NOT NULL DEFAULT FALSE,
@@ -92,7 +96,7 @@ CREATE TABLE IF NOT EXISTS ml.model_metrics (
             OR comparison_operator IN ('<', '<=', '=', '>=', '>')
         ),
     passed_threshold BOOLEAN,
-    dataset_snapshot_id UUID REFERENCES ml.feature_snapshots(snapshot_id) ON DELETE SET NULL,
+    dataset_snapshot_id TEXT REFERENCES ml.feature_snapshots(snapshot_id) ON DELETE SET NULL,
     training_dataset_id UUID REFERENCES ml.training_datasets(training_dataset_id) ON DELETE SET NULL,
     observation_window_start TIMESTAMPTZ,
     observation_window_end TIMESTAMPTZ,

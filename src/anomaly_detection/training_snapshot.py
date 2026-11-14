@@ -27,6 +27,7 @@ from anomaly_detection.feature_validation import (
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_TRAINING_SNAPSHOT_ROOT = PROJECT_ROOT / "data" / "features" / "training"
 FEATURES_FILENAME = "features.parquet"
+SNAPSHOT_DATABASE_WRITER = "project4_training_snapshot"
 METADATA_FILENAME = "metadata.json"
 
 
@@ -319,35 +320,50 @@ def _write_metadata_json(
 def metadata_to_database_records(
     metadata: TrainingSnapshotMetadata,
 ) -> dict[str, dict[str, Any]]:
-    """Return DB-shaped records for future insertion into Project 4 SQL tables.
+    """Return rows for ml.feature_snapshots and ml.training_datasets.
 
-    The current checkpoint writes local JSON. This helper keeps the module ready
-    for the later registry/database integration without depending on an
-    unconfirmed database interface.
+    Each row has exactly the columns of its table in sql/create_feature_tables.sql.
+    JSONB columns are JSON-encoded strings so the rows can be bound as parameters.
     """
+
+    source_projects = sorted(metadata.source_project_versions)
+    source_project = "+".join(source_projects) if source_projects else "project4"
 
     feature_snapshot_record = {
         "snapshot_id": metadata.snapshot_id,
         "snapshot_name": metadata.snapshot_name,
-        "source_system": "project4_local_snapshot",
-        "source_tables": metadata.source_tables,
-        "source_min_timestamp": metadata.source_min_timestamp,
-        "source_max_timestamp": metadata.source_max_timestamp,
+        "source_project": source_project,
+        "source_layer": "model_ready_features",
+        "source_tables": json.dumps(metadata.source_tables),
+        "source_date_start": pd.Timestamp(metadata.source_min_timestamp).date(),
+        "source_date_end": pd.Timestamp(metadata.source_max_timestamp).date(),
         "feature_schema_version": metadata.feature_schema_version,
+        "feature_count": metadata.feature_count,
         "row_count": metadata.row_count,
         "snapshot_path": metadata.snapshot_path,
         "data_quality_status": metadata.data_quality_status,
+        "validation_report_path": None,
         "created_at": metadata.created_at_utc,
+        "created_by": SNAPSHOT_DATABASE_WRITER,
+        "notes": None,
     }
 
     training_dataset_record = {
         "training_dataset_id": metadata.training_dataset_id,
+        "dataset_name": metadata.snapshot_name,
         "snapshot_id": metadata.snapshot_id,
         "dataset_version": metadata.dataset_version,
         "feature_schema_version": metadata.feature_schema_version,
-        "feature_columns": metadata.feature_columns,
-        "row_count": metadata.row_count,
+        "train_row_count": metadata.row_count,
+        "validation_row_count": 0,
+        "test_row_count": 0,
+        "feature_columns": json.dumps(metadata.feature_columns),
+        "label_column": None,
+        "dataset_path": metadata.features_path,
+        "data_quality_status": metadata.data_quality_status,
         "created_at": metadata.created_at_utc,
+        "created_by": SNAPSHOT_DATABASE_WRITER,
+        "notes": None,
     }
 
     return {

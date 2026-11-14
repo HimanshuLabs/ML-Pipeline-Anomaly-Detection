@@ -12,6 +12,9 @@ authors = [
 testpaths = ["tests"]
 pythonpath = ["src", "."]
 addopts = "-q"
+markers = [
+  "postgres: needs a disposable PostgreSQL database at PROJECT4_TEST_DATABASE_URL (skipped otherwise)",
+]
 
 [tool.ruff]
 line-length = 100

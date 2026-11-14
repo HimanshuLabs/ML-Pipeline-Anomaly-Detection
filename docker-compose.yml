@@ -31,3 +31,27 @@ services:
       - -m
       - anomaly_detection.batch_inference
       - --help
+
+  # Project 4's own metadata database (P5 expects 127.0.0.1:5435 / project4_ml / manshu).
+  # No restart policy: start it manually with `docker compose up -d anomaly-postgres`.
+  # Without PROJECT4_POSTGRES_PASSWORD in .env only this container refuses to start
+  # (the postgres image exits when POSTGRES_PASSWORD is empty); other services are unaffected.
+  anomaly-postgres:
+    image: postgres:16.14
+    container_name: project4_postgres
+    ports:
+      - "127.0.0.1:5435:5432"
+    environment:
+      POSTGRES_DB: project4_ml
+      POSTGRES_USER: manshu
+      POSTGRES_PASSWORD: ${PROJECT4_POSTGRES_PASSWORD:-}
+    volumes:
+      - anomaly_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U manshu -d project4_ml"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+volumes:
+  anomaly_postgres_data:
