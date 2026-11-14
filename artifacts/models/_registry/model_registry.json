@@ -23,7 +23,7 @@
       "notes": "Promoted local v001 as the first active anomaly detection model. Retained as rollback-safe previous production model.",
       "promoted_at_utc": "2026-06-10T04:03:12.056472+00:00",
       "snapshot_id": "d8a245c1-4b56-51fb-b5e5-a536b06de786",
-      "status": "archived",
+      "status": "retired",
       "threshold_used": null,
       "training_dataset_id": "b1d150c3-424c-528b-b121-eefb2183b7b8",
       "training_finished_at_utc": "2026-06-08T17:44:18.434885+00:00",
@@ -60,5 +60,5 @@
     }
   ],
   "registry_backend": "local_json",
-  "updated_at_utc": "2026-06-10T07:01:28.971831+00:00"
+  "updated_at_utc": "2026-11-14T12:54:59.788986+00:00"
 }

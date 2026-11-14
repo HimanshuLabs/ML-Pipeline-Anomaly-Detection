@@ -24,7 +24,8 @@ from anomaly_detection.feature_validation import (
     validate_feature_dataframe,
 )
 
-DEFAULT_TRAINING_SNAPSHOT_ROOT = Path("data/features/training")
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+DEFAULT_TRAINING_SNAPSHOT_ROOT = PROJECT_ROOT / "data" / "features" / "training"
 FEATURES_FILENAME = "features.parquet"
 METADATA_FILENAME = "metadata.json"
 
