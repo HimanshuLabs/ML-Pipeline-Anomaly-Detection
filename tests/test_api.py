@@ -193,6 +193,28 @@ def test_predict_rejects_missing_required_model_features(client: TestClient) -> 
     assert "missing required model features" in response.json()["detail"]
 
 
+@pytest.mark.parametrize("value", ["inf", "-inf"])
+def test_predict_rejects_non_finite_feature(
+    client: TestClient,
+    valid_feature_payload: dict[str, float | str],
+    inference_service: OnlineInferenceService,
+    value: str,
+) -> None:
+    feature_name = inference_service.feature_names[0]
+    valid_feature_payload[feature_name] = value
+
+    response = client.post(
+        "/predict",
+        json={"feature_payload": valid_feature_payload},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == (
+        "Input batch contains non-finite (inf/-inf) model feature values: "
+        f"{feature_name}=1"
+    )
+
+
 def test_batch_predict_rejects_empty_payload_list(client: TestClient) -> None:
     response = client.post(
         "/predict/batch",

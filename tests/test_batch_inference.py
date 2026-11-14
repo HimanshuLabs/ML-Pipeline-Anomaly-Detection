@@ -161,6 +161,21 @@ def test_prepare_feature_matrix_fails_for_non_numeric_feature() -> None:
         prepare_feature_matrix(features, ["feature_a", "feature_b"])
 
 
+@pytest.mark.parametrize("value", ["inf", "-inf", np.inf, -np.inf])
+def test_prepare_feature_matrix_rejects_non_finite_values(value: float | str) -> None:
+    features = pd.DataFrame(
+        {"feature_a": [value, value], "feature_b": [1.0, value]}
+    )
+
+    with pytest.raises(BatchInferenceError) as exc_info:
+        prepare_feature_matrix(features, ["feature_a", "feature_b"])
+
+    assert str(exc_info.value) == (
+        "Input batch contains non-finite (inf/-inf) model feature values: "
+        "feature_a=2, feature_b=1"
+    )
+
+
 def test_hash_feature_payload_is_stable_for_key_order() -> None:
     first_hash = hash_feature_payload({"feature_b": 2.0, "feature_a": 1.0})
     second_hash = hash_feature_payload({"feature_a": 1.0, "feature_b": 2.0})
