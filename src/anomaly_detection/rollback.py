@@ -15,9 +15,11 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 import yaml
@@ -29,7 +31,9 @@ from anomaly_detection.registry import (
     RegistryError,
     load_model_registry,
     load_verified_feature_names,
+    restore_registry_state,
     save_model_registry,
+    snapshot_registry_state,
     write_active_model_pointer,
 )
 
@@ -41,6 +45,13 @@ DEFAULT_ROLLBACK_EVENTS_PATH = PROJECT_ROOT / "logs" / "alerts" / "rollback_even
 
 class RollbackError(RuntimeError):
     """Raised when rollback cannot be performed safely."""
+
+
+class RollbackServingError(RuntimeError):
+    """Raised when the rollback target cannot be served; the active model is unchanged.
+
+    Deliberately not a RollbackError: the request was valid, the server failed.
+    """
 
 
 @dataclass(frozen=True)
@@ -244,24 +255,15 @@ def select_previous_stable_model(
     )
 
 
-def _apply_registry_and_pointer(
-    *,
+def _committed_entries(
     entries: list[ModelRegistryEntry],
-    registry_path: Path,
-    active_model_path: Path,
+    *,
     model_name: str,
     from_model_version: str,
     to_model_version: str,
-    rollback_reason: str,
-) -> None:
-    """Commit the rollback: registry statuses first, then the pointer.
+) -> tuple[list[ModelRegistryEntry], ModelRegistryEntry]:
+    """Registry entries after the rollback, and the target entry as production."""
 
-    If the pointer write fails, the registry is restored to its previous content.
-    """
-
-    previous_updated_at = json.loads(registry_path.read_text(encoding="utf-8")).get(
-        "updated_at_utc"
-    )
     now = _utc_now()
     updated_entries: list[ModelRegistryEntry] = []
     target_entry: ModelRegistryEntry | None = None
@@ -284,23 +286,31 @@ def _apply_registry_and_pointer(
     if target_entry is None:
         raise RollbackError(f"rollback target {to_model_version} is not in the registry")
 
-    save_model_registry(updated_entries, registry_path)
+    return updated_entries, target_entry
 
-    try:
-        write_active_model_pointer(
-            entry=target_entry,
-            active_model_path=active_model_path,
-            notes=(
-                f"Rolled back from {from_model_version} to {to_model_version}: "
-                f"{rollback_reason}"
-            ),
-        )
-    except Exception as exc:
-        save_model_registry(entries, registry_path, updated_at_utc=previous_updated_at)
-        raise RollbackError(
-            f"rollback to {to_model_version} failed while writing the active pointer; "
-            f"registry restored: {exc}"
-        ) from exc
+
+def _verify_target_serves(
+    target_entry: ModelRegistryEntry,
+    *,
+    notes: str,
+    verify_service: Callable[[Path], object],
+) -> None:
+    """Build the target's pointer in a temporary directory and load a service from it."""
+
+    with TemporaryDirectory(prefix="project4_rollback_candidate_") as candidate_dir:
+        candidate_pointer_path = Path(candidate_dir) / "active_model.yaml"
+        try:
+            write_active_model_pointer(
+                entry=target_entry,
+                active_model_path=candidate_pointer_path,
+                notes=notes,
+            )
+            verify_service(candidate_pointer_path)
+        except Exception as exc:
+            raise RollbackServingError(
+                f"rollback target {target_entry.model_version} cannot serve; "
+                f"nothing was changed: {exc}"
+            ) from exc
 
 
 def rollback_active_model(
@@ -311,10 +321,16 @@ def rollback_active_model(
     rollback_reason: str,
     triggered_by: str = "manual",
     dry_run: bool = False,
+    verify_service: Callable[[Path], object] | None = None,
 ) -> RollbackEvent:
     """Rollback the active model to the previous compatible stable version.
 
-    A dry run performs exactly the same target checks and writes nothing.
+    verify_service, when given, is called with a pointer path and must load a
+    serving model from it (raising on failure). It is called on a candidate
+    pointer for the target before anything is written (dry runs included),
+    and again on the committed pointer after the registry and pointer are
+    written. If the post-commit call fails, the registry and pointer are
+    restored to their previous bytes. A dry run writes nothing.
     """
 
     rollback_reason = rollback_reason.strip()
@@ -362,18 +378,50 @@ def rollback_active_model(
         rollback_event_path=None if dry_run else str(rollback_events_path),
     )
 
-    if dry_run:
-        return event
-
-    _apply_registry_and_pointer(
-        entries=entries,
-        registry_path=registry_path,
-        active_model_path=active_model_path,
+    updated_entries, target_entry = _committed_entries(
+        entries,
         model_name=str(model_name),
         from_model_version=str(current_model_version),
         to_model_version=rollback_target.model_version,
-        rollback_reason=rollback_reason,
     )
+    pointer_notes = (
+        f"Rolled back from {current_model_version} to {rollback_target.model_version}: "
+        f"{rollback_reason}"
+    )
+
+    if verify_service is not None:
+        _verify_target_serves(target_entry, notes=pointer_notes, verify_service=verify_service)
+
+    if dry_run:
+        return event
+
+    snapshot = snapshot_registry_state(registry_path, active_model_path)
+
+    save_model_registry(updated_entries, registry_path)
+
+    try:
+        write_active_model_pointer(
+            entry=target_entry,
+            active_model_path=active_model_path,
+            notes=pointer_notes,
+        )
+    except Exception as exc:
+        restore_registry_state(snapshot)
+        raise RollbackServingError(
+            f"rollback to {rollback_target.model_version} failed while writing the active "
+            f"pointer; registry and pointer restored: {exc}"
+        ) from exc
+
+    if verify_service is not None:
+        try:
+            verify_service(active_model_path)
+        except Exception as exc:
+            restore_registry_state(snapshot)
+            raise RollbackServingError(
+                f"rollback to {rollback_target.model_version} was written but the committed "
+                f"pointer failed to load; registry and pointer restored: {exc}"
+            ) from exc
+
     append_rollback_event_jsonl(event, rollback_events_path)
 
     return event

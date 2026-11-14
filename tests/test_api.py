@@ -7,6 +7,7 @@ from collections.abc import Generator
 from pathlib import Path
 
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 
 from anomaly_detection.online_inference import OnlineInferenceService
@@ -416,3 +417,225 @@ def test_predict_reports_latency_under_configured_budget(
     assert body["model_version"] == active_model_version
     assert body["latency_ms"] >= 0
     assert body["latency_ms"] < latency_budget_ms
+
+
+# --- health and liveness -----------------------------------------------------
+
+
+def test_health_returns_503_with_same_fields_when_no_model_is_loaded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(state, "inference_service", None)
+
+    response = TestClient(app).get("/health")
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "status": "degraded",
+        "service": "project4-online-anomaly-inference",
+        "active_model_version": None,
+        "model_loaded": False,
+    }
+
+
+@pytest.mark.parametrize("model_loaded", [True, False], ids=["with_model", "without_model"])
+def test_livez_is_200_with_and_without_a_model(
+    monkeypatch: pytest.MonkeyPatch,
+    inference_service: OnlineInferenceService,
+    model_loaded: bool,
+) -> None:
+    monkeypatch.setattr(state, "inference_service", inference_service if model_loaded else None)
+
+    response = TestClient(app).get("/livez")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "alive"}
+
+
+# --- applied rollback swaps the served model ---------------------------------
+
+
+def _install_two_model_registry(
+    mirror_root: Path,
+    tmp_path: Path,
+    trained_metadata_paths: dict[str, Path],
+    *,
+    break_target_baseline: bool = False,
+) -> tuple[Path, Path, list[str]]:
+    """Replace the mirror registry with v101 (archived) and v102 (active).
+
+    Each version gets its own copy of the trained artifact directory so a test
+    can damage one without affecting the shared trained models.
+    """
+    import shutil
+
+    from anomaly_detection.registry import promote_model_version, register_model
+
+    registry_path = mirror_root / REAL_REGISTRY_PATH.relative_to(REPO_ROOT)
+    pointer_path = mirror_root / "configs" / "active_model.yaml"
+    registry_path.unlink()
+
+    feature_names: list[str] = []
+    for version in ("v101", "v102"):
+        source_dir = trained_metadata_paths[version].parent
+        artifact_dir = tmp_path / "models" / f"model_version={version}"
+        shutil.copytree(source_dir, artifact_dir)
+        metadata = json.loads((artifact_dir / "metadata.json").read_text(encoding="utf-8"))
+        feature_names = metadata["feature_names"]
+
+        register_model(
+            model_name="isolation_forest",
+            model_version=version,
+            artifact_path=str(artifact_dir / "model.joblib"),
+            dataset_snapshot_id=f"snapshot_{version}",
+            feature_schema_version=metadata["feature_schema_version"],
+            training_timestamp=metadata["training_finished_at_utc"],
+        )
+        promote_model_version(model_name="isolation_forest", model_version=version)
+
+    if break_target_baseline:
+        (tmp_path / "models" / "model_version=v101" / "baseline_stats.json").unlink()
+
+    return registry_path, pointer_path, feature_names
+
+
+def _predict_version(client: TestClient, feature_names: list[str]) -> str:
+    response = client.post(
+        "/predict",
+        json={"feature_payload": {name: 1.0 for name in feature_names}},
+    )
+    assert response.status_code == 200
+    return response.json()["model_version"]
+
+
+def _apply_rollback(client: TestClient):
+    return client.post(
+        "/admin/rollback",
+        json={"rollback_reason": "pytest", "triggered_by": "pytest", "dry_run": False},
+    )
+
+
+def test_applied_rollback_serves_target_version_immediately(
+    isolate_repo_state: Path,
+    tmp_path: Path,
+    trained_metadata_paths: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from anomaly_detection.registry import load_model_registry
+
+    monkeypatch.setattr(state, "inference_service", None)
+    registry_path, pointer_path, feature_names = _install_two_model_registry(
+        isolate_repo_state, tmp_path, trained_metadata_paths
+    )
+
+    with TestClient(app) as client:
+        assert _predict_version(client, feature_names) == "v102"
+
+        response = _apply_rollback(client)
+
+        assert response.status_code == 200
+        assert response.json()["active_model_version"] == "v101"
+        assert response.json()["to_model_version"] == "v101"
+        assert client.get("/model/active").json()["model_version"] == "v101"
+        assert client.get("/health").json()["active_model_version"] == "v101"
+        assert _predict_version(client, feature_names) == "v101"
+        assert 'active_model_version{model_name="isolation_forest",model_version="v101"} 1.0' in (
+            client.get("/metrics").text
+        )
+
+    pointer = yaml.safe_load(pointer_path.read_text(encoding="utf-8"))
+    assert pointer["active_model_version"] == "v101"
+    assert {entry.model_version: entry.status for entry in load_model_registry(registry_path)} == {
+        "v101": "production",
+        "v102": "rolled_back",
+    }
+
+
+def test_rollback_target_that_cannot_serve_is_refused_before_commit(
+    isolate_repo_state: Path,
+    tmp_path: Path,
+    trained_metadata_paths: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(state, "inference_service", None)
+    registry_path, pointer_path, feature_names = _install_two_model_registry(
+        isolate_repo_state, tmp_path, trained_metadata_paths, break_target_baseline=True
+    )
+    registry_before = registry_path.read_bytes()
+    pointer_before = pointer_path.read_bytes()
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = _apply_rollback(client)
+
+        assert response.status_code == 500
+        assert "v101" in response.json()["detail"]
+        assert registry_path.read_bytes() == registry_before
+        assert pointer_path.read_bytes() == pointer_before
+        assert _predict_version(client, feature_names) == "v102"
+
+    assert not (isolate_repo_state / "logs" / "alerts" / "rollback_events.jsonl").exists()
+
+
+def test_rollback_failing_after_commit_restores_registry_and_pointer(
+    isolate_repo_state: Path,
+    tmp_path: Path,
+    trained_metadata_paths: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from api import main as api_main
+
+    monkeypatch.setattr(state, "inference_service", None)
+    registry_path, pointer_path, feature_names = _install_two_model_registry(
+        isolate_repo_state, tmp_path, trained_metadata_paths
+    )
+    registry_before = registry_path.read_bytes()
+    pointer_before = pointer_path.read_bytes()
+    real_service_class = api_main.OnlineInferenceService
+
+    def _service_failing_on_committed_pointer(active_model_path=None, **kwargs):
+        if active_model_path is not None and Path(active_model_path) == pointer_path:
+            raise RuntimeError("simulated load failure of the committed pointer")
+        return real_service_class(active_model_path=active_model_path, **kwargs)
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        monkeypatch.setattr(
+            api_main, "OnlineInferenceService", _service_failing_on_committed_pointer
+        )
+
+        response = _apply_rollback(client)
+
+        assert response.status_code == 500
+        assert "restored" in response.json()["detail"]
+        assert registry_path.read_bytes() == registry_before
+        assert pointer_path.read_bytes() == pointer_before
+        assert _predict_version(client, feature_names) == "v102"
+        assert client.get("/model/active").json()["model_version"] == "v102"
+
+    assert not (isolate_repo_state / "logs" / "alerts" / "rollback_events.jsonl").exists()
+
+
+def test_rollback_dry_run_with_compatible_target_writes_nothing(
+    isolate_repo_state: Path,
+    tmp_path: Path,
+    trained_metadata_paths: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(state, "inference_service", None)
+    registry_path, pointer_path, feature_names = _install_two_model_registry(
+        isolate_repo_state, tmp_path, trained_metadata_paths
+    )
+    registry_before = registry_path.read_bytes()
+    pointer_before = pointer_path.read_bytes()
+
+    with TestClient(app) as client:
+        response = client.post("/admin/rollback", json={"dry_run": True})
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "validated"
+        assert response.json()["to_model_version"] == "v101"
+        assert response.json()["active_model_version"] == "v102"
+        assert _predict_version(client, feature_names) == "v102"
+
+    assert registry_path.read_bytes() == registry_before
+    assert pointer_path.read_bytes() == pointer_before
+    assert not (isolate_repo_state / "logs" / "alerts" / "rollback_events.jsonl").exists()

@@ -162,30 +162,34 @@ def _write_json(path: str | Path, payload: dict[str, Any]) -> None:
         file.write("\n")
 
 
-def _write_yaml(path: str | Path, payload: dict[str, Any]) -> None:
-    """Write YAML atomically: a failed write leaves the previous file intact."""
-    yaml_path = Path(path)
-    yaml_path.parent.mkdir(parents=True, exist_ok=True)
+def _write_bytes_atomic(path: str | Path, data: bytes) -> None:
+    """Replace a file atomically: a failed write leaves the previous file intact."""
+    target_path = Path(path)
+    target_path.parent.mkdir(parents=True, exist_ok=True)
 
     with NamedTemporaryFile(
-        "w",
-        encoding="utf-8",
-        dir=yaml_path.parent,
-        prefix=f".{yaml_path.name}.",
+        "wb",
+        dir=target_path.parent,
+        prefix=f".{target_path.name}.",
         delete=False,
     ) as tmp_file:
         tmp_path = Path(tmp_file.name)
         try:
-            yaml.safe_dump(payload, tmp_file, sort_keys=False)
+            tmp_file.write(data)
         except BaseException:
             tmp_file.close()
             tmp_path.unlink(missing_ok=True)
             raise
 
     # NamedTemporaryFile creates 0600; keep the target's mode, or 0644 for a new file.
-    target_mode = stat.S_IMODE(yaml_path.stat().st_mode) if yaml_path.exists() else 0o644
+    target_mode = stat.S_IMODE(target_path.stat().st_mode) if target_path.exists() else 0o644
     tmp_path.chmod(target_mode)
-    tmp_path.replace(yaml_path)
+    tmp_path.replace(target_path)
+
+
+def _write_yaml(path: str | Path, payload: dict[str, Any]) -> None:
+    """Write YAML atomically: a failed write leaves the previous file intact."""
+    _write_bytes_atomic(path, yaml.safe_dump(payload, sort_keys=False).encode("utf-8"))
 
 
 def _read_yaml(path: str | Path) -> dict[str, Any]:
@@ -388,20 +392,60 @@ def load_model_registry(
 def save_model_registry(
     entries: list[ModelRegistryEntry],
     registry_path: str | Path = DEFAULT_REGISTRY_PATH,
-    *,
-    updated_at_utc: str | None = None,
 ) -> None:
     """Persist local model registry entries.
 
-    This is the only function that writes the registry file. Passing
-    updated_at_utc restores a previous registry state exactly (rollback undo).
+    This is the only function that writes registry content; restore_registry_state
+    only puts back bytes captured earlier by snapshot_registry_state.
     """
     payload = {
         "registry_backend": "local_json",
-        "updated_at_utc": updated_at_utc or _utc_now_iso(),
+        "updated_at_utc": _utc_now_iso(),
         "models": [entry.to_dict() for entry in entries],
     }
     _write_json(registry_path, payload)
+
+
+@dataclass(frozen=True)
+class RegistryStateSnapshot:
+    """Exact bytes of the registry file and active pointer at one moment."""
+
+    registry_path: Path
+    registry_bytes: bytes | None
+    active_model_path: Path
+    pointer_bytes: bytes | None
+
+
+def snapshot_registry_state(
+    registry_path: str | Path = DEFAULT_REGISTRY_PATH,
+    active_model_path: str | Path = DEFAULT_ACTIVE_MODEL_PATH,
+) -> RegistryStateSnapshot:
+    """Capture the registry file and active pointer so a failed change can be undone."""
+
+    def _read_bytes(path: Path) -> bytes | None:
+        return path.read_bytes() if path.exists() else None
+
+    resolved_registry_path = Path(registry_path)
+    resolved_active_model_path = Path(active_model_path)
+    return RegistryStateSnapshot(
+        registry_path=resolved_registry_path,
+        registry_bytes=_read_bytes(resolved_registry_path),
+        active_model_path=resolved_active_model_path,
+        pointer_bytes=_read_bytes(resolved_active_model_path),
+    )
+
+
+def restore_registry_state(snapshot: RegistryStateSnapshot) -> None:
+    """Put the registry file and active pointer back to their snapshotted bytes."""
+
+    for path, data in (
+        (snapshot.registry_path, snapshot.registry_bytes),
+        (snapshot.active_model_path, snapshot.pointer_bytes),
+    ):
+        if data is None:
+            path.unlink(missing_ok=True)
+        else:
+            _write_bytes_atomic(path, data)
 
 
 def find_model_entry(
