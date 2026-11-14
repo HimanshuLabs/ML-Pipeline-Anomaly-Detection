@@ -195,7 +195,7 @@ WITH expected_columns(table_schema, table_name, column_name) AS (
         ('audit', 'rollback_events', 'from_model_version'),
         ('audit', 'rollback_events', 'to_model_version'),
         ('audit', 'rollback_events', 'rollback_reason'),
-        ('audit', 'rollback_events', 'rollback_status')
+        ('audit', 'rollback_events', 'validation_status')
 ),
 missing_columns AS (
     SELECT e.table_schema, e.table_name, e.column_name
