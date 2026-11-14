@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
 from pathlib import Path
 
 import joblib
-import pandas as pd
 import pytest
 import yaml
 
@@ -21,14 +19,10 @@ from anomaly_detection.registry import (
 )
 from anomaly_detection.rollback import (
     RollbackError,
+    RollbackServingError,
     read_rollback_events_jsonl,
     rollback_active_model,
     select_previous_stable_model,
-)
-from anomaly_detection.training import train_isolation_forest_from_snapshot
-from anomaly_detection.training_snapshot import (
-    TrainingSnapshotConfig,
-    create_training_snapshot,
 )
 
 MODEL_NAME = "isolation_forest"
@@ -109,58 +103,6 @@ def _rollback(
         triggered_by=triggered_by,
         dry_run=dry_run,
     )
-
-
-def _sample_feature_frame(row_count: int) -> pd.DataFrame:
-    rows = []
-    for index in range(row_count):
-        multiplier = 7.0 if index >= row_count - 3 else 1.0
-        rows.append(
-            {
-                "entity_id": f"user_{index:03d}",
-                "feature_timestamp": pd.Timestamp("2026-06-01T00:00:00Z")
-                + pd.Timedelta(minutes=index),
-                "schema_version": "feature_schema_v001",
-                "avg_cart_value_7d": 110.0 * multiplier + index,
-                "event_count_1h": 4.0 * multiplier + (index % 5),
-                "avg_api_latency_ms": 100.0 * multiplier + index,
-                "fraud_score_avg": min(0.99, 0.03 * multiplier + (index % 4) * 0.01),
-                "purchase_probability_delta": min(0.99, 0.07 * multiplier + (index % 5) * 0.01),
-                "cart_abandonment_rate": min(0.99, 0.14 * multiplier + (index % 4) * 0.02),
-                "campaign_roas": 2.2 * multiplier + (index % 6) * 0.1,
-                "conversion_rate": min(0.99, 0.25 + (index % 5) * 0.02),
-                "customer_lifetime_value": 700.0 * multiplier + index * 3.0,
-                "discount_sensitivity": 0.30 * multiplier + (index % 4) * 0.04,
-                "page_load_p95_ms": 230.0 * multiplier + index,
-            }
-        )
-    return pd.DataFrame(rows)
-
-
-@pytest.fixture(scope="module")
-def trained_metadata_paths(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
-    """Three real models trained on identical features, with distinct source tables."""
-
-    root = tmp_path_factory.mktemp("trained_models")
-    metadata_paths: dict[str, Path] = {}
-
-    for index, version in enumerate(("v101", "v102", "v103")):
-        snapshot = create_training_snapshot(
-            _sample_feature_frame(row_count=48 + index * 4),
-            snapshot_config=TrainingSnapshotConfig(output_root=root / "snapshots" / version),
-            source_tables=[f"source_table_{version}"],
-            created_at_utc=datetime(2026, 6, 8, 12, 0, 0, tzinfo=UTC),
-        )
-        artifact = train_isolation_forest_from_snapshot(
-            features_path=snapshot.features_path,
-            snapshot_metadata_path=snapshot.metadata_path,
-            model_version=version,
-            artifact_root_override=root / "artifacts",
-            training_started_at_utc=datetime(2026, 6, 8, 12, 5, 0, tzinfo=UTC),
-        )
-        metadata_paths[version] = Path(artifact.metadata_path)
-
-    return metadata_paths
 
 
 def _trained_registry(
@@ -436,7 +378,7 @@ def test_pointer_write_failure_restores_registry(
 
     monkeypatch.setattr(rollback, "write_active_model_pointer", _failing_pointer_write)
 
-    with pytest.raises(RollbackError, match="disk full"):
+    with pytest.raises(RollbackServingError, match="disk full"):
         _rollback(registry_path, active_model_path, rollback_events_path)
 
     assert registry_path.read_bytes() == registry_before

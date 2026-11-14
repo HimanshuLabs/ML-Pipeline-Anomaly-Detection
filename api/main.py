@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Response
 
 from anomaly_detection.metrics import (
+    ACTIVE_MODEL_VERSION,
     observe_prediction_latency_ms,
     prometheus_content_type,
     record_anomaly_detected,
@@ -27,7 +30,11 @@ from anomaly_detection.online_inference import (
 )
 from anomaly_detection.prediction_logging import write_online_predictions_jsonl
 from anomaly_detection.registry import RegistryError, read_active_model_pointer
-from anomaly_detection.rollback import RollbackError, rollback_active_model
+from anomaly_detection.rollback import (
+    RollbackError,
+    RollbackServingError,
+    rollback_active_model,
+)
 from api.schemas import (
     ActiveModelResponse,
     BatchPredictionResponse,
@@ -43,6 +50,8 @@ logger = logging.getLogger(__name__)
 
 SERVICE_NAME = "project4-online-anomaly-inference"
 
+# Serializes /admin/rollback so two rollbacks can never interleave.
+ROLLBACK_LOCK = threading.Lock()
 
 
 class AppState:
@@ -110,11 +119,19 @@ app = FastAPI(
 )
 
 
+@app.get("/livez")
+def livez() -> dict[str, str]:
+    """Liveness: the process is up. Never touches the model."""
+
+    return {"status": "alive"}
+
+
 @app.get("/health", response_model=HealthResponse)
-def health() -> HealthResponse:
-    """Return API health and model-load status."""
+def health(response: Response) -> HealthResponse:
+    """Readiness: 200 when a model is loaded, 503 when it is not."""
 
     if state.inference_service is None:
+        response.status_code = 503
         return HealthResponse(
             status="degraded",
             service=SERVICE_NAME,
@@ -264,41 +281,75 @@ def metrics() -> Response:
 
 @app.post("/admin/rollback", response_model=RollbackResponse)
 def rollback_model(request: RollbackRequest | None = None) -> dict[str, Any]:
-    """Validate or apply rollback to the previous stable approved model."""
+    """Validate or apply rollback to the previous stable approved model.
+
+    An applied rollback commits only after the target has loaded as a full
+    inference service, and then swaps the served model in one assignment.
+    """
 
     rollback_request = request or RollbackRequest()
 
-    try:
-        rollback_event = rollback_active_model(
-            rollback_reason=rollback_request.rollback_reason,
-            triggered_by=rollback_request.triggered_by,
-            dry_run=rollback_request.dry_run,
-        )
+    with ROLLBACK_LOCK:
+        loaded_services: list[OnlineInferenceService] = []
 
-        if not rollback_request.dry_run:
-            record_model_rollback(
-                model_name=rollback_event.model_name,
-                from_model_version=rollback_event.from_model_version,
-                to_model_version=rollback_event.to_model_version,
-                triggered_by=rollback_event.triggered_by,
+        def _load_service(pointer_path: Path) -> OnlineInferenceService:
+            service = OnlineInferenceService(active_model_path=pointer_path)
+            loaded_services.append(service)
+            return service
+
+        try:
+            rollback_event = rollback_active_model(
+                rollback_reason=rollback_request.rollback_reason,
+                triggered_by=rollback_request.triggered_by,
+                dry_run=rollback_request.dry_run,
+                verify_service=_load_service,
             )
 
-        active_pointer_after = read_active_model_pointer()
+            if rollback_request.dry_run:
+                active_model_version = read_active_model_pointer().active_model_version
+            else:
+                # The last service loaded is the one built from the committed pointer.
+                new_service = loaded_services[-1]
+                previous_service = state.inference_service
+                state.inference_service = new_service
 
-        return {
-            "status": "validated" if rollback_request.dry_run else "applied",
-            "action_taken": not rollback_request.dry_run,
-            "rollback_id": rollback_event.rollback_id,
-            "model_name": rollback_event.model_name,
-            "from_model_version": rollback_event.from_model_version,
-            "to_model_version": rollback_event.to_model_version,
-            "rollback_reason": rollback_event.rollback_reason,
-            "triggered_by": rollback_event.triggered_by,
-            "validation_status": rollback_event.validation_status,
-            "dry_run": rollback_event.dry_run,
-            "active_model_version": active_pointer_after.active_model_version,
-            "rollback_event_path": rollback_event.rollback_event_path,
-        }
+                new_info = new_service.active_model_info()
+                if previous_service is not None:
+                    previous_info = previous_service.active_model_info()
+                    ACTIVE_MODEL_VERSION.labels(
+                        model_name=previous_info.model_name,
+                        model_version=previous_info.model_version,
+                    ).set(0)
+                set_active_model_version(
+                    model_name=new_info.model_name,
+                    model_version=new_info.model_version,
+                )
+                record_model_rollback(
+                    model_name=rollback_event.model_name,
+                    from_model_version=rollback_event.from_model_version,
+                    to_model_version=rollback_event.to_model_version,
+                    triggered_by=rollback_event.triggered_by,
+                )
+                active_model_version = new_info.model_version
 
-    except (RollbackError, RegistryError) as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return {
+                "status": "validated" if rollback_request.dry_run else "applied",
+                "action_taken": not rollback_request.dry_run,
+                "rollback_id": rollback_event.rollback_id,
+                "model_name": rollback_event.model_name,
+                "from_model_version": rollback_event.from_model_version,
+                "to_model_version": rollback_event.to_model_version,
+                "rollback_reason": rollback_event.rollback_reason,
+                "triggered_by": rollback_event.triggered_by,
+                "validation_status": rollback_event.validation_status,
+                "dry_run": rollback_event.dry_run,
+                "active_model_version": active_model_version,
+                "rollback_event_path": rollback_event.rollback_event_path,
+            }
+
+        except (RollbackError, RegistryError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        except RollbackServingError as exc:
+            logger.error("Rollback refused or undone: %s", exc)
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
