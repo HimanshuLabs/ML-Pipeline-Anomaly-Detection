@@ -140,13 +140,20 @@ jobs:
 
           import yaml
 
-          model_dir = Path("artifacts/models/isolation_forest/model_version=v002")
+          active_path = Path("configs/active_model.yaml")
+          if not active_path.exists():
+              raise SystemExit(f"Missing active model pointer: {active_path}")
+
+          active = yaml.safe_load(active_path.read_text(encoding="utf-8"))
+          active_version = active["active_model_version"]
+          print(f"Active model version from pointer: {active_version}")
+
+          model_dir = Path(active["artifact_path"]).parent
           metadata_path = model_dir / "metadata.json"
           baseline_path = model_dir / "baseline_stats.json"
           schema_path = model_dir / "feature_schema.json"
-          active_path = Path("configs/active_model.yaml")
 
-          for path in [metadata_path, baseline_path, schema_path, active_path]:
+          for path in [metadata_path, baseline_path, schema_path]:
               if not path.exists():
                   raise SystemExit(f"Missing baseline artifact: {path}")
               print(f"OK: {path}")
@@ -154,15 +161,17 @@ jobs:
           metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
           baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
           schema = json.loads(schema_path.read_text(encoding="utf-8"))
-          active = yaml.safe_load(active_path.read_text(encoding="utf-8"))
 
           feature_names = metadata["feature_names"]
           feature_baselines = baseline["feature_baselines"]
 
           checks = {
-              "active_model_is_v002": active["active_model_version"] == "v002",
-              "metadata_model_version_is_v002": metadata["model_version"] == "v002",
-              "baseline_model_version_is_v002": baseline["model_version"] == "v002",
+              "active_model_version_is_set": bool(active_version),
+              "artifact_dir_matches_active_version": (
+                  model_dir.name == f"model_version={active_version}"
+              ),
+              "metadata_model_version_matches_active": metadata["model_version"] == active_version,
+              "baseline_model_version_matches_active": baseline["model_version"] == active_version,
               "schema_feature_count_matches_metadata": schema["feature_count"] == len(feature_names),
               "all_features_have_baselines": set(feature_names) == set(feature_baselines),
               "baseline_has_anomaly_rate": "baseline_anomaly_rate" in baseline,

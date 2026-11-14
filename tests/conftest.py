@@ -1,0 +1,173 @@
+"""Shared test isolation for Project 4.
+
+Every test runs against a per-test mirror of the repository's mutable state
+(configs/, the model registry, logs/, data/) instead of the real files. Real
+model artifacts stay read-only inputs. A guard fails any test that changes or
+creates files under the real state directories, and any test in which the API
+silently failed to persist prediction evidence.
+"""
+
+from __future__ import annotations
+
+import importlib
+import inspect
+import pkgutil
+import shutil
+from collections.abc import Iterator
+from pathlib import Path
+from types import ModuleType
+from typing import Any
+
+import pytest
+import yaml
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+REAL_ACTIVE_MODEL_PATH = REPO_ROOT / "configs" / "active_model.yaml"
+REAL_REGISTRY_PATH = REPO_ROOT / "artifacts" / "models" / "_registry" / "model_registry.json"
+
+# Directories whose contents tests must never write to.
+REDIRECTED_ROOTS = (
+    REPO_ROOT / "logs",
+    REPO_ROOT / "configs",
+    REPO_ROOT / "data",
+    REPO_ROOT / "artifacts" / "models" / "_registry",
+)
+GUARDED_ROOTS = (
+    REPO_ROOT / "logs",
+    REPO_ROOT / "configs",
+    REPO_ROOT / "data",
+    REPO_ROOT / "artifacts",
+)
+
+
+def _project_modules() -> list[ModuleType]:
+    import anomaly_detection
+
+    modules = [
+        importlib.import_module(f"anomaly_detection.{info.name}")
+        for info in pkgutil.iter_modules(anomaly_detection.__path__)
+    ]
+    modules.append(importlib.import_module("api.main"))
+    return modules
+
+
+def _redirect(value: Any, mirror_root: Path) -> Any:
+    if not isinstance(value, Path) or not value.is_absolute():
+        return value
+
+    for root in REDIRECTED_ROOTS:
+        if value == root or root in value.parents:
+            return mirror_root / value.relative_to(REPO_ROOT)
+
+    return value
+
+
+def _patch_function_defaults(
+    monkeypatch: pytest.MonkeyPatch,
+    function: Any,
+    mirror_root: Path,
+) -> None:
+    defaults = function.__defaults__
+    if defaults:
+        redirected = tuple(_redirect(value, mirror_root) for value in defaults)
+        if redirected != defaults:
+            monkeypatch.setattr(function, "__defaults__", redirected)
+
+    kwdefaults = function.__kwdefaults__
+    if kwdefaults:
+        redirected_kw = {key: _redirect(value, mirror_root) for key, value in kwdefaults.items()}
+        if redirected_kw != kwdefaults:
+            monkeypatch.setattr(function, "__kwdefaults__", redirected_kw)
+
+
+def _snapshot_real_state() -> dict[str, tuple[int, int]]:
+    state: dict[str, tuple[int, int]] = {}
+    for root in GUARDED_ROOTS:
+        if not root.exists():
+            continue
+        for path in root.rglob("*"):
+            if path.is_file():
+                stat = path.stat()
+                state[str(path.relative_to(REPO_ROOT))] = (stat.st_size, stat.st_mtime_ns)
+    return state
+
+
+def _build_mirror(mirror_root: Path) -> None:
+    shutil.copytree(REPO_ROOT / "configs", mirror_root / "configs")
+    registry_mirror = mirror_root / REAL_REGISTRY_PATH.relative_to(REPO_ROOT)
+    registry_mirror.parent.mkdir(parents=True)
+    shutil.copy2(REAL_REGISTRY_PATH, registry_mirror)
+    for relative in ("logs/predictions", "logs/alerts", "data/features/training"):
+        (mirror_root / relative).mkdir(parents=True)
+
+
+@pytest.fixture(autouse=True)
+def isolate_repo_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path_factory: pytest.TempPathFactory,
+    caplog: pytest.LogCaptureFixture,
+) -> Iterator[Path]:
+    """Redirect all mutable repo paths to a per-test mirror and guard the real ones."""
+
+    mirror_root = tmp_path_factory.mktemp("repo_state")
+    _build_mirror(mirror_root)
+
+    for module in _project_modules():
+        for name, value in list(vars(module).items()):
+            redirected = _redirect(value, mirror_root)
+            if redirected is not value:
+                monkeypatch.setattr(module, name, redirected)
+            elif inspect.isfunction(value) and value.__module__ == module.__name__:
+                _patch_function_defaults(monkeypatch, value, mirror_root)
+            elif inspect.isclass(value) and value.__module__ == module.__name__:
+                for member in vars(value).values():
+                    if inspect.isfunction(member):
+                        _patch_function_defaults(monkeypatch, member, mirror_root)
+
+    # training resolves relative config paths (e.g. artifact_root) against PROJECT_ROOT.
+    from anomaly_detection import training
+
+    monkeypatch.setattr(
+        training._resolve_path,
+        "__kwdefaults__",
+        {"base_dir": mirror_root},
+    )
+
+    # CWD-relative paths (api/main.py rollback pointer, registry helpers,
+    # feature_validation default config) resolve inside the mirror.
+    monkeypatch.chdir(mirror_root)
+
+    before = _snapshot_real_state()
+
+    yield mirror_root
+
+    after = _snapshot_real_state()
+    changed = sorted(
+        path for path in before.keys() | after.keys() if before.get(path) != after.get(path)
+    )
+    if changed:
+        pytest.fail(f"test modified real repository state: {changed}")
+
+    persist_failures = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "api.main" and "Failed to persist" in record.getMessage()
+    ]
+    if persist_failures:
+        pytest.fail(f"API failed to persist prediction evidence: {persist_failures}")
+
+
+@pytest.fixture()
+def active_model_pointer() -> dict[str, Any]:
+    """The real active model pointer, read at test time."""
+
+    payload = yaml.safe_load(REAL_ACTIVE_MODEL_PATH.read_text(encoding="utf-8"))
+    assert isinstance(payload, dict)
+    return payload
+
+
+@pytest.fixture()
+def active_model_version(active_model_pointer: dict[str, Any]) -> str:
+    """The active model version from the real pointer."""
+
+    return str(active_model_pointer["active_model_version"])

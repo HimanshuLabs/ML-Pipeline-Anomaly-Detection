@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Generator
 from pathlib import Path
 
@@ -10,6 +11,9 @@ from fastapi.testclient import TestClient
 
 from anomaly_detection.online_inference import OnlineInferenceService
 from api.main import app, state
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+REAL_REGISTRY_PATH = REPO_ROOT / "artifacts" / "models" / "_registry" / "model_registry.json"
 
 
 @pytest.fixture()
@@ -41,7 +45,10 @@ def valid_feature_payload(inference_service: OnlineInferenceService) -> dict[str
     return payload
 
 
-def test_health_returns_loaded_active_model(client: TestClient) -> None:
+def test_health_returns_loaded_active_model(
+    client: TestClient,
+    active_model_version: str,
+) -> None:
     response = client.get("/health")
 
     assert response.status_code == 200
@@ -49,21 +56,32 @@ def test_health_returns_loaded_active_model(client: TestClient) -> None:
 
     assert body["status"] == "ok"
     assert body["service"] == "project4-online-anomaly-inference"
-    assert body["active_model_version"] == "v002"
+    assert body["active_model_version"] == active_model_version
     assert body["model_loaded"] is True
 
 
-def test_active_model_endpoint_returns_v002_metadata(client: TestClient) -> None:
+def test_active_model_endpoint_returns_active_model_metadata(
+    client: TestClient,
+    active_model_pointer: dict,
+    active_model_version: str,
+) -> None:
+    artifact_metadata_path = (
+        REPO_ROOT / active_model_pointer["artifact_path"]
+    ).parent / "metadata.json"
+    expected_feature_count = len(
+        json.loads(artifact_metadata_path.read_text(encoding="utf-8"))["feature_names"]
+    )
+
     response = client.get("/model/active")
 
     assert response.status_code == 200
     body = response.json()
 
     assert body["model_name"] == "isolation_forest"
-    assert body["model_version"] == "v002"
+    assert body["model_version"] == active_model_version
     assert body["status"] == "production"
-    assert body["feature_schema_version"] == "feature_schema_v001"
-    assert body["feature_count"] == 51
+    assert body["feature_schema_version"] == active_model_pointer["feature_schema_version"]
+    assert body["feature_count"] == expected_feature_count
     assert body["baseline_anomaly_rate"] is not None
     assert body["threshold"] == 0.0
     assert body["source_projects"] == ["project_1", "project_2_3"]
@@ -74,6 +92,7 @@ def test_active_model_endpoint_returns_v002_metadata(client: TestClient) -> None
 def test_predict_scores_single_payload_with_active_model(
     client: TestClient,
     valid_feature_payload: dict[str, float | str],
+    active_model_version: str,
 ) -> None:
     response = client.post(
         "/predict",
@@ -88,7 +107,7 @@ def test_predict_scores_single_payload_with_active_model(
     body = response.json()
 
     assert body["model_name"] == "isolation_forest"
-    assert body["model_version"] == "v002"
+    assert body["model_version"] == active_model_version
     assert body["entity_type"] == "user"
     assert body["entity_id"] == "test_user_001"
     assert isinstance(body["anomaly_score"], float)
@@ -103,6 +122,7 @@ def test_predict_scores_single_payload_with_active_model(
 def test_predict_batch_scores_multiple_payloads(
     client: TestClient,
     valid_feature_payload: dict[str, float | str],
+    active_model_version: str,
 ) -> None:
     second_payload = dict(valid_feature_payload)
     second_payload["entity_id"] = "test_user_002"
@@ -119,9 +139,9 @@ def test_predict_batch_scores_multiple_payloads(
     body = response.json()
 
     assert body["prediction_count"] == 2
-    assert body["model_version"] == "v002"
+    assert body["model_version"] == active_model_version
     assert len(body["predictions"]) == 2
-    assert body["predictions"][0]["model_version"] == "v002"
+    assert body["predictions"][0]["model_version"] == active_model_version
     assert body["predictions"][1]["entity_id"] == "test_user_002"
 
 
@@ -150,7 +170,24 @@ def test_metrics_endpoint_exposes_prometheus_metrics(
 
 def test_rollback_endpoint_validates_previous_stable_model_without_mutation(
     client: TestClient,
+    active_model_version: str,
 ) -> None:
+    # Previous stable model: the most recently archived prod-approved version.
+    registry_models = json.loads(REAL_REGISTRY_PATH.read_text(encoding="utf-8"))["models"]
+    archived_models = [
+        model
+        for model in registry_models
+        if model["status"] == "archived"
+        and model["approved_for_prod"]
+        and model["model_version"] != active_model_version
+    ]
+    assert archived_models, "registry has no archived prod-approved model to roll back to"
+    expected_target_version = max(
+        archived_models,
+        key=lambda model: model["archived_at_utc"],
+    )["model_version"]
+
+    # CWD is the per-test mirror, so this is the pointer copy the endpoint uses.
     active_model_path = Path("configs/active_model.yaml")
     before_payload = active_model_path.read_text(encoding="utf-8")
 
@@ -171,11 +208,11 @@ def test_rollback_endpoint_validates_previous_stable_model_without_mutation(
 
     assert body["status"] == "validated"
     assert body["action_taken"] is False
-    assert body["from_model_version"] == "v002"
-    assert body["to_model_version"] == "v001"
+    assert body["from_model_version"] == active_model_version
+    assert body["to_model_version"] == expected_target_version
     assert body["validation_status"] == "dry_run_validated"
     assert body["dry_run"] is True
-    assert body["active_model_version"] == "v002"
+    assert body["active_model_version"] == active_model_version
     assert before_payload == after_payload
 
 
@@ -230,6 +267,7 @@ def test_batch_predict_rejects_empty_payload_list(client: TestClient) -> None:
 def test_predict_persists_online_prediction_evidence(
     client: TestClient,
     valid_feature_payload: dict[str, float | str],
+    active_model_version: str,
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -265,7 +303,7 @@ def test_predict_persists_online_prediction_evidence(
     assert len(records) == 1
     assert '"prediction_source":"online"' in records[0]
     assert '"entity_id":"logged_user_001"' in records[0]
-    assert '"model_version":"v002"' in records[0]
+    assert f'"model_version":"{active_model_version}"' in records[0]
 
 
 def test_predict_batch_persists_online_prediction_evidence(
@@ -313,6 +351,7 @@ def test_predict_batch_persists_online_prediction_evidence(
 def test_predict_reports_latency_under_configured_budget(
     client: TestClient,
     valid_feature_payload: dict[str, float | str],
+    active_model_version: str,
 ) -> None:
     """Verify /predict reports latency below the configured local budget."""
 
@@ -335,6 +374,6 @@ def test_predict_reports_latency_under_configured_budget(
 
     body = response.json()
 
-    assert body["model_version"] == "v002"
+    assert body["model_version"] == active_model_version
     assert body["latency_ms"] >= 0
     assert body["latency_ms"] < latency_budget_ms
