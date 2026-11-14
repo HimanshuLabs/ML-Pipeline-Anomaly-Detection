@@ -173,6 +173,7 @@ def test_rollback_endpoint_dry_run_rejects_incompatible_targets_without_mutation
     client: TestClient,
     active_model_version: str,
     isolate_repo_state: Path,
+    admin_headers: dict[str, str],
 ) -> None:
     # The real registry has no compatible rollback target for the active model
     # (v001 is retired and has different feature_names), so the dry run must refuse.
@@ -194,6 +195,7 @@ def test_rollback_endpoint_dry_run_rejects_incompatible_targets_without_mutation
             "triggered_by": "pytest",
             "dry_run": True,
         },
+        headers=admin_headers,
     )
 
     assert response.status_code == 400
@@ -209,6 +211,7 @@ def test_rollback_endpoint_dry_run_rejects_incompatible_targets_without_mutation
 def test_rollback_endpoint_returns_400_for_registry_errors(
     client: TestClient,
     isolate_repo_state: Path,
+    admin_headers: dict[str, str],
 ) -> None:
     registry_path = isolate_repo_state / REAL_REGISTRY_PATH.relative_to(REPO_ROOT)
     registry_payload = json.loads(registry_path.read_text(encoding="utf-8"))
@@ -218,6 +221,7 @@ def test_rollback_endpoint_returns_400_for_registry_errors(
     response = TestClient(app, raise_server_exceptions=False).post(
         "/admin/rollback",
         json={"dry_run": True},
+        headers=admin_headers,
     )
 
     assert response.status_code == 400
@@ -231,6 +235,7 @@ def test_rollback_and_promotion_do_not_depend_on_working_directory(
     isolate_repo_state: Path,
     tmp_path_factory: pytest.TempPathFactory,
     monkeypatch: pytest.MonkeyPatch,
+    admin_headers: dict[str, str],
 ) -> None:
     from anomaly_detection.registry import promote_model_version
 
@@ -239,7 +244,7 @@ def test_rollback_and_promotion_do_not_depend_on_working_directory(
     unrelated_directory = tmp_path_factory.mktemp("unrelated_cwd")
     monkeypatch.chdir(unrelated_directory)
 
-    response = client.post("/admin/rollback", json={"dry_run": True})
+    response = client.post("/admin/rollback", json={"dry_run": True}, headers=admin_headers)
 
     # The dry run reached target selection, so it read the project-root pointer
     # and registry, not configs/ under the unrelated working directory.
@@ -508,10 +513,11 @@ def _predict_version(client: TestClient, feature_names: list[str]) -> str:
     return response.json()["model_version"]
 
 
-def _apply_rollback(client: TestClient):
+def _apply_rollback(client: TestClient, admin_headers: dict[str, str]):
     return client.post(
         "/admin/rollback",
         json={"rollback_reason": "pytest", "triggered_by": "pytest", "dry_run": False},
+        headers=admin_headers,
     )
 
 
@@ -520,6 +526,7 @@ def test_applied_rollback_serves_target_version_immediately(
     tmp_path: Path,
     trained_metadata_paths: dict[str, Path],
     monkeypatch: pytest.MonkeyPatch,
+    admin_headers: dict[str, str],
 ) -> None:
     from anomaly_detection.registry import load_model_registry
 
@@ -531,7 +538,7 @@ def test_applied_rollback_serves_target_version_immediately(
     with TestClient(app) as client:
         assert _predict_version(client, feature_names) == "v102"
 
-        response = _apply_rollback(client)
+        response = _apply_rollback(client, admin_headers)
 
         assert response.status_code == 200
         assert response.json()["active_model_version"] == "v101"
@@ -556,6 +563,7 @@ def test_rollback_target_that_cannot_serve_is_refused_before_commit(
     tmp_path: Path,
     trained_metadata_paths: dict[str, Path],
     monkeypatch: pytest.MonkeyPatch,
+    admin_headers: dict[str, str],
 ) -> None:
     monkeypatch.setattr(state, "inference_service", None)
     registry_path, pointer_path, feature_names = _install_two_model_registry(
@@ -565,7 +573,7 @@ def test_rollback_target_that_cannot_serve_is_refused_before_commit(
     pointer_before = pointer_path.read_bytes()
 
     with TestClient(app, raise_server_exceptions=False) as client:
-        response = _apply_rollback(client)
+        response = _apply_rollback(client, admin_headers)
 
         assert response.status_code == 500
         assert "v101" in response.json()["detail"]
@@ -581,6 +589,7 @@ def test_rollback_failing_after_commit_restores_registry_and_pointer(
     tmp_path: Path,
     trained_metadata_paths: dict[str, Path],
     monkeypatch: pytest.MonkeyPatch,
+    admin_headers: dict[str, str],
 ) -> None:
     from api import main as api_main
 
@@ -602,7 +611,7 @@ def test_rollback_failing_after_commit_restores_registry_and_pointer(
             api_main, "OnlineInferenceService", _service_failing_on_committed_pointer
         )
 
-        response = _apply_rollback(client)
+        response = _apply_rollback(client, admin_headers)
 
         assert response.status_code == 500
         assert "restored" in response.json()["detail"]
@@ -619,6 +628,7 @@ def test_rollback_dry_run_with_compatible_target_writes_nothing(
     tmp_path: Path,
     trained_metadata_paths: dict[str, Path],
     monkeypatch: pytest.MonkeyPatch,
+    admin_headers: dict[str, str],
 ) -> None:
     monkeypatch.setattr(state, "inference_service", None)
     registry_path, pointer_path, feature_names = _install_two_model_registry(
@@ -628,7 +638,7 @@ def test_rollback_dry_run_with_compatible_target_writes_nothing(
     pointer_before = pointer_path.read_bytes()
 
     with TestClient(app) as client:
-        response = client.post("/admin/rollback", json={"dry_run": True})
+        response = client.post("/admin/rollback", json={"dry_run": True}, headers=admin_headers)
 
         assert response.status_code == 200
         assert response.json()["status"] == "validated"
@@ -639,3 +649,135 @@ def test_rollback_dry_run_with_compatible_target_writes_nothing(
     assert registry_path.read_bytes() == registry_before
     assert pointer_path.read_bytes() == pointer_before
     assert not (isolate_repo_state / "logs" / "alerts" / "rollback_events.jsonl").exists()
+
+
+# --- admin authorization -----------------------------------------------------
+
+
+@pytest.mark.parametrize("dry_run", [True, False], ids=["dry_run", "apply"])
+def test_admin_disabled_when_admin_token_is_unset(client: TestClient, dry_run: bool) -> None:
+    response = client.post(
+        "/admin/rollback",
+        json={"dry_run": dry_run},
+        headers={"X-Admin-Token": "any-value-at-all-0123456789"},
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "admin disabled"}
+
+
+def test_admin_disabled_when_admin_token_is_too_short(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    short_token = "fifteen-chars-x"
+    assert len(short_token) == 15
+    monkeypatch.setenv("ADMIN_TOKEN", short_token)
+
+    response = client.post(
+        "/admin/rollback",
+        json={"dry_run": True},
+        headers={"X-Admin-Token": short_token},
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "admin disabled"}
+
+
+@pytest.mark.parametrize(
+    "request_headers",
+    [
+        pytest.param({}, id="missing_header"),
+        pytest.param({"X-Admin-Token": "wrong-token-0123456789abcdefghij"}, id="wrong_token"),
+        pytest.param({"X-Admin-Token": "short"}, id="different_length"),
+        pytest.param({"X-Admin-Token": ""}, id="empty_header"),
+    ],
+)
+def test_admin_rejects_missing_or_wrong_token(
+    client: TestClient,
+    admin_headers: dict[str, str],
+    isolate_repo_state: Path,
+    request_headers: dict[str, str],
+) -> None:
+    pointer_path = isolate_repo_state / "configs" / "active_model.yaml"
+    pointer_before = pointer_path.read_bytes()
+
+    response = client.post(
+        "/admin/rollback",
+        json={"dry_run": False},
+        headers=request_headers,
+    )
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "invalid admin token"}
+    assert pointer_path.read_bytes() == pointer_before
+
+
+def test_admin_token_never_appears_in_responses_or_logs(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    admin_headers: dict[str, str],
+) -> None:
+    import logging
+
+    token = admin_headers["X-Admin-Token"]
+    caplog.set_level(logging.DEBUG)
+    monkeypatch.setattr(state, "inference_service", None)
+
+    with TestClient(app) as client:
+        responses = [
+            client.post("/admin/rollback", json={"dry_run": True}, headers=admin_headers),
+            client.post(
+                "/admin/rollback",
+                json={"dry_run": True},
+                headers={"X-Admin-Token": token[:-1] + "x"},
+            ),
+            client.post("/admin/rollback", json={"dry_run": True}),
+        ]
+
+    assert [response.status_code for response in responses] == [400, 401, 401]
+    for response in responses:
+        assert token not in response.text
+        assert token not in str(response.headers)
+
+    for record in caplog.records:
+        assert token not in record.getMessage()
+        assert token not in str(record.args)
+
+
+def test_admin_disabled_logs_one_startup_warning_without_the_token_length(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+
+    short_token = "too-short-token"
+    monkeypatch.setenv("ADMIN_TOKEN", short_token)
+    monkeypatch.setattr(state, "inference_service", None)
+    caplog.set_level(logging.WARNING, logger="api.main")
+
+    with TestClient(app):
+        pass
+
+    warnings = [
+        record
+        for record in caplog.records
+        if record.name == "api.main" and record.levelno == logging.WARNING
+    ]
+    assert len(warnings) == 1
+    assert "admin" in warnings[0].getMessage().lower()
+    assert short_token not in warnings[0].getMessage()
+    assert str(len(short_token)) not in warnings[0].getMessage()
+
+
+def test_non_admin_endpoints_need_no_token(
+    client: TestClient,
+    valid_feature_payload: dict[str, float | str],
+    admin_headers: dict[str, str],
+) -> None:
+    assert client.get("/health").status_code == 200
+    assert client.get("/livez").status_code == 200
+    assert client.get("/model/active").status_code == 200
+    predict_response = client.post("/predict", json={"feature_payload": valid_feature_payload})
+    assert predict_response.status_code == 200
+    assert client.get("/metrics").status_code == 200
