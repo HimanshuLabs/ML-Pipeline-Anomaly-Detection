@@ -69,8 +69,8 @@ Validated HPA behavior:
 | Capability | Result |
 |---|---:|
 | Metrics Server pod running | Passed |
-| `kubectl top nodes` | Passed |
-| `kubectl top pods -n project4-ml` | Passed |
+| Metrics Server node metrics (`top nodes`) | Passed |
+| Metrics Server pod metrics in `project4-ml` (`top pods`) | Passed |
 | HPA CPU target changed from `<unknown>` to real utilization | Passed |
 | HPA `ScalingActive=True` | Passed |
 | HPA `ValidMetricFound` | Passed |

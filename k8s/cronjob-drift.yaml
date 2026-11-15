@@ -1,7 +1,7 @@
 # Hourly drift job: the active model's drift over the last 24h of batch predictions.
-# Not listed in kustomization.yaml yet (stage 13 validates and adds it).
-# Needs the secret project4-postgres (keys PROJECT4_POSTGRES_HOST, _PORT, _DB, _USER,
-# _PASSWORD), created outside git like project4-admin (see secret.example.yaml).
+# With nothing scored in the window it reports not_evaluated and exits 0.
+# Runs as the least-privilege role project4_app (secret project4-app-db, created outside
+# git; see secret.example.yaml), from the tools image, with the same hardening as the API.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -26,6 +26,14 @@ spec:
             app.kubernetes.io/part-of: project4-ml-platform
         spec:
           restartPolicy: Never
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 999
+            runAsGroup: 999
+            fsGroup: 999
+            seccompProfile:
+              type: RuntimeDefault
           containers:
             - name: drift-job
               image: project4-anomaly-tools:local
@@ -38,12 +46,17 @@ spec:
                 - batch-predictions
                 - --hours
                 - "24"
-              env:
-                - name: LOG_LEVEL
-                  value: INFO
               envFrom:
+                - configMapRef:
+                    name: project4-anomaly-api-config
                 - secretRef:
-                    name: project4-postgres
+                    name: project4-app-db
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop:
+                    - ALL
               resources:
                 requests:
                   cpu: "100m"
@@ -52,8 +65,12 @@ spec:
                   cpu: "500m"
                   memory: "512Mi"
               volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
                 - name: runtime-logs
                   mountPath: /app/logs
           volumes:
+            - name: tmp
+              emptyDir: {}
             - name: runtime-logs
               emptyDir: {}

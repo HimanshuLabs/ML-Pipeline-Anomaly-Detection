@@ -224,11 +224,11 @@ Operational interpretation:
 
 - Implemented: local Kubernetes deployment manifests.
 - Implemented: two-replica API Deployment using `project4-anomaly-api:local`.
-- Implemented: ConfigMap-driven runtime configuration for active model `v002`.
+- Implemented: ConfigMap-driven runtime configuration (`LOG_LEVEL`, registry file-mirror switch).
 - Implemented: ClusterIP Service on port `8004`.
 - Implemented: CPU-based HPA from 2 to 5 replicas.
-- Validated: YAML parse, manifest consistency, and offline `kubectl kustomize` render.
-- Performed locally: live `kubectl apply`, rollout status check, API validation, Metrics Server-backed HPA validation, and rollback dry-run through the Kubernetes-hosted API.
+- Validated: YAML parse, manifest consistency, and offline kustomize render.
+- Performed locally: live apply, rollout status check, API validation, Metrics Server-backed HPA validation, and rollback dry-run through the Kubernetes-hosted API.
 - Not performed: applied cluster rollback that mutates the active production model pointer.
 - Reason: no Kubernetes context is configured in the current local environment.
 

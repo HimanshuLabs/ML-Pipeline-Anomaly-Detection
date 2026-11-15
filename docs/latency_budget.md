@@ -136,7 +136,7 @@ Validation performed:
 
 - YAML parse validation.
 - Cross-manifest consistency audit.
-- Offline render validation with `kubectl kustomize k8s/`.
+- Offline render validation with `kubectl --context kind-project4-local kustomize k8s/`.
 
 Validation not performed:
 
