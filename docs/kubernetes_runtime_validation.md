@@ -51,9 +51,18 @@ kubectl --context kind-project4-local -n kube-system rollout status deployment/m
 ## 3. Load the images into the cluster
 
 The Postgres image is the same `postgres:16.14` that compose's `anomaly-postgres` uses.
+With Docker's containerd image store, locally built images are multi-platform indexes with
+attestation manifests; loading them straight from Docker imports all platforms and fails with
+`ctr: content digest … not found` (observed on Docker 29.9.3), so each image is saved for
+the host platform only and loaded as an archive.
 
 ```bash
-kind load docker-image project4-anomaly-api:local project4-anomaly-tools:local postgres:16.14 --name project4-local
+case "$(uname -m)" in x86_64) PLATFORM=linux/amd64 ;; aarch64|arm64) PLATFORM=linux/arm64 ;; esac
+for IMAGE in project4-anomaly-api:local project4-anomaly-tools:local postgres:16.14; do
+  ARCHIVE="/tmp/$(echo "$IMAGE" | tr ':/' '__').tar"
+  docker save --platform "$PLATFORM" "$IMAGE" -o "$ARCHIVE" && kind load image-archive "$ARCHIVE" --name project4-local && rm -f "$ARCHIVE"
+done
+docker exec project4-local-control-plane crictl images | grep -E 'project4|postgres'
 ```
 
 ## 4. Namespace and secrets (generated values)
@@ -200,7 +209,7 @@ kubectl --context kind-project4-local -n project4-ml logs job/drift-manual
 
 ```bash
 kubectl --context kind-project4-local -n project4-ml exec deploy/project4-anomaly-api -- id          # uid=999 gid=999
-kubectl --context kind-project4-local -n project4-ml exec deploy/project4-anomaly-api -- sh -c 'touch /app/probe'   # Read-only file system
+kubectl --context kind-project4-local -n project4-ml exec deploy/project4-anomaly-api -- sh -c 'touch /app/probe' 2>&1 | tail -2   # touch: cannot touch '/app/probe': Read-only file system
 kubectl --context kind-project4-local -n project4-ml exec statefulset/project4-postgres -- id        # uid=999
 curl -s http://127.0.0.1:8015/metrics | grep registry_mirror_write_failures_total   # 0.0
 kubectl --context kind-project4-local -n project4-ml get pods,svc,hpa,pdb,cronjob,networkpolicy
@@ -218,6 +227,25 @@ kind delete cluster --name project4-local
 
 Deleting the cluster also removes its entry from the kubeconfig; the context restored in
 step 1 stays current.
+
+## Live validation (2026-11-15)
+
+The runbook above was run end to end on a fresh `project4-local` cluster.
+
+| Step | Observed |
+| --- | --- |
+| 5 seed | 6 schema files applied, `role project4_app: LOGIN`, 4 registry rows, pointer v004 at `pointer_version 1` |
+| 5 pointer | both pods report `pointer_source` `postgres`, model v004 |
+| 6 smoke | `/predict` served by v004; `predictions_scored_total` 1; `registry_mirror_write_failures_total` 0 |
+| 7 rollback dry run | HTTP 400: v002 is never compatible with v004 (expected until v005) |
+| 7 propagation | promote v002 through one pod: both pods v002 (`pointer_version 2`); promote v004 back: both pods v004 (`pointer_version 3`) |
+| 8 network policy | unlabelled pod to Postgres: `TimeoutError`; API to `kubernetes.default.svc:443`: `TimeoutError`; API to Postgres: reachable |
+| 9 drift job | `not_evaluated`, exit 0 |
+| 10 hardening | uid 999 for the API and Postgres; read-only root filesystem |
+| 10 HPA | cpu 1%/70% |
+| 11 teardown | the other cluster and the restored context were left untouched |
+
+Environment: kind node image v1.36.1, metrics-server v0.9.0, Docker 29.9.3.
 
 ## Earlier validation (historical, 2026-06-13)
 
