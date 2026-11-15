@@ -25,8 +25,8 @@ from anomaly_detection.batch_inference import (
     DEFAULT_ACTIVE_MODEL_PATH,
     ActiveModelArtifacts,
     BatchInferenceError,
+    canonical_feature_payload_hash,
     get_required_feature_names,
-    hash_feature_payload,
     load_active_model_artifacts,
     prepare_feature_matrix,
     required_feature_names_for,
@@ -271,7 +271,9 @@ class OnlineInferenceService:
             scores = score_entity_matrix(self.artifacts, matrix, str(entity_type))
             anomaly_score = float(scores[0])
             is_anomaly = bool(anomaly_score < self.threshold)
-            feature_payload_hash = hash_feature_payload(feature_payload)
+            feature_payload_hash = canonical_feature_payload_hash(
+                feature_payload, required_feature_names
+            )
             latency_ms = round((time.perf_counter() - started_at) * 1000, 3)
 
             return OnlinePredictionRecord(
