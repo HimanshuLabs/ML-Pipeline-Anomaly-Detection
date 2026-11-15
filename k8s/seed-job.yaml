@@ -1,0 +1,100 @@
+# One-off seed of the in-cluster database; NOT in kustomization.yaml. The runbook
+# (docs/kubernetes_runtime_validation.md) applies it once project4-postgres is ready.
+# Runs as the database OWNER (secret project4-postgres-owner) and:
+#   1. waits for Postgres (bounded: 60 tries, 5 s apart, then fails);
+#   2. apply-schema: tables, views, and the roles project4_app (password taken from
+#      the secret project4-app-db, so the role and the app's secret always match) and
+#      project5_reader (NOLOGIN here);
+#   3. sync-from-files --if-empty: registry and pointer from the bundles in the tools
+#      image, only when the database has no pointer yet (never overwrites);
+#   4. restrict-connect: only the owner, project4_app and project5_reader may connect.
+# Safe to run again: every step is idempotent and step 3 skips a populated database.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: project4-db-seed
+  namespace: project4-ml
+  labels:
+    app.kubernetes.io/name: project4-db-seed
+    app.kubernetes.io/part-of: project4-ml-platform
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 900
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: project4-db-seed
+        app.kubernetes.io/part-of: project4-ml-platform
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: db-seed
+          image: project4-anomaly-tools:local
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -c
+            - >-
+              set -eu;
+              tries=0;
+              until python -m anomaly_detection.database check >/dev/null 2>&1; do
+              tries=$((tries + 1));
+              if [ "$tries" -ge 60 ]; then echo "project4-postgres not ready after 60 tries" >&2; exit 1; fi;
+              sleep 5; done;
+              python -m anomaly_detection.database apply-schema;
+              python -m anomaly_detection.database sync-from-files --if-empty;
+              python -m anomaly_detection.database restrict-connect
+          env:
+            - name: HOME
+              value: /tmp
+            - name: LOG_LEVEL
+              value: INFO
+            - name: PROJECT4_POSTGRES_HOST
+              value: project4-postgres
+            - name: PROJECT4_POSTGRES_PORT
+              value: "5432"
+            - name: PROJECT4_POSTGRES_DB
+              value: project4_ml
+            - name: PROJECT4_POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: project4-postgres-owner
+                  key: POSTGRES_USER
+            - name: PROJECT4_POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: project4-postgres-owner
+                  key: POSTGRES_PASSWORD
+            - name: PROJECT4_APP_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: project4-app-db
+                  key: PROJECT4_POSTGRES_PASSWORD
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

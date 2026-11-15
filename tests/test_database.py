@@ -1789,3 +1789,59 @@ def test_restrict_connect_leaves_project4_app_connecting(connect_roles) -> None:
 
     assert (APP_ROLE, False, True) in rows
     assert _connect_as(APP_ROLE, APP_PASSWORD) == [(1,)]
+
+
+# --- stage 13e3: seed-job CLI steps ------------------------------------------------------
+
+
+@pytest.mark.postgres
+def test_restrict_connect_cli_runs_the_script_and_prints_the_role_table(
+    connect_roles, capsys: pytest.CaptureFixture
+) -> None:
+    assert database.main(["restrict-connect"]) == 0
+
+    out = capsys.readouterr().out
+    rows = {line.split()[0]: line.split()[1:] for line in out.splitlines()[1:] if line.strip()}
+    assert out.splitlines()[0].split() == ["role", "superuser", "can_connect"]
+    assert rows[database.PROJECT5_READER_ROLE] == ["false", "true"]
+    assert rows[MLFLOW_ROLE] == ["false", "false"]
+    with pytest.raises(Exception, match="permission denied for database"):
+        _connect_as(MLFLOW_ROLE, MLFLOW_ROLE_PASSWORD)
+
+
+@pytest.mark.postgres
+def test_sync_from_files_if_empty_never_overwrites_a_populated_database(
+    database_mode,
+    trained_metadata_paths: dict[str, Path],
+    capsys: pytest.CaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from anomaly_detection.registry import promote_model_version
+
+    # As in the cluster: the file mirror is off, so the files keep the image's state.
+    monkeypatch.setenv("PROJECT4_REGISTRY_FILE_MIRROR", "false")
+
+    # First seed: an empty database is filled from the files.
+    assert database.main(["sync-from-files", "--if-empty"]) == 0
+    seeded = _database_pointer(database_mode)
+    assert seeded["pointer_version"] == 1
+    capsys.readouterr()
+
+    # The database moves on (a promote; a rollback is the same kind of change).
+    _register_trained(trained_metadata_paths, ["v101"])
+    promote_model_version(model_name="isolation_forest", model_version="v101")
+    moved = _database_pointer(database_mode)
+    entries_moved = {v: e.to_dict() for v, e in _database_entries(database_mode).items()}
+    assert moved["model_version"] == "v101"
+
+    # Seeding again is a no-op that says so.
+    assert database.main(["sync-from-files", "--if-empty"]) == 0
+    out = capsys.readouterr().out
+    assert "skipped" in out and "already" in out
+    assert _database_pointer(database_mode) == moved
+    assert {v: e.to_dict() for v, e in _database_entries(database_mode).items()} == entries_moved
+
+    # Without --if-empty the files win: the pointer goes back to the file's version.
+    # That is why the seed job always passes --if-empty.
+    database.sync_from_files(database_mode)
+    assert _database_pointer(database_mode)["model_version"] == seeded["model_version"]

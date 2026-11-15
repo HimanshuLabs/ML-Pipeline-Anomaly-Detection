@@ -1,0 +1,112 @@
+# Network policies for project4-ml: deny everything, then allow only what the workloads
+# need. Labels are the pods' app.kubernetes.io/name labels:
+#   project4-anomaly-api (Deployment), project4-drift-job (CronJob),
+#   project4-db-seed (seed Job), project4-postgres (StatefulSet).
+# Enforced by kindnet's network-policy engine in kind (verify with the deny test in the
+# runbook). kubectl port-forward and kubelet probes are not affected by these policies.
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: project4-ml
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+# Every pod may resolve names (only through the cluster DNS).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+  namespace: project4-ml
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+---
+# The API serves pods in this namespace only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-api-ingress
+  namespace: project4-ml
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: project4-anomaly-api
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector: {}
+      ports:
+        - protocol: TCP
+          port: 8004
+---
+# Postgres accepts the API, the drift job and the seed job, nothing else.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-postgres-ingress
+  namespace: project4-ml
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: project4-postgres
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values:
+                  - project4-anomaly-api
+                  - project4-drift-job
+                  - project4-db-seed
+      ports:
+        - protocol: TCP
+          port: 5432
+---
+# Those three may reach Postgres, and nothing else outside DNS.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-postgres-egress
+  namespace: project4-ml
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values:
+          - project4-anomaly-api
+          - project4-drift-job
+          - project4-db-seed
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: project4-postgres
+      ports:
+        - protocol: TCP
+          port: 5432
