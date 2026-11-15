@@ -373,3 +373,90 @@ def test_append_and_read_drift_events_jsonl(tmp_path: Path) -> None:
 def test_read_drift_events_jsonl_rejects_missing_file(tmp_path: Path) -> None:
     with pytest.raises(DriftMonitoringError, match="does not exist"):
         read_drift_events_jsonl(tmp_path / "missing.jsonl")
+
+
+def _write_versioned_baselines(root: Path, versions: tuple[str, ...]) -> dict[str, Path]:
+    """baseline_stats.json in one artifact directory per version; returns model paths."""
+    import json
+
+    model_paths: dict[str, Path] = {}
+    for version in versions:
+        artifact_dir = root / "isolation_forest" / f"model_version={version}"
+        artifact_dir.mkdir(parents=True)
+        (artifact_dir / "baseline_stats.json").write_text(
+            json.dumps({**_baseline_stats(), "model_version": version}),
+            encoding="utf-8",
+        )
+        model_paths[version] = artifact_dir / "model.joblib"
+    return model_paths
+
+
+def test_baseline_follows_the_file_pointer(tmp_path: Path) -> None:
+    import yaml
+
+    from anomaly_detection import drift
+
+    model_paths = _write_versioned_baselines(tmp_path, ("v201", "v202"))
+    pointer_path = drift.DEFAULT_ACTIVE_MODEL_PATH  # per-test mirror (conftest)
+
+    def point_to(version: str) -> None:
+        pointer_path.write_text(
+            yaml.safe_dump(
+                {
+                    "model_name": "isolation_forest",
+                    "active_model_version": version,
+                    "artifact_path": str(model_paths[version]),
+                    "feature_schema_version": "feature_schema_test",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    point_to("v201")
+    assert drift.load_baseline_stats()["model_version"] == "v201"
+
+    point_to("v202")
+    assert drift.load_baseline_stats()["model_version"] == "v202"
+    result = drift.evaluate_drift_from_paths(
+        current_features=pd.DataFrame({"cart_value": [100.0, 110.0]}),
+    )
+    assert result.model_version == "v202"
+
+
+def test_baseline_follows_the_database_pointer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from dataclasses import fields
+
+    from anomaly_detection import drift, registry
+
+    model_paths = _write_versioned_baselines(tmp_path, ("v201", "v202"))
+    entries = [
+        registry.ModelRegistryEntry(
+            **{
+                **{field.name: None for field in fields(registry.ModelRegistryEntry)},
+                "model_name": "isolation_forest",
+                "model_version": version,
+                "artifact_path": str(path),
+            }
+        )
+        for version, path in model_paths.items()
+    ]
+    active = {"version": "v201"}
+
+    def fake_state(**_kwargs) -> registry.RegistryState:
+        return registry.RegistryState(
+            entries=entries,
+            model_name="isolation_forest",
+            active_model_version=active["version"],
+            pointer_version=7,
+            source=registry.POINTER_SOURCE_POSTGRES,
+        )
+
+    monkeypatch.setattr(registry, "database_enabled", lambda: True)
+    monkeypatch.setattr(registry, "load_registry_state", fake_state)
+
+    assert drift.load_baseline_stats()["model_version"] == "v201"
+    active["version"] = "v202"
+    assert drift.load_baseline_stats()["model_version"] == "v202"

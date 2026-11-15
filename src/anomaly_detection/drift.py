@@ -24,15 +24,6 @@ import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-DEFAULT_BASELINE_STATS_PATH = (
-    PROJECT_ROOT
-    / "artifacts"
-    / "models"
-    / "isolation_forest"
-    / "model_version=v002"
-    / "baseline_stats.json"
-)
-
 DEFAULT_ACTIVE_MODEL_PATH = PROJECT_ROOT / "configs" / "active_model.yaml"
 DEFAULT_DRIFT_THRESHOLDS_PATH = PROJECT_ROOT / "configs" / "drift_thresholds.yaml"
 DEFAULT_DRIFT_EVENTS_PATH = PROJECT_ROOT / "logs" / "alerts" / "drift_events.jsonl"
@@ -242,12 +233,56 @@ def load_active_model_config(
     return active_model
 
 
-def load_baseline_stats(
-    baseline_stats_path: Path = DEFAULT_BASELINE_STATS_PATH,
-) -> dict[str, Any]:
-    """Load approved training baseline statistics."""
+def resolve_active_baseline_stats_path(
+    active_model_path: Path = DEFAULT_ACTIVE_MODEL_PATH,
+) -> Path:
+    """baseline_stats.json in the active model's artifact directory.
 
-    baseline_stats = _read_json(baseline_stats_path)
+    The active model comes from the shared pointer in Postgres when the
+    database is configured, otherwise from the active_model.yaml pointer.
+    """
+
+    from anomaly_detection import registry
+
+    if registry.database_enabled():
+        try:
+            state = registry.load_registry_state()
+        except registry.RegistryError as exc:
+            raise DriftMonitoringError(f"active model pointer could not be read: {exc}") from exc
+
+        active_entry = next(
+            (
+                entry
+                for entry in state.entries
+                if entry.model_name == state.model_name
+                and entry.model_version == state.active_model_version
+            ),
+            None,
+        )
+        if active_entry is None:
+            raise DriftMonitoringError(
+                f"active model {state.model_name} {state.active_model_version} "
+                "is not in the registry"
+            )
+        artifact_path = active_entry.artifact_path
+    else:
+        artifact_path = load_active_model_config(active_model_path).get("artifact_path")
+
+    if not artifact_path:
+        raise DriftMonitoringError("active model pointer has no artifact_path")
+
+    model_path = Path(artifact_path)
+    if not model_path.is_absolute():
+        model_path = PROJECT_ROOT / model_path
+    return model_path.parent / "baseline_stats.json"
+
+
+def load_baseline_stats(
+    baseline_stats_path: Path | None = None,
+) -> dict[str, Any]:
+    """Load approved training baseline statistics (default: the active model's)."""
+
+    baseline_stats = _read_json(baseline_stats_path or resolve_active_baseline_stats_path())
 
     required_fields = [
         "model_name",
@@ -552,7 +587,7 @@ def evaluate_drift(
 def evaluate_drift_from_paths(
     *,
     current_features: pd.DataFrame,
-    baseline_stats_path: Path = DEFAULT_BASELINE_STATS_PATH,
+    baseline_stats_path: Path | None = None,
     threshold_config_path: Path = DEFAULT_DRIFT_THRESHOLDS_PATH,
     observation_window_start: datetime | None = None,
     observation_window_end: datetime | None = None,

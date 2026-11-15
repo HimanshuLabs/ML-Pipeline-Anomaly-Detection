@@ -1,0 +1,430 @@
+"""Retrain the anomaly model from a real-source snapshot and register it as a candidate.
+
+    python -m anomaly_detection.retrain --snapshot <path|snapshot_id|latest> --model-version v003
+
+1. The snapshot must be a real-source extract with data_quality_status "passed",
+   trainable, a features.parquet, and the configured real-source
+   feature_schema_version; otherwise it is refused with every reason.
+2. Training reuses training.train_isolation_forest_from_snapshot (model.joblib,
+   metadata.json, feature_schema.json, baseline_stats.json).
+3. evaluation_report.json is written next to the artifact: row counts, the
+   configured contamination, and the anomaly rate and decision_function score
+   distribution overall and per entity type.
+4. The version is registered as "candidate" (Postgres when PROJECT4_POSTGRES_* is
+   configured, with the JSON file mirror; else the JSON registry).
+
+It never promotes and never writes the active model pointer.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import re
+import sys
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pandas as pd
+
+from anomaly_detection.registry import (
+    DEFAULT_REGISTRY_PATH,
+    ModelRegistryEntry,
+    RegistryError,
+    ensure_database_initialized,
+    load_registry_state,
+    register_model_from_artifacts,
+)
+from anomaly_detection.training import (
+    DEFAULT_MODEL_CONFIG_PATH,
+    PROJECT_ROOT,
+    ModelArtifactMetadata,
+    TrainingError,
+    build_training_feature_matrix,
+    feature_set_fingerprint,
+    load_trained_model,
+    load_training_config,
+    train_isolation_forest_from_snapshot,
+)
+from anomaly_detection.training_snapshot import read_training_snapshot
+
+LOGGER = logging.getLogger(__name__)
+
+DEFAULT_TRAINING_ROOT = PROJECT_ROOT / "data" / "features" / "training"
+REAL_SOURCE_SNAPSHOT_TYPE = "real_source_extract"
+EVALUATION_REPORT_NAME = "evaluation_report.json"
+# Entity types source_extract produces; each is reported even when absent.
+EXPECTED_ENTITY_TYPES = (
+    "user",
+    "customer",
+    "campaign",
+    "funnel_day",
+    "product",
+    "web_customer",
+)
+SCORE_DEFINITION = (
+    "IsolationForest.decision_function on the training rows; lower is more "
+    "anomalous; a row is an anomaly when predict() == -1."
+)
+
+
+class RetrainError(ValueError):
+    """Raised when a retrain is refused; nothing was trained or registered."""
+
+
+@dataclass(frozen=True)
+class RetrainResult:
+    """What a retrain wrote and registered."""
+
+    artifact: ModelArtifactMetadata
+    registry_entry: ModelRegistryEntry
+    registry_source: str
+    active_model_version_before: str | None
+    active_model_version_after: str | None
+    evaluation_report_path: Path
+    evaluation_report: dict[str, Any]
+
+
+def _read_metadata(path: Path) -> dict[str, Any] | None:
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return loaded if isinstance(loaded, dict) else None
+
+
+def resolve_snapshot_dir(snapshot: str | Path, training_root: str | Path) -> Path:
+    """Snapshot directory for a path, a snapshot id, or 'latest'.
+
+    'latest' is the most recently created real-source snapshot, even a failed
+    one, so a failed extraction is refused instead of silently training on an
+    older snapshot.
+    """
+
+    value = str(snapshot)
+    root = Path(training_root)
+
+    if value == "latest":
+        candidates = []
+        for metadata_path in root.glob("snapshot_date=*/snapshot_id=*/metadata.json"):
+            metadata = _read_metadata(metadata_path) or {}
+            if metadata.get("snapshot_type") == REAL_SOURCE_SNAPSHOT_TYPE:
+                candidates.append((str(metadata.get("created_at") or ""), str(metadata_path)))
+        if not candidates:
+            raise RetrainError(f"No real-source snapshot found under: {root}")
+        return Path(max(candidates)[1]).parent
+
+    path = Path(value)
+    if path.is_dir():
+        return path
+    if path.is_file():
+        return path.parent
+
+    matches = sorted(root.glob(f"snapshot_date=*/snapshot_id={value}/metadata.json"))
+    if not matches:
+        raise RetrainError(f"Could not resolve snapshot {value!r} under: {root}")
+    return matches[-1].parent
+
+
+def snapshot_refusal_reasons(
+    snapshot_dir: Path,
+    metadata: dict[str, Any] | None,
+    *,
+    expected_feature_schema_version: str,
+) -> list[str]:
+    """Every reason the snapshot cannot be trained on; empty when it can."""
+
+    if metadata is None:
+        return [f"metadata.json is missing or unreadable in {snapshot_dir}"]
+
+    reasons: list[str] = []
+    snapshot_type = metadata.get("snapshot_type")
+    if snapshot_type != REAL_SOURCE_SNAPSHOT_TYPE:
+        reasons.append(f"snapshot_type is {snapshot_type!r}, not {REAL_SOURCE_SNAPSHOT_TYPE!r}")
+
+    status = metadata.get("data_quality_status")
+    if status != "passed":
+        reasons.append(f"data_quality_status is {status!r}")
+
+    if metadata.get("trainable") is not True:
+        reasons.append("trainable is not true")
+
+    validation_errors = metadata.get("validation_errors") or []
+    if validation_errors:
+        reasons.append("validation errors: " + " | ".join(str(e) for e in validation_errors))
+
+    if not (snapshot_dir / "features.parquet").is_file():
+        reasons.append("features.parquet is missing")
+
+    label = metadata.get("feature_schema_version")
+    if label != expected_feature_schema_version:
+        reasons.append(
+            f"feature_schema_version {label!r} is not the configured real-source label "
+            f"{expected_feature_schema_version!r} (model_config.yaml "
+            "features.real_source_schema_version)"
+        )
+
+    feature_columns = metadata.get("feature_columns")
+    if not isinstance(feature_columns, list) or not feature_columns:
+        reasons.append("feature_columns is missing or empty")
+    elif metadata.get("feature_set_fingerprint") not in (
+        None,
+        feature_set_fingerprint([str(column) for column in feature_columns]),
+    ):
+        reasons.append("feature_set_fingerprint does not match feature_columns")
+
+    return reasons
+
+
+def _score_stats(scores: np.ndarray, is_anomaly: np.ndarray) -> dict[str, Any]:
+    row_count = int(len(scores))
+    if row_count == 0:
+        return {
+            "row_count": 0,
+            "anomaly_count": 0,
+            "anomaly_rate": None,
+            "score_p5": None,
+            "score_p50": None,
+            "score_p95": None,
+        }
+
+    p5, p50, p95 = np.percentile(scores, [5, 50, 95])
+    anomaly_count = int(is_anomaly.sum())
+    return {
+        "row_count": row_count,
+        "anomaly_count": anomaly_count,
+        "anomaly_rate": anomaly_count / row_count,
+        "score_p5": float(p5),
+        "score_p50": float(p50),
+        "score_p95": float(p95),
+    }
+
+
+def build_evaluation_report(
+    *,
+    artifact: ModelArtifactMetadata,
+    snapshot_frame: pd.DataFrame,
+    snapshot_metadata: dict[str, Any],
+) -> dict[str, Any]:
+    """Anomaly rate and score distribution of the trained model, overall and per entity type."""
+
+    if "entity_type" not in snapshot_frame.columns:
+        raise RetrainError("Snapshot features have no entity_type column.")
+
+    feature_matrix = build_training_feature_matrix(
+        snapshot_frame,
+        snapshot_metadata=snapshot_metadata,
+    )
+    model = load_trained_model(artifact.model_path)
+    scores = np.asarray(model.decision_function(feature_matrix), dtype=float)
+    is_anomaly = np.asarray(model.predict(feature_matrix)) == -1
+    entity_types = snapshot_frame["entity_type"].astype(str).to_numpy()
+
+    present = sorted(set(entity_types))
+    unexpected = [t for t in present if t not in EXPECTED_ENTITY_TYPES]
+    per_entity_type = {
+        entity_type: _score_stats(
+            scores[entity_types == entity_type],
+            is_anomaly[entity_types == entity_type],
+        )
+        for entity_type in (*EXPECTED_ENTITY_TYPES, *unexpected)
+    }
+
+    return {
+        "report_type": "retrain_evaluation",
+        "generated_at_utc": datetime.now(tz=UTC).isoformat(),
+        "model_name": artifact.model_name,
+        "model_version": artifact.model_version,
+        "feature_schema_version": artifact.feature_schema_version,
+        "feature_set_fingerprint": artifact.feature_set_fingerprint,
+        "feature_count": len(artifact.feature_names),
+        "snapshot_id": snapshot_metadata.get("snapshot_id"),
+        "row_counts": {
+            "snapshot": snapshot_metadata.get("row_count"),
+            "trained": int(len(feature_matrix)),
+            "by_entity_type": {
+                entity_type: stats["row_count"] for entity_type, stats in per_entity_type.items()
+            },
+        },
+        "contamination": artifact.model_parameters["contamination"],
+        "score_definition": SCORE_DEFINITION,
+        "overall": _score_stats(scores, is_anomaly),
+        "entity_types": per_entity_type,
+        "missing_entity_types": [t for t in EXPECTED_ENTITY_TYPES if t not in present],
+    }
+
+
+def retrain(
+    *,
+    snapshot: str | Path,
+    model_version: str,
+    training_root: str | Path = DEFAULT_TRAINING_ROOT,
+    config_path: str | Path = DEFAULT_MODEL_CONFIG_PATH,
+    artifact_root: str | Path | None = None,
+    registry_path: str | Path = DEFAULT_REGISTRY_PATH,
+) -> RetrainResult:
+    """Train a candidate from a real-source snapshot, evaluate it, and register it."""
+
+    if not re.fullmatch(r"v\d+", model_version):
+        raise RetrainError(f"model version must look like v003; got {model_version!r}")
+
+    config = load_training_config(config_path, artifact_root_override=artifact_root)
+
+    snapshot_dir = resolve_snapshot_dir(snapshot, training_root)
+    metadata_path = snapshot_dir / "metadata.json"
+    snapshot_metadata = _read_metadata(metadata_path)
+    reasons = snapshot_refusal_reasons(
+        snapshot_dir,
+        snapshot_metadata,
+        expected_feature_schema_version=config.real_source_feature_schema_version,
+    )
+    if reasons:
+        raise RetrainError(f"Snapshot {snapshot_dir} is not trainable: " + "; ".join(reasons))
+    assert snapshot_metadata is not None
+
+    # Refuse before training: the registry store must be usable and the version new.
+    state = load_registry_state(registry_path=registry_path, model_name=config.model_name)
+    ensure_database_initialized(state, config.model_name)
+    if any(
+        entry.model_name == config.model_name and entry.model_version == model_version
+        for entry in state.entries
+    ):
+        raise RetrainError(
+            f"{config.model_name} {model_version} is already registered ({state.source}); "
+            "choose a new --model-version."
+        )
+
+    features_path = snapshot_dir / "features.parquet"
+    artifact = train_isolation_forest_from_snapshot(
+        features_path=features_path,
+        snapshot_metadata_path=metadata_path,
+        model_version=model_version,
+        config_path=config_path,
+        artifact_root_override=artifact_root,
+        registry_path=registry_path,
+    )
+
+    report = build_evaluation_report(
+        artifact=artifact,
+        snapshot_frame=read_training_snapshot(features_path),
+        snapshot_metadata=snapshot_metadata,
+    )
+    report_path = Path(artifact.artifact_dir) / EVALUATION_REPORT_NAME
+    with report_path.open("w", encoding="utf-8") as file:
+        json.dump(report, file, indent=2, sort_keys=True)
+        file.write("\n")
+
+    entry = register_model_from_artifacts(
+        metadata_path=artifact.metadata_path,
+        registry_path=registry_path,
+        status="candidate",
+        approved_for_prod=False,
+        notes=(
+            f"Candidate retrained from {snapshot_metadata.get('snapshot_id')}; "
+            f"see {EVALUATION_REPORT_NAME}. Not promoted."
+        ),
+        replace_existing=False,
+    )
+
+    after = load_registry_state(registry_path=registry_path, model_name=config.model_name)
+
+    return RetrainResult(
+        artifact=artifact,
+        registry_entry=entry,
+        registry_source=state.source,
+        active_model_version_before=state.active_model_version,
+        active_model_version_after=after.active_model_version,
+        evaluation_report_path=report_path,
+        evaluation_report=report,
+    )
+
+
+def _format(value: Any, spec: str) -> str:
+    return "-" if value is None else format(value, spec)
+
+
+def print_summary(result: RetrainResult) -> None:
+    report = result.evaluation_report
+    overall = report["overall"]
+
+    print("OK: retrained candidate (not promoted)")
+    print(
+        f"model={result.artifact.model_name} {result.artifact.model_version} "
+        f"status={result.registry_entry.status} registry={result.registry_source}"
+    )
+    print(
+        f"snapshot_id={report['snapshot_id']} "
+        f"feature_schema_version={report['feature_schema_version']} "
+        f"feature_count={report['feature_count']}"
+    )
+    print(
+        f"rows: snapshot={report['row_counts']['snapshot']} "
+        f"trained={report['row_counts']['trained']}"
+    )
+    print(
+        f"contamination={report['contamination']} "
+        f"overall_anomaly_rate={_format(overall['anomaly_rate'], '.4f')}"
+    )
+    print(f"{'entity_type':<14}{'rows':>8}{'anom_rate':>11}{'p5':>10}{'p50':>10}{'p95':>10}")
+    for entity_type, stats in report["entity_types"].items():
+        print(
+            f"{entity_type:<14}{stats['row_count']:>8}"
+            f"{_format(stats['anomaly_rate'], '.4f'):>11}"
+            f"{_format(stats['score_p5'], '.4f'):>10}"
+            f"{_format(stats['score_p50'], '.4f'):>10}"
+            f"{_format(stats['score_p95'], '.4f'):>10}"
+        )
+    print(
+        f"active_model_version={result.active_model_version_after} "
+        f"(before: {result.active_model_version_before})"
+    )
+    print(f"artifact_dir={result.artifact.artifact_dir}")
+    print(f"evaluation_report={result.evaluation_report_path}")
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Train a candidate model from a passed real-source snapshot, write "
+            "evaluation_report.json, and register it as candidate. Never promotes."
+        )
+    )
+    parser.add_argument(
+        "--snapshot", required=True, help="Snapshot path, snapshot id, or 'latest'."
+    )
+    parser.add_argument("--model-version", required=True, help="New model version, e.g. v003.")
+    parser.add_argument("--training-root", default=str(DEFAULT_TRAINING_ROOT))
+    parser.add_argument("--config", default=str(DEFAULT_MODEL_CONFIG_PATH))
+    parser.add_argument("--artifact-root", default=None, help="Optional artifact root override.")
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s - %(message)s",
+    )
+    args = parse_args(argv)
+
+    try:
+        result = retrain(
+            snapshot=args.snapshot,
+            model_version=args.model_version,
+            training_root=args.training_root,
+            config_path=args.config,
+            artifact_root=args.artifact_root,
+        )
+    except (RetrainError, TrainingError, RegistryError) as exc:
+        print(f"REFUSED: {exc}", file=sys.stderr)
+        return 1
+
+    print_summary(result)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

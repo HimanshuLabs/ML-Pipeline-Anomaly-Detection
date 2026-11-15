@@ -58,6 +58,7 @@ class IsolationForestTrainingConfig:
     max_samples: int | float | str
     artifact_root: Path
     feature_schema_version: str
+    real_source_feature_schema_version: str
 
 
 @dataclass(frozen=True)
@@ -206,6 +207,11 @@ def load_training_config(
     feature_schema_version = str(
         features_config.get("schema_version", "feature_schema_v001")
     )
+    # The demo contract and the real-source feature set are different feature
+    # lists, so they carry different labels.
+    real_source_feature_schema_version = str(
+        features_config.get("real_source_schema_version", feature_schema_version)
+    )
 
     artifact_root_raw = artifact_root_override or training_config.get(
         "artifact_root",
@@ -234,7 +240,19 @@ def load_training_config(
         max_samples=max_samples,
         artifact_root=artifact_root,
         feature_schema_version=feature_schema_version,
+        real_source_feature_schema_version=real_source_feature_schema_version,
     )
+
+
+def resolve_feature_schema_version(
+    config: IsolationForestTrainingConfig,
+    snapshot_metadata: dict[str, Any],
+) -> str:
+    """Label for the trained feature set: real-source snapshots have their own."""
+
+    if snapshot_metadata.get("snapshot_type") == "real_source_extract":
+        return config.real_source_feature_schema_version
+    return config.feature_schema_version
 
 
 def _metadata_to_dict(metadata: Any) -> dict[str, Any]:
@@ -518,8 +536,9 @@ def train_isolation_forest_from_snapshot(
         raise TrainingError("Validated model feature matrix must not be empty.")
 
     feature_names = [str(column) for column in feature_matrix.columns]
+    feature_schema_version = resolve_feature_schema_version(config, snapshot_metadata)
     ensure_feature_schema_version_is_unambiguous(
-        feature_schema_version=config.feature_schema_version,
+        feature_schema_version=feature_schema_version,
         feature_names=feature_names,
         registry_path=registry_path,
     )
@@ -551,7 +570,7 @@ def train_isolation_forest_from_snapshot(
     baseline_stats = build_baseline_stats_payload(
         model_name=config.model_name,
         model_version=resolved_model_version,
-        feature_schema_version=config.feature_schema_version,
+        feature_schema_version=feature_schema_version,
         feature_matrix=feature_matrix,
         anomaly_scores=anomaly_scores,
         predictions=predictions,
@@ -568,7 +587,7 @@ def train_isolation_forest_from_snapshot(
 
     # Describe where the features actually came from: the training snapshot.
     feature_schema_payload = {
-        "feature_schema_version": config.feature_schema_version,
+        "feature_schema_version": feature_schema_version,
         "feature_names": feature_names,
         "feature_count": len(feature_names),
         "feature_set_fingerprint": fingerprint,
@@ -586,7 +605,7 @@ def train_isolation_forest_from_snapshot(
         metadata_path=str(metadata_path),
         feature_schema_path=str(feature_schema_path),
         baseline_stats_path=str(baseline_stats_path),
-        feature_schema_version=config.feature_schema_version,
+        feature_schema_version=feature_schema_version,
         feature_names=feature_names,
         row_count=int(len(feature_matrix)),
         training_started_at_utc=_isoformat_utc(started_at),

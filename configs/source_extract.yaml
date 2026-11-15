@@ -1,6 +1,6 @@
 source_extract:
   snapshot_type: real_source_extract
-  feature_schema_version: feature_schema_v001
+  feature_schema_version: feature_schema_v002
   output_snapshot_prefix: real_source
   minimum_total_rows: 100
 
