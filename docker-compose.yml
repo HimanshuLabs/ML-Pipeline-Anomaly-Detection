@@ -6,7 +6,8 @@ services:
       target: runtime
     image: project4-anomaly-api:local
     ports:
-      - "${PROJECT4_API_HOST_PORT:-8014}:8004"
+      # Host-only, like every P4 service; P5 calls it from the host on 127.0.0.1.
+      - "127.0.0.1:${PROJECT4_API_HOST_PORT:-8014}:8004"
     environment:
       PYTHONPATH: /app/src
       PYTHONUNBUFFERED: "1"
@@ -110,8 +111,9 @@ services:
   # sql/create_mlflow_database.sql; never the project4_ml database. The URI (with the
   # password) reaches the server only through MLFLOW_BACKEND_STORE_URI. Without
   # PROJECT4_MLFLOW_DB_PASSWORD in .env only this container refuses to start.
-  # Artifacts are served from the mlflow_artifacts volume, mounted at /app/logs because
-  # that is the image's only directory the non-root app user can write to.
+  # Artifacts are served from the mlflow_artifacts volume, mounted at /var/lib/mlflow (the
+  # tools image creates it for the non-root app user, uid 999); runs recorded while the
+  # volume sat at /app/logs keep resolving, since mlflow-artifacts/ is the same subfolder.
   mlflow:
     image: project4-anomaly-tools:local
     ports:
@@ -129,9 +131,9 @@ services:
         if [ -z "$$PROJECT4_MLFLOW_DB_PASSWORD" ]; then
         echo "PROJECT4_MLFLOW_DB_PASSWORD is not set in .env; refusing to start" >&2;
         exit 1; fi; exec mlflow server --host 0.0.0.0 --port 5000
-        --serve-artifacts --artifacts-destination /app/logs/mlflow-artifacts
+        --serve-artifacts --artifacts-destination /var/lib/mlflow/mlflow-artifacts
     volumes:
-      - mlflow_artifacts:/app/logs
+      - mlflow_artifacts:/var/lib/mlflow
     # The image's own healthcheck probes the API port; check the MLflow server instead.
     healthcheck:
       test:

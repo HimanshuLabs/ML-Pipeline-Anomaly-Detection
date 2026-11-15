@@ -155,26 +155,75 @@ def test_compose_and_k8s_use_the_three_image_names() -> None:
     assert deployment["spec"]["template"]["spec"]["containers"][0]["image"] == IMAGES["runtime"]
 
 
-def test_no_reference_to_the_old_image_name_or_dockerfiles_remains() -> None:
-    stale = re.compile(r"project4-anomaly-batch|Dockerfile\.api|Dockerfile\.batch")
-    offenders = []
+def _is_secrets_file(relative: Path) -> bool:
+    """.env and .env.* (except the committed .env.example): never opened by a test."""
+
+    name = relative.name
+    return (name == ".env" or name.startswith(".env.")) and name != ".env.example"
+
+
+def _scanned_repo_files() -> list[Path]:
+    """Repository text files to scan: no hidden directories (except .github), no
+    runtime data, no secrets files."""
+
+    files = []
     for path in sorted(REPO_ROOT.rglob("*")):
         relative = path.relative_to(REPO_ROOT)
         top = relative.parts[0]
         hidden = top.startswith(".") and top != ".github" and len(relative.parts) > 1
-        if not path.is_file() or hidden or top in {
+        if not path.is_file() or hidden or _is_secrets_file(relative) or top in {
             "data", "logs", "artifacts", "mlruns", "reports",
         } or path.suffix in {".pyc", ".joblib", ".parquet"}:
             continue
         if relative == Path("tests/test_images.py"):
             continue
+        files.append(path)
+    return files
+
+
+def test_repo_scan_never_opens_a_secrets_file() -> None:
+    scanned = {path.relative_to(REPO_ROOT) for path in _scanned_repo_files()}
+
+    assert Path(".env.example") in scanned
+    assert not any(_is_secrets_file(relative) for relative in scanned)
+    for name in (".env", ".env.local", ".env.production"):
+        assert _is_secrets_file(Path(name)), name
+    assert not _is_secrets_file(Path(".env.example"))
+
+
+def test_no_reference_to_the_old_image_name_or_dockerfiles_remains() -> None:
+    stale = re.compile(r"project4-anomaly-batch|Dockerfile\.api|Dockerfile\.batch")
+    offenders = []
+    for path in _scanned_repo_files():
         try:
             text = path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             continue
+        relative = path.relative_to(REPO_ROOT)
         offenders += [f"{relative}:{n}" for n, line in enumerate(text.splitlines(), 1)
                       if stale.search(line)]
     assert not offenders
+
+
+def test_tools_image_owns_the_mlflow_volume_path() -> None:
+    text = DOCKERFILE.read_text(encoding="utf-8")
+    tools = re.split(r"^FROM \S+ AS tools$", text, flags=re.MULTILINE)[1].split("\nFROM ", 1)[0]
+
+    assert "mkdir -p" in tools and "/var/lib/mlflow" in tools
+    assert "chown -R app:app /app /var/lib/mlflow" in tools
+
+
+def test_every_published_compose_port_is_bound_to_localhost() -> None:
+    compose = yaml.safe_load((REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
+    published = {
+        name: service.get("ports", []) for name, service in compose["services"].items()
+    }
+
+    assert any(published.values())
+    for name, ports in published.items():
+        for port in ports:
+            assert str(port).startswith("127.0.0.1:"), (name, port)
+    assert published["anomaly-api"] == ["127.0.0.1:${PROJECT4_API_HOST_PORT:-8014}:8004"]
 
 
 def test_ci_builds_all_three_targets() -> None:

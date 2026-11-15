@@ -381,8 +381,11 @@ def test_compose_mlflow_service_uses_its_own_postgres_database_and_stays_local()
     assert "exec mlflow server" in command
     assert "--backend-store-uri" not in command and "sqlite" not in command
     assert "--workers" not in command  # MLflow's default
-    assert "--serve-artifacts --artifacts-destination /app/logs/mlflow-artifacts" in command
-    assert service["volumes"] == ["mlflow_artifacts:/app/logs"]
+    # The existing volume (it already holds mlflow-artifacts/), at the tools image's own
+    # app-owned path; recorded runs keep resolving under the same subfolder.
+    assert "--serve-artifacts --artifacts-destination /var/lib/mlflow/mlflow-artifacts" in command
+    assert service["volumes"] == ["mlflow_artifacts:/var/lib/mlflow"]
+    assert "/app/logs" not in command
     assert "mlflow_artifacts" in compose["volumes"]
     assert "/health" in " ".join(service["healthcheck"]["test"])
     assert environment["MLFLOW_DISABLE_TELEMETRY"] == "true"
