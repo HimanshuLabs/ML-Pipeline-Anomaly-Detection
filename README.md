@@ -869,33 +869,58 @@ Project 4 is complete when:
 
 Project 4 now includes local Kubernetes runtime manifests for the anomaly inference API.
 
+Project 4 runs in its own kind cluster `project4-local` (context `kind-project4-local`).
+Every command below names that context explicitly; never rely on the current kubectl
+context, which may point at another project's cluster.
+
 Implemented Kubernetes files:
 
 | File | Purpose |
 |---|---|
 | `k8s/namespace.yaml` | Creates the `project4-ml` namespace |
-| `k8s/configmap.yaml` | Provides runtime configuration for model `v002` |
-| `k8s/deployment.yaml` | Runs two replicas of the FastAPI anomaly inference service |
+| `k8s/configmap.yaml` | `LOG_LEVEL` and `PROJECT4_REGISTRY_FILE_MIRROR=false` (database mode, read-only root filesystem) |
+| `k8s/deployment.yaml` | Two hardened API replicas in database mode as `project4_app` (non-root uid 999, read-only root, no capabilities, RuntimeDefault seccomp, no service-account token) |
 | `k8s/service.yaml` | Exposes the API internally as a `ClusterIP` service |
 | `k8s/hpa.yaml` | Defines CPU-based autoscaling from 2 to 5 replicas |
-| `k8s/kustomization.yaml` | Renders the Kubernetes resources together for offline validation |
+| `k8s/pdb.yaml` | Keeps at least one API pod during voluntary disruptions |
+| `k8s/cronjob-drift.yaml` | Hourly drift job from the tools image, hardened like the API, as `project4_app` |
+| `k8s/secret.example.yaml` | Example secrets (placeholders only; never applied, not in the kustomization) |
+| `k8s/kustomization.yaml` | Renders the resources above (no secrets) |
+
+The API and the drift job read `PROJECT4_POSTGRES_*` from the secret `project4-app-db`
+(the least-privilege role `project4_app`); only the in-cluster Postgres and its seed job
+use the owner secret `project4-postgres-owner`.
 
 Validation status:
 
 - Implemented: Kubernetes manifests for local runtime deployment design.
-- Passed: YAML parsing validation.
-- Passed: cross-manifest consistency audit.
-- Passed: `kubectl kustomize k8s/` offline render validation.
-- Blocked: `kubectl apply --dry-run=client` because no Kubernetes context is configured.
-- Performed locally: kind rollout with replicated API pods, service routing, Metrics Server, and HPA validation.
+- Passed: YAML parsing and manifest tests (`tests/test_k8s.py`: hardening, images, secrets, kustomization).
+- Passed: offline kustomize render.
+- Performed earlier on a since-deleted kind cluster: rollout with replicated API pods, service routing, Metrics Server, and HPA validation.
 - Not implemented: cloud Kubernetes deployment, public ingress, managed load balancer, or managed cluster autoscaler.
 
-Run offline render validation:
+Run offline render validation (no cluster is contacted):
 
-    kubectl kustomize k8s/ > /tmp/project4_k8s_rendered.yaml
+    kubectl --context kind-project4-local kustomize k8s/ > /tmp/project4_k8s_rendered.yaml
 
-Run live deployment only after a local cluster such as kind, minikube, Docker Desktop Kubernetes, or another Kubernetes context is configured:
+Create the secrets with generated values (never typed or printed). The app password must
+equal `PROJECT4_APP_PASSWORD` given to the seed job that runs `apply-schema`:
 
-    kubectl apply -f k8s/namespace.yaml
-    kubectl apply -k k8s/
-    kubectl -n project4-ml get pods,svc,hpa
+    kubectl --context kind-project4-local apply -f k8s/namespace.yaml
+    kubectl --context kind-project4-local -n project4-ml create secret generic project4-app-db \
+      --from-literal=PROJECT4_POSTGRES_HOST=project4-postgres \
+      --from-literal=PROJECT4_POSTGRES_PORT=5432 \
+      --from-literal=PROJECT4_POSTGRES_DB=project4_ml \
+      --from-literal=PROJECT4_POSTGRES_USER=project4_app \
+      --from-literal=PROJECT4_POSTGRES_PASSWORD="$(openssl rand -hex 24)"
+    kubectl --context kind-project4-local -n project4-ml create secret generic project4-postgres-owner \
+      --from-literal=POSTGRES_USER=project4_owner \
+      --from-literal=POSTGRES_PASSWORD="$(openssl rand -hex 24)" \
+      --from-literal=POSTGRES_DB=project4_ml
+    kubectl --context kind-project4-local -n project4-ml create secret generic project4-admin \
+      --from-literal=admin-token="$(openssl rand -hex 32)"
+
+Apply and check:
+
+    kubectl --context kind-project4-local apply -k k8s/
+    kubectl --context kind-project4-local -n project4-ml get pods,svc,hpa,pdb,cronjob

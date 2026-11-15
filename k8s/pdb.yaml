@@ -1,0 +1,14 @@
+# Voluntary disruptions (node drains) keep at least one API pod serving.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: project4-anomaly-api
+  namespace: project4-ml
+  labels:
+    app.kubernetes.io/name: project4-anomaly-api
+    app.kubernetes.io/part-of: project4-ml-platform
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: project4-anomaly-api

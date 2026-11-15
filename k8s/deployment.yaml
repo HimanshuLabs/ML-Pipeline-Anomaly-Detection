@@ -17,6 +17,15 @@ spec:
         app.kubernetes.io/name: project4-anomaly-api
         app.kubernetes.io/part-of: project4-ml-platform
     spec:
+      # The API never talks to the Kubernetes API.
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: anomaly-api
           image: project4-anomaly-api:local
@@ -25,9 +34,14 @@ spec:
             - name: http
               containerPort: 8004
               protocol: TCP
+          # Database mode as the least-privilege role project4_app (secret project4-app-db,
+          # created outside git; see secret.example.yaml). A rollback through /admin/rollback
+          # on one replica reaches the others through the shared database pointer.
           envFrom:
             - configMapRef:
                 name: project4-anomaly-api-config
+            - secretRef:
+                name: project4-app-db
           env:
             # Without the secret the pod still starts; /admin/* then returns 503.
             - name: ADMIN_TOKEN
@@ -36,6 +50,12 @@ spec:
                   name: project4-admin
                   key: admin-token
                   optional: true
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
           readinessProbe:
             httpGet:
               path: /health
@@ -59,9 +79,14 @@ spec:
             limits:
               cpu: "1"
               memory: "1Gi"
+          # The only writable paths: temporary pointer files and prediction/alert logs.
           volumeMounts:
+            - name: tmp
+              mountPath: /tmp
             - name: runtime-logs
               mountPath: /app/logs
       volumes:
+        - name: tmp
+          emptyDir: {}
         - name: runtime-logs
           emptyDir: {}
