@@ -152,6 +152,7 @@ def test_no_current_rows_is_not_evaluated_exits_zero_and_records_nothing(
     segments = _segments(artifact_dir / "metadata.json")
     # An empty batch-predictions result is a frame with no columns at all.
     monkeypatch.setattr(drift_job, "load_batch_prediction_features", lambda **_: pd.DataFrame())
+    monkeypatch.setattr(drift_job, "last_batch_prediction", lambda **_: None)  # never scored
 
     result = drift_job.run_drift_job(source="batch-predictions", hours=24)
 

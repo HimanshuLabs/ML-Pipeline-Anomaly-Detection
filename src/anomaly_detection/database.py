@@ -254,6 +254,22 @@ def read_batch_feature_payloads(
         return [dict(row) for row in rows]
 
 
+def read_last_batch_prediction(*, model_name: str) -> tuple[datetime, str] | None:
+    """(score_timestamp, model_version) of the model name's latest successful batch
+    prediction, any version; None if there never was one."""
+
+    with get_shared_engine().connect() as connection:
+        row = connection.execute(
+            text(
+                "SELECT score_timestamp, model_version FROM ml.batch_predictions "
+                "WHERE model_name = :model_name AND prediction_status = 'success' "
+                "ORDER BY score_timestamp DESC LIMIT 1"
+            ),
+            {"model_name": model_name},
+        ).first()
+    return None if row is None else (row[0], str(row[1]))
+
+
 def read_latest_drift_rows(*, model_name: str, model_version: str) -> list[dict[str, Any]]:
     """Drift events of the latest run (greatest detected_at) per entity_type."""
 

@@ -8,11 +8,12 @@ PROJECT4_REQUIRE_TEST_DATABASE=1 a missing URL fails instead of skipping.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 from contextlib import contextmanager
 from dataclasses import fields
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -565,6 +566,11 @@ def test_one_row_per_table_then_every_validation_query_passes(
     connection = postgres_engine.connect()
     transaction = connection.begin()
     try:
+        # Other tests leave rows behind (e.g. the seeded v001-v004); start from empty
+        # tables inside this transaction, which the rollback below restores.
+        connection.execute(
+            text(f"TRUNCATE {', '.join(sorted(database.INSERTABLE_TABLES))} CASCADE")
+        )
         database.insert_row(
             connection, "ml.feature_snapshots", snapshot_rows["ml.feature_snapshots"]
         )
@@ -1717,6 +1723,174 @@ def test_project4_app_runs_the_drift_job(
     assert _count(
         app_mode, "SELECT COUNT(*) FROM monitoring.alert_events WHERE model_version = 'v202'"
     ) == result.alert_count > 0
+
+
+def _serve_v202_as_app(segmented_metadata_paths: dict[str, Path]) -> Path:
+    from anomaly_detection.registry import promote_model_version, register_model_from_artifacts
+
+    register_model_from_artifacts(metadata_path=segmented_metadata_paths["v202"])
+    promote_model_version(model_name="isolation_forest", model_version="v202")
+    return segmented_metadata_paths["v202"].parent
+
+
+def _score_as_owner(monkeypatch: pytest.MonkeyPatch, artifact_dir: Path, tmp_path: Path) -> None:
+    from anomaly_detection.batch_inference import run_batch_inference
+    from tests.test_drift_job import _current_frame
+
+    _as_owner(monkeypatch)  # batch scoring is a tools job run as the owner
+    run_batch_inference(_current_frame(artifact_dir), output_path=tmp_path / "batch.jsonl")
+    monkeypatch.setenv(database.ENV_USER, APP_ROLE)
+    monkeypatch.setenv(database.ENV_PASSWORD, APP_PASSWORD)
+
+
+def _drift_job_records(caplog: pytest.LogCaptureFixture, level: int) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "anomaly_detection.drift_job" and record.levelno == level
+    ]
+
+
+def _score_v201_then_serve_v202(
+    monkeypatch: pytest.MonkeyPatch, segmented_metadata_paths: dict[str, Path], tmp_path: Path
+) -> None:
+    """v201 is batch-scored while active, then v202 is promoted and has no rows yet."""
+
+    from anomaly_detection.registry import promote_model_version, register_model_from_artifacts
+
+    for version in ("v201", "v202"):
+        register_model_from_artifacts(metadata_path=segmented_metadata_paths[version])
+    promote_model_version(model_name="isolation_forest", model_version="v201")
+    _score_as_owner(monkeypatch, segmented_metadata_paths["v201"].parent, tmp_path)
+    promote_model_version(model_name="isolation_forest", model_version="v202")
+
+
+@pytest.mark.postgres
+def test_drift_job_another_version_scored_in_the_window_logs_info_naming_it(
+    app_mode,
+    tmp_path: Path,
+    segmented_metadata_paths: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from anomaly_detection.drift_job import run_drift_job
+
+    _score_v201_then_serve_v202(monkeypatch, segmented_metadata_paths, tmp_path)
+
+    with caplog.at_level(logging.INFO, logger="anomaly_detection.drift_job"):
+        result = run_drift_job(source="batch-predictions", hours=24)
+
+    assert (result.model_version, result.status) == ("v202", "not_evaluated")
+    assert _drift_job_records(caplog, logging.WARNING) == []
+    infos = [m for m in _drift_job_records(caplog, logging.INFO) if "No current rows" in m]
+    assert len(infos) == 1
+    assert "no rows for v202 yet; last batch run used v201 at " in infos[0]
+
+
+@pytest.mark.postgres
+def test_drift_job_another_version_scored_before_the_window_warns_naming_it(
+    app_mode,
+    tmp_path: Path,
+    segmented_metadata_paths: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from sqlalchemy import text
+
+    from anomaly_detection.drift_job import run_drift_job
+
+    _score_v201_then_serve_v202(monkeypatch, segmented_metadata_paths, tmp_path)
+    with app_mode.connect() as connection:
+        last = connection.execute(
+            text("SELECT max(score_timestamp) FROM ml.batch_predictions")
+        ).scalar_one()
+
+    with caplog.at_level(logging.INFO, logger="anomaly_detection.drift_job"):
+        result = run_drift_job(
+            source="batch-predictions", hours=24, now=datetime.now(UTC) + timedelta(days=2)
+        )
+
+    assert (result.model_version, result.status) == ("v202", "not_evaluated")
+    warnings = _drift_job_records(caplog, logging.WARNING)
+    assert len(warnings) == 1
+    assert (
+        f"batch scoring stalled? last batch prediction at {last.astimezone(UTC).isoformat()} "
+        "(model v201), none in the last 24h"
+    ) in warnings[0]
+
+
+@pytest.mark.postgres
+def test_drift_job_never_scored_model_logs_info_not_a_warning(
+    app_mode,
+    segmented_metadata_paths: dict[str, Path],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from anomaly_detection.drift_job import run_drift_job
+
+    _serve_v202_as_app(segmented_metadata_paths)
+
+    with caplog.at_level(logging.INFO, logger="anomaly_detection.drift_job"):
+        result = run_drift_job(source="batch-predictions", hours=24)
+
+    assert result.status == "not_evaluated"
+    assert _drift_job_records(caplog, logging.WARNING) == []
+    assert any("No current rows" in m for m in _drift_job_records(caplog, logging.INFO))
+
+
+@pytest.mark.postgres
+def test_drift_job_scored_only_before_the_window_warns_with_the_last_timestamp(
+    app_mode,
+    tmp_path: Path,
+    segmented_metadata_paths: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    from sqlalchemy import text
+
+    from anomaly_detection.drift_job import print_summary, run_drift_job
+
+    _score_as_owner(monkeypatch, _serve_v202_as_app(segmented_metadata_paths), tmp_path)
+    with app_mode.connect() as connection:
+        last = connection.execute(
+            text("SELECT max(score_timestamp) FROM ml.batch_predictions")
+        ).scalar_one()
+
+    # Two days later: the last 24 hours are empty, the earlier scoring is not.
+    with caplog.at_level(logging.INFO, logger="anomaly_detection.drift_job"):
+        result = run_drift_job(
+            source="batch-predictions", hours=24, now=datetime.now(UTC) + timedelta(days=2)
+        )
+
+    assert result.status == "not_evaluated" and result.segments == {}
+    warnings = _drift_job_records(caplog, logging.WARNING)
+    assert len(warnings) == 1
+    assert "stalled?" in warnings[0] and "none in the last 24h" in warnings[0]
+    assert f"last batch prediction at {last.astimezone(UTC).isoformat()}" in warnings[0]
+    print_summary(result)
+    assert capsys.readouterr().out.startswith("OK: nothing to evaluate for model=isolation_forest")
+    assert _count(app_mode, "SELECT COUNT(*) FROM monitoring.drift_events") == 0
+
+
+@pytest.mark.postgres
+def test_drift_job_scored_in_the_window_is_evaluated_without_a_warning(
+    app_mode,
+    tmp_path: Path,
+    segmented_metadata_paths: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from anomaly_detection.drift_job import run_drift_job
+    from tests.test_drift_job import SHIFTED_TYPE
+
+    _score_as_owner(monkeypatch, _serve_v202_as_app(segmented_metadata_paths), tmp_path)
+
+    with caplog.at_level(logging.INFO, logger="anomaly_detection.drift_job"):
+        result = run_drift_job(source="batch-predictions", hours=24, min_rows=30)
+
+    assert result.status == "evaluated"
+    assert result.segments[SHIFTED_TYPE].status == "critical"
+    assert _drift_job_records(caplog, logging.WARNING) == []
 
 
 @pytest.mark.postgres
