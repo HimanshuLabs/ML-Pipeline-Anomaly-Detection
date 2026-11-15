@@ -27,6 +27,12 @@ from typing import Any
 import joblib
 import yaml
 
+from anomaly_detection.segmented_model import (
+    FeatureSpec,
+    SegmentedIsolationForest,
+    feature_spec_from_metadata,
+)
+
 LOGGER = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -259,15 +265,26 @@ def _resolve_registry_path(path_value: str | Path) -> Path:
 def load_verified_feature_names(entry: ModelRegistryEntry) -> list[str]:
     """Check a version can serve: its artifact loads and metadata lists its features.
 
-    Returns the ordered feature_names from the version's metadata.json.
+    Returns the ordered feature_names from the version's metadata.json (for a
+    segmented model, the ordered union of its segments' features).
     Raises RegistryError with a short reason otherwise.
+    """
+    return list(load_verified_feature_spec(entry).feature_names)
+
+
+def load_verified_feature_spec(entry: ModelRegistryEntry) -> FeatureSpec:
+    """Like load_verified_feature_names, returning the full feature spec.
+
+    Segmented models must have a valid segments spec in metadata.json that
+    matches the loaded SegmentedIsolationForest; a single model's metadata must
+    not describe a segmented artifact, and the reverse.
     """
     artifact_path = _resolve_registry_path(entry.artifact_path)
     if not artifact_path.exists():
         raise RegistryError(f"artifact does not exist: {entry.artifact_path}")
 
     try:
-        joblib.load(artifact_path)
+        model = joblib.load(artifact_path)
     except Exception as exc:  # noqa: BLE001 - any load failure makes the artifact unusable
         raise RegistryError(
             f"artifact does not load: {entry.artifact_path} ({type(exc).__name__})"
@@ -277,7 +294,8 @@ def load_verified_feature_names(entry: ModelRegistryEntry) -> list[str]:
     if not metadata_path.exists():
         raise RegistryError(f"metadata.json does not exist: {entry.metadata_path}")
 
-    feature_names = _read_json(metadata_path).get("feature_names")
+    metadata = _read_json(metadata_path)
+    feature_names = metadata.get("feature_names")
     if (
         not isinstance(feature_names, list)
         or not feature_names
@@ -287,7 +305,27 @@ def load_verified_feature_names(entry: ModelRegistryEntry) -> list[str]:
             f"metadata.json has no non-empty feature_names list: {entry.metadata_path}"
         )
 
-    return feature_names
+    try:
+        spec = feature_spec_from_metadata(metadata)
+    except ValueError as exc:
+        raise RegistryError(
+            f"metadata.json has no valid feature spec: {entry.metadata_path} ({exc})"
+        ) from exc
+
+    is_segmented_artifact = isinstance(model, SegmentedIsolationForest)
+    if spec.is_segmented != is_segmented_artifact:
+        raise RegistryError(
+            f"metadata.json model_kind {spec.model_kind!r} does not match the artifact "
+            f"({type(model).__name__}): {entry.artifact_path}"
+        )
+    if is_segmented_artifact and model.feature_spec() != {
+        entity_type: list(names) for entity_type, names in spec.segments
+    }:
+        raise RegistryError(
+            f"artifact segments do not match metadata.json segments: {entry.artifact_path}"
+        )
+
+    return spec
 
 
 def _as_optional_float(value: Any) -> float | None:
@@ -1142,8 +1180,12 @@ def _set_entry_status(
     status: str,
     registry_path: str | Path,
     active_model_path: str | Path,
+    notes: str | None = None,
 ) -> ModelRegistryEntry:
-    """Change a version's status outside the production promotion path."""
+    """Change a version's status outside the production promotion path.
+
+    notes, when given, replaces the version's registry note.
+    """
     _validate_status(status)
     state = load_registry_state(
         registry_path=registry_path,
@@ -1168,6 +1210,8 @@ def _set_entry_status(
         changes: dict[str, Any] = {"status": status}
         if status == ModelStatus.ARCHIVED and entry.archived_at_utc is None:
             changes["archived_at_utc"] = _utc_now_iso()
+        if notes is not None:
+            changes["notes"] = notes
         return ModelRegistryEntry(**{**entry.to_dict(), **changes})
 
     updated_entries = [
@@ -1188,6 +1232,32 @@ def _set_entry_status(
         entry
         for entry in updated_entries
         if entry.model_name == model_name and entry.model_version == model_version
+    )
+
+
+def retire_model_version(
+    *,
+    model_name: str,
+    model_version: str,
+    notes: str,
+    registry_path: str | Path = DEFAULT_REGISTRY_PATH,
+    active_model_path: str | Path = DEFAULT_ACTIVE_MODEL_PATH,
+) -> ModelRegistryEntry:
+    """Set a non-active version's status to retired with a note; its files are kept.
+
+    Postgres when configured (with the JSON mirror), else the JSON registry.
+    The active pointer is never written.
+    """
+    if not notes or not notes.strip():
+        raise RegistryError("retiring a model version needs a note explaining why")
+
+    return _set_entry_status(
+        model_name=model_name,
+        model_version=model_version,
+        status=ModelStatus.RETIRED.value,
+        registry_path=registry_path,
+        active_model_path=active_model_path,
+        notes=notes,
     )
 
 
@@ -1360,3 +1430,45 @@ def get_active_model(
         )
 
     return payload
+
+
+# --- CLI -------------------------------------------------------------------------
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    """python -m anomaly_detection.registry retire --model-version v003 --notes "..." """
+
+    import argparse
+    import sys
+
+    parser = argparse.ArgumentParser(description="Project 4 model registry tools.")
+    commands = parser.add_subparsers(dest="command", required=True)
+    retire = commands.add_parser(
+        "retire",
+        help="Set a non-active version to retired with a note (files are kept).",
+    )
+    retire.add_argument("--model-version", required=True)
+    retire.add_argument("--notes", required=True)
+    retire.add_argument("--model-name", default=None, help="Default: model_config.yaml.")
+    args = parser.parse_args(argv)
+
+    model_name = args.model_name or default_model_name()
+    try:
+        entry = retire_model_version(
+            model_name=model_name,
+            model_version=args.model_version,
+            notes=args.notes,
+        )
+        state = load_registry_state(model_name=model_name)
+    except RegistryError as exc:
+        print(f"REFUSED: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"OK: {entry.model_name} {entry.model_version} status={entry.status}")
+    print(f"notes={entry.notes}")
+    print(f"registry={state.source} active_model_version={state.active_model_version}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

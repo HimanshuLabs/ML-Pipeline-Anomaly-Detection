@@ -38,7 +38,7 @@ from anomaly_detection.registry import (
     ensure_database_initialized,
     load_model_registry,
     load_registry_state,
-    load_verified_feature_names,
+    load_verified_feature_spec,
     materialize_active_pointer,
     restore_database_change,
     restore_registry_state,
@@ -46,6 +46,7 @@ from anomaly_detection.registry import (
     snapshot_registry_state,
     write_active_model_pointer,
 )
+from anomaly_detection.segmented_model import FeatureSpec
 
 LOGGER = logging.getLogger(__name__)
 
@@ -175,9 +176,14 @@ def read_rollback_events_jsonl(path: Path) -> list[dict[str, Any]]:
 
 def _rejection_reason(
     entry: ModelRegistryEntry,
-    active_feature_names: list[str],
+    active_spec: FeatureSpec,
 ) -> str | None:
-    """Return why a version cannot be a rollback target, or None if it can."""
+    """Return why a version cannot be a rollback target, or None if it can.
+
+    Single models need the same ordered feature_names as the active model;
+    segmented models the same segment spec; a single and a segmented model are
+    never compatible.
+    """
 
     if entry.status != ModelStatus.ARCHIVED:
         return f"status {entry.status!r} is not 'archived'"
@@ -186,17 +192,21 @@ def _rejection_reason(
         return "not approved_for_prod"
 
     try:
-        feature_names = load_verified_feature_names(entry)
+        spec = load_verified_feature_spec(entry)
     except RegistryError as exc:
         return str(exc)
 
-    if feature_names != active_feature_names:
-        return (
-            f"feature_names differ from the active model "
-            f"({len(feature_names)} vs {len(active_feature_names)} features)"
-        )
+    difference = spec.difference(active_spec)
+    if difference is None:
+        return None
 
-    return None
+    if spec.is_segmented or active_spec.is_segmented:
+        return f"{difference}; not compatible with the active model"
+
+    return (
+        f"feature_names differ from the active model "
+        f"({len(spec.feature_names)} vs {len(active_spec.feature_names)} features)"
+    )
 
 
 def select_previous_stable_model(
@@ -211,7 +221,8 @@ def select_previous_stable_model(
     - have the same model_name and a different version from the active one
     - have status 'archived' and be approved for production
     - have an artifact that exists and loads with joblib
-    - have metadata.json whose feature_names equal the active model's, in order
+    - have the same feature spec as the active model: equal ordered feature_names for
+      single models, the same segment spec for segmented ones (never mixed)
 
     Among eligible versions the most recently archived one is selected.
     """
@@ -230,7 +241,7 @@ def select_previous_stable_model(
         )
 
     try:
-        active_feature_names = load_verified_feature_names(active_entry)
+        active_spec = load_verified_feature_spec(active_entry)
     except RegistryError as exc:
         raise RollbackError(
             f"active model {model_name} {current_model_version} cannot be checked: {exc}"
@@ -243,7 +254,7 @@ def select_previous_stable_model(
         if entry.model_version == current_model_version:
             continue
 
-        reason = _rejection_reason(entry, active_feature_names)
+        reason = _rejection_reason(entry, active_spec)
         if reason is None:
             eligible.append(entry)
         else:

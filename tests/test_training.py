@@ -289,15 +289,20 @@ def test_training_records_runtime_versions_and_feature_set_fingerprint(
 def test_feature_schema_source_and_timestamp_come_from_snapshot_metadata(
     tmp_path: Path,
 ) -> None:
-    feature_columns = ["total_events", "avg_api_latency_ms", "avg_fraud_score"]
+    from anomaly_detection.source_extract import SEGMENT_FEATURE_COLUMNS
+
+    # A one-entity-type real-source snapshot (real-source training is segmented).
+    feature_columns = list(SEGMENT_FEATURE_COLUMNS["user"])
     snapshot_dir = tmp_path / "snapshot_id=real_source_test_001"
     snapshot_dir.mkdir()
     pd.DataFrame(
         {
+            "entity_type": ["user"] * 40,
             "entity_id": [f"entity_{index}" for index in range(40)],
-            "total_events": [float(index % 7) for index in range(40)],
-            "avg_api_latency_ms": [100.0 + index for index in range(40)],
-            "avg_fraud_score": [0.01 * (index % 5) for index in range(40)],
+            **{
+                column: [float((index * (position + 3)) % 11) for index in range(40)]
+                for position, column in enumerate(feature_columns)
+            },
         }
     ).to_parquet(snapshot_dir / "features.parquet", index=False)
     (snapshot_dir / "metadata.json").write_text(

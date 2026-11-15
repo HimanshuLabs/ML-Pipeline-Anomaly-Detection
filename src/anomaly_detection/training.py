@@ -28,9 +28,24 @@ import sklearn
 import yaml
 from sklearn.ensemble import IsolationForest
 
-from anomaly_detection.evaluation import build_baseline_stats_payload
+from anomaly_detection.evaluation import (
+    build_baseline_stats_payload,
+    calculate_feature_baseline_stats,
+)
 from anomaly_detection.feature_validation import get_model_feature_matrix
 from anomaly_detection.registry import DEFAULT_REGISTRY_PATH, load_model_registry
+from anomaly_detection.segmented_model import (
+    SEGMENTED_MODEL_KIND,
+    SINGLE_MODEL_KIND,
+    SegmentedIsolationForest,
+    SegmentedModelError,
+    check_segment_row_counts,
+    feature_spec_for,
+    feature_spec_from_metadata,
+    fit_segmented_isolation_forest,
+    score_distribution,
+    segment_spec_fingerprint,
+)
 from anomaly_detection.training_snapshot import (
     load_training_snapshot_metadata,
     read_training_snapshot,
@@ -59,6 +74,7 @@ class IsolationForestTrainingConfig:
     artifact_root: Path
     feature_schema_version: str
     real_source_feature_schema_version: str
+    min_rows_per_segment: int
 
 
 @dataclass(frozen=True)
@@ -83,6 +99,9 @@ class ModelArtifactMetadata:
     baseline_anomaly_rate: float
     runtime_versions: dict[str, str]
     feature_set_fingerprint: str
+    model_kind: str = SINGLE_MODEL_KIND
+    # Segmented models: {entity_type: {feature_names, row_count, feature_set_fingerprint}}.
+    segments: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return JSON-safe metadata."""
@@ -112,12 +131,17 @@ def ensure_feature_schema_version_is_unambiguous(
     feature_schema_version: str,
     feature_names: list[str],
     registry_path: str | Path = DEFAULT_REGISTRY_PATH,
+    segment_features: dict[str, list[str]] | None = None,
 ) -> None:
-    """Refuse a schema label that the registry already uses for a different feature list.
+    """Refuse a schema label that the registry already uses for a different feature spec.
 
-    The comparison is on the ordered feature_names, so the same names in a
-    different order also count as a different feature set.
+    Single models compare the ordered feature_names, so the same names in a
+    different order also count as a different feature set. Segmented models
+    compare the whole segment spec (entity types and each type's ordered
+    features), and a segmented and a single model never share a label.
     """
+
+    new_spec = feature_spec_for(feature_names, segment_features)
 
     for entry in load_model_registry(registry_path):
         if entry.feature_schema_version != feature_schema_version:
@@ -128,9 +152,7 @@ def ensure_feature_schema_version_is_unambiguous(
             metadata_path = PROJECT_ROOT / metadata_path
 
         try:
-            registered_names = json.loads(metadata_path.read_text(encoding="utf-8")).get(
-                "feature_names"
-            )
+            registered_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise TrainingError(
                 f"Cannot verify feature_schema_version {feature_schema_version!r}: "
@@ -138,12 +160,17 @@ def ensure_feature_schema_version_is_unambiguous(
                 f"({entry.metadata_path})."
             ) from exc
 
-        if registered_names != feature_names:
+        try:
+            difference = feature_spec_from_metadata(registered_metadata).difference(new_spec)
+        except ValueError as exc:
+            difference = f"its metadata has no usable feature spec ({exc})"
+
+        if difference is not None:
             raise TrainingError(
                 f"feature_schema_version {feature_schema_version!r} is already used by "
                 f"{entry.model_name} {entry.model_version} for a different ordered "
-                "feature_names list. Configure a new feature_schema_version for this "
-                "feature set."
+                f"feature_names list or segment spec: {difference}. Configure a new "
+                "feature_schema_version for this feature set."
             )
 
 
@@ -219,6 +246,14 @@ def load_training_config(
     )
     artifact_root = _resolve_path(artifact_root_raw)
 
+    min_rows_per_segment = training_config.get("min_rows_per_segment", 30)
+    if isinstance(min_rows_per_segment, bool) or not isinstance(min_rows_per_segment, int):
+        raise TrainingError(
+            f"training.min_rows_per_segment must be an integer; got {min_rows_per_segment!r}"
+        )
+    if min_rows_per_segment < 1:
+        raise TrainingError("training.min_rows_per_segment must be at least 1")
+
     if isinstance(contamination, str) and contamination != "auto":
         raise TrainingError(
             "IsolationForest contamination must be a float or 'auto'. "
@@ -241,6 +276,7 @@ def load_training_config(
         artifact_root=artifact_root,
         feature_schema_version=feature_schema_version,
         real_source_feature_schema_version=real_source_feature_schema_version,
+        min_rows_per_segment=min_rows_per_segment,
     )
 
 
@@ -537,12 +573,31 @@ def train_isolation_forest_from_snapshot(
 
     feature_names = [str(column) for column in feature_matrix.columns]
     feature_schema_version = resolve_feature_schema_version(config, snapshot_metadata)
+
+    # Real-source snapshots train one model per entity type on that type's own features.
+    segment_features: dict[str, list[str]] | None = None
+    entity_types = None
+    if snapshot_metadata.get("snapshot_type") == "real_source_extract":
+        segment_features, entity_types = _resolve_segment_features(
+            snapshot_frame,
+            feature_names=feature_names,
+            min_rows_per_segment=config.min_rows_per_segment,
+        )
+        feature_names = [
+            name
+            for name in feature_names
+            if any(name in names for names in segment_features.values())
+        ]
+        fingerprint = segment_spec_fingerprint(segment_features)
+    else:
+        fingerprint = feature_set_fingerprint(feature_names)
+
     ensure_feature_schema_version_is_unambiguous(
         feature_schema_version=feature_schema_version,
         feature_names=feature_names,
         registry_path=registry_path,
+        segment_features=segment_features,
     )
-    fingerprint = feature_set_fingerprint(feature_names)
 
     model_root = config.artifact_root / config.model_name
     resolved_model_version = model_version or resolve_next_model_version(model_root)
@@ -561,11 +616,34 @@ def train_isolation_forest_from_snapshot(
         len(feature_matrix.columns),
     )
 
-    model = _build_model(config)
-    model.fit(feature_matrix)
-
-    anomaly_scores = model.decision_function(feature_matrix)
-    predictions = model.predict(feature_matrix)
+    segments_metadata: dict[str, Any] | None = None
+    if segment_features is None:
+        model: IsolationForest | SegmentedIsolationForest = _build_model(config)
+        model.fit(feature_matrix)
+        anomaly_scores = model.decision_function(feature_matrix)
+        predictions = model.predict(feature_matrix)
+    else:
+        feature_matrix = feature_matrix.loc[:, feature_names]
+        training_frame = feature_matrix.assign(entity_type=entity_types)
+        try:
+            model = fit_segmented_isolation_forest(
+                training_frame,
+                segment_features=segment_features,
+                build_model=lambda: _build_model(config),
+                min_rows_per_segment=config.min_rows_per_segment,
+            )
+        except SegmentedModelError as exc:
+            raise TrainingError(str(exc)) from exc
+        anomaly_scores = model.decision_function(training_frame)
+        predictions = model.predict(training_frame)
+        segments_metadata = {
+            entity_type: {
+                "feature_names": segment.feature_names,
+                "row_count": segment.row_count,
+                "feature_set_fingerprint": feature_set_fingerprint(segment.feature_names),
+            }
+            for entity_type, segment in model.segments.items()
+        }
 
     baseline_stats = build_baseline_stats_payload(
         model_name=config.model_name,
@@ -575,6 +653,11 @@ def train_isolation_forest_from_snapshot(
         anomaly_scores=anomaly_scores,
         predictions=predictions,
     )
+    if isinstance(model, SegmentedIsolationForest):
+        baseline_stats["model_kind"] = SEGMENTED_MODEL_KIND
+        baseline_stats["segments"] = _segment_baselines(
+            model, training_frame, anomaly_scores, predictions
+        )
 
     finished_at = _utc_now()
 
@@ -595,6 +678,9 @@ def train_isolation_forest_from_snapshot(
         "timestamp_column": snapshot_metadata.get("timestamp_column"),
         "source": snapshot_metadata.get("snapshot_id"),
     }
+    if segments_metadata is not None:
+        feature_schema_payload["model_kind"] = SEGMENTED_MODEL_KIND
+        feature_schema_payload["segments"] = segments_metadata
 
     artifact_metadata = ModelArtifactMetadata(
         model_name=config.model_name,
@@ -620,6 +706,8 @@ def train_isolation_forest_from_snapshot(
         baseline_anomaly_rate=float(baseline_stats["baseline_anomaly_rate"]),
         runtime_versions=runtime_versions(),
         feature_set_fingerprint=fingerprint,
+        model_kind=SEGMENTED_MODEL_KIND if segments_metadata is not None else SINGLE_MODEL_KIND,
+        segments=segments_metadata,
     )
 
     _write_json(feature_schema_path, feature_schema_payload)
@@ -631,21 +719,78 @@ def train_isolation_forest_from_snapshot(
     return artifact_metadata
 
 
-def load_trained_model(model_path: str | Path) -> IsolationForest:
-    """Load a trained Isolation Forest model artifact."""
+def load_trained_model(model_path: str | Path) -> IsolationForest | SegmentedIsolationForest:
+    """Load a trained (single or segmented) Isolation Forest model artifact."""
     path = Path(model_path)
     if not path.exists():
         raise TrainingError(f"Model artifact does not exist: {path}")
 
     model = joblib.load(path)
 
-    if not isinstance(model, IsolationForest):
+    if not isinstance(model, IsolationForest | SegmentedIsolationForest):
         raise TrainingError(
-            "Loaded model is not an IsolationForest instance. "
+            "Loaded model is not an IsolationForest or SegmentedIsolationForest instance. "
             f"Got: {type(model).__name__}"
         )
 
     return model
+
+
+def _resolve_segment_features(
+    snapshot_frame: pd.DataFrame,
+    *,
+    feature_names: list[str],
+    min_rows_per_segment: int,
+) -> tuple[dict[str, list[str]], Any]:
+    """Segment spec for the entity types present; refuses before anything is written."""
+
+    from anomaly_detection.source_extract import SEGMENT_FEATURE_COLUMNS
+
+    if "entity_type" not in snapshot_frame.columns:
+        raise TrainingError("Real-source snapshot has no entity_type column to segment by.")
+    if snapshot_frame["entity_type"].isna().any():
+        raise TrainingError("Real-source snapshot has null entity_type values.")
+    entity_types = snapshot_frame["entity_type"].astype(str).to_numpy()
+
+    try:
+        counts = check_segment_row_counts(
+            entity_types,
+            segment_features=SEGMENT_FEATURE_COLUMNS,
+            min_rows_per_segment=min_rows_per_segment,
+        )
+    except SegmentedModelError as exc:
+        raise TrainingError(str(exc)) from exc
+
+    segment_features = {t: list(SEGMENT_FEATURE_COLUMNS[t]) for t in sorted(counts)}
+    missing = sorted(
+        {name for names in segment_features.values() for name in names} - set(feature_names)
+    )
+    if missing:
+        raise TrainingError(f"Snapshot feature_columns lack segment feature(s): {missing}")
+    return segment_features, entity_types
+
+
+def _segment_baselines(
+    model: SegmentedIsolationForest,
+    training_frame: pd.DataFrame,
+    anomaly_scores: Any,
+    predictions: Any,
+) -> dict[str, Any]:
+    """Per segment: anomaly rate, p5/p50/p95 scores, and its features' baselines."""
+
+    entity_types = training_frame["entity_type"].to_numpy()
+    scores = numpy.asarray(anomaly_scores, dtype=float)
+    is_anomaly = numpy.asarray(predictions) == -1
+    baselines: dict[str, Any] = {}
+    for entity_type, segment in model.segments.items():
+        mask = entity_types == entity_type
+        baselines[entity_type] = {
+            **score_distribution(scores[mask], is_anomaly[mask]),
+            "feature_baselines": calculate_feature_baseline_stats(
+                training_frame.loc[mask, segment.feature_names]
+            ),
+        }
+    return baselines
 
 def parse_args() -> argparse.Namespace:
     """Parse training CLI arguments."""

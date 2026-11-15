@@ -300,6 +300,48 @@ WEB_EVENT_MEASURES = {
     "fraud_score": "avg_fraud_score",
 }
 
+# Derived from mart_customer_360 by transform_customer_360 (not 1:1 mapped).
+CUSTOMER_360_DERIVED_FEATURES = ("days_since_last_order", "never_ordered", "repeat_purchase_signal")
+
+# Counted per business customer from warehouse.fact_web_events by transform_web_events.
+WEB_EVENT_COUNT_FEATURES = (
+    "total_events",
+    "page_view_count",
+    "product_view_count",
+    "add_to_cart_count",
+    "purchase_count",
+    "session_count",
+)
+
+ENTITY_TYPE_USER = "user"
+ENTITY_TYPE_CUSTOMER = "customer"
+ENTITY_TYPE_CAMPAIGN = "campaign"
+ENTITY_TYPE_FUNNEL_DAY = "funnel_day"
+ENTITY_TYPE_PRODUCT = "product"
+ENTITY_TYPE_WEB_CUSTOMER = "web_customer"
+
+
+def _in_model_order(features: Sequence[str]) -> tuple[str, ...]:
+    wanted = set(features)
+    return tuple(column for column in MODEL_FEATURE_COLUMNS if column in wanted)
+
+
+# The features each entity type's source actually provides (the rest of the 52
+# columns are 0.0 padding for that type). Built from the transforms' own
+# mappings above; the segmented model trains and scores each type on these.
+SEGMENT_FEATURE_COLUMNS: dict[str, tuple[str, ...]] = {
+    ENTITY_TYPE_USER: _in_model_order(P1_PASSTHROUGH_COLUMNS),
+    ENTITY_TYPE_CUSTOMER: _in_model_order(
+        [*CUSTOMER_360_MAPPING.values(), *CUSTOMER_360_DERIVED_FEATURES]
+    ),
+    ENTITY_TYPE_CAMPAIGN: _in_model_order(list(CAMPAIGN_MAPPING.values())),
+    ENTITY_TYPE_FUNNEL_DAY: _in_model_order(list(FUNNEL_MAPPING.values())),
+    ENTITY_TYPE_PRODUCT: _in_model_order(list(PRODUCT_MAPPING.values())),
+    ENTITY_TYPE_WEB_CUSTOMER: _in_model_order(
+        [*WEB_EVENT_COUNT_FEATURES, *WEB_EVENT_MEASURES.values()]
+    ),
+}
+
 REQUIRED_SOURCE_COLUMNS: dict[str, tuple[str, ...]] = {
     P1_TABLE: ("user_id", "last_event_timestamp", *P1_PASSTHROUGH_COLUMNS),
     CUSTOMER_360_TABLE: (
@@ -489,7 +531,7 @@ def transform_project1_user_features(
         features,
         source_project="project_1",
         source_table=P1_TABLE,
-        entity_type="user",
+        entity_type=ENTITY_TYPE_USER,
         entity_id=_text_series(dataframe, "user_id"),
         event_timestamp=dataframe["last_event_timestamp"],
     )
@@ -522,7 +564,7 @@ def transform_customer_360(
         features,
         source_project="project_2_3",
         source_table=CUSTOMER_360_TABLE,
-        entity_type="customer",
+        entity_type=ENTITY_TYPE_CUSTOMER,
         entity_id=_text_series(dataframe, "customer_id"),
         event_timestamp=dataframe["last_order_timestamp"],
     )
@@ -543,7 +585,7 @@ def transform_campaign_performance(
         features,
         source_project="project_2_3",
         source_table=CAMPAIGN_TABLE,
-        entity_type="campaign",
+        entity_type=ENTITY_TYPE_CAMPAIGN,
         entity_id=_text_series(dataframe, "campaign_id"),
         event_timestamp=dataframe["campaign_end_date"],
     )
@@ -572,7 +614,7 @@ def transform_marketing_funnel(
         features,
         source_project="project_2_3",
         source_table=FUNNEL_TABLE,
-        entity_type="funnel_day",
+        entity_type=ENTITY_TYPE_FUNNEL_DAY,
         entity_id=entity_id,
         event_timestamp=dataframe["event_date"],
     )
@@ -593,7 +635,7 @@ def transform_product_sales(
         features,
         source_project="project_2_3",
         source_table=PRODUCT_TABLE,
-        entity_type="product",
+        entity_type=ENTITY_TYPE_PRODUCT,
         entity_id=_text_series(dataframe, "product_id"),
         event_timestamp=dataframe["last_sold_timestamp"],
     )
@@ -658,14 +700,7 @@ def transform_web_events(
     ).reset_index()
 
     features = _empty_feature_frame(grouped.index)
-    for column in (
-        "total_events",
-        "page_view_count",
-        "product_view_count",
-        "add_to_cart_count",
-        "purchase_count",
-        "session_count",
-    ):
+    for column in WEB_EVENT_COUNT_FEATURES:
         features[column] = grouped[column].astype("float64")
     for column, feature in WEB_EVENT_MEASURES.items():
         # A customer whose events all have NULL here gets 0, counted per source column.
@@ -675,7 +710,7 @@ def transform_web_events(
         features,
         source_project="project_2_3",
         source_table=WEB_EVENTS_TABLE,
-        entity_type="web_customer",
+        entity_type=ENTITY_TYPE_WEB_CUSTOMER,
         entity_id=grouped["customer_business_id"],
         event_timestamp=grouped["source_event_timestamp"],
     )
