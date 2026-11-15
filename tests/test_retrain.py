@@ -65,6 +65,12 @@ def _registry_versions(registry_path: Path) -> dict[str, registry.ModelRegistryE
     return {entry.model_version: entry for entry in registry.load_model_registry(registry_path)}
 
 
+def _unregistered_version(registry_path: Path) -> str:
+    """The next version number after every one in the registry."""
+    numbers = [int(version[1:]) for version in _registry_versions(registry_path)]
+    return f"v{max(numbers, default=0) + 1:03d}"
+
+
 def _train_real(snapshot, tmp_path: Path, **kwargs):
     from anomaly_detection.training import train_isolation_forest_from_snapshot
 
@@ -92,7 +98,7 @@ def test_real_source_training_is_segmented_and_labelled_feature_schema_v003(
     assert len(MODEL_FEATURE_COLUMNS) == 52
     snapshot = _write_real_snapshot(tmp_path / "snapshots")
 
-    # Default registry: the (mirrored) real one; v002 there names a single 52-feature model.
+    # Default registry: the (mirrored) real one, whichever versions and labels it holds.
     artifact = _train_real(snapshot, tmp_path)
 
     spec = {t: list(SEGMENT_FEATURE_COLUMNS[t]) for t in sorted(ENTITY_TYPES)}
@@ -197,15 +203,18 @@ def test_retrain_writes_bundle_registers_candidate_and_leaves_pointer(tmp_path: 
     registry_path = registry.DEFAULT_REGISTRY_PATH
     pointer_path = registry.DEFAULT_ACTIVE_MODEL_PATH
     pointer_before = pointer_path.read_bytes()
-    active_before = _registry_versions(registry_path)["v002"]
+    # Whatever the (mirrored) pointer makes active, and a version nobody registered.
+    active_version = registry.read_active_model_pointer(pointer_path).active_model_version
+    active_before = _registry_versions(registry_path)[active_version]
+    new_version = _unregistered_version(registry_path)
 
     result = retrain(
         snapshot=str(snapshot.snapshot_path),
-        model_version="v010",
+        model_version=new_version,
         artifact_root=tmp_path / "artifacts",
     )
 
-    artifact_dir = tmp_path / "artifacts" / "isolation_forest" / "model_version=v010"
+    artifact_dir = tmp_path / "artifacts" / "isolation_forest" / f"model_version={new_version}"
     for name in (
         "model.joblib",
         "metadata.json",
@@ -224,14 +233,14 @@ def test_retrain_writes_bundle_registers_candidate_and_leaves_pointer(tmp_path: 
     # Registered as a candidate; the active pointer and production version are untouched.
     assert result.registry_source == registry.POINTER_SOURCE_FILE
     entries = _registry_versions(registry_path)
-    assert entries["v010"].status == "candidate"
-    assert entries["v010"].approved_for_prod is False
-    assert entries["v010"].feature_schema_version == "feature_schema_v003"
-    assert entries["v002"] == active_before
+    assert entries[new_version].status == "candidate"
+    assert entries[new_version].approved_for_prod is False
+    assert entries[new_version].feature_schema_version == "feature_schema_v003"
+    assert entries[active_version] == active_before
     assert pointer_path.read_bytes() == pointer_before
 
     report = json.loads((artifact_dir / "evaluation_report.json").read_text(encoding="utf-8"))
-    assert report["model_version"] == "v010"
+    assert report["model_version"] == new_version
     assert report["model_kind"] == "segmented_isolation_forest"
     for entity_type in ENTITY_TYPES:
         segment = report["segments"][entity_type]
@@ -305,11 +314,12 @@ def test_retrain_refuses_an_already_registered_version(tmp_path: Path) -> None:
     from anomaly_detection.retrain import RetrainError, retrain
 
     snapshot = _write_real_snapshot(tmp_path / "snapshots")
+    registered = registry.load_model_registry(registry.DEFAULT_REGISTRY_PATH)[-1].model_version
 
-    with pytest.raises(RetrainError, match="v002 is already registered"):
+    with pytest.raises(RetrainError, match=f"{registered} is already registered"):
         retrain(
             snapshot=str(snapshot.snapshot_path),
-            model_version="v002",
+            model_version=registered,
             artifact_root=tmp_path / "artifacts",
         )
 

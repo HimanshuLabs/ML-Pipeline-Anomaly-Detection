@@ -237,7 +237,7 @@ def _sample_rollback_event() -> RollbackEvent:
     return RollbackEvent(
         rollback_id="rollback_test_0001",
         model_name="isolation_forest",
-        from_model_version="v002",
+        from_model_version="v009",
         to_model_version="v001",
         rollback_reason="test",
         triggered_by="pytest",
@@ -601,7 +601,7 @@ def test_one_row_per_table_then_every_validation_query_passes(
                 "current_row_count": 12,
             },
         )
-        for version in ("v001", "v002"):
+        for version in ("v001", "v009"):
             database.insert_row(
                 connection,
                 "ml.model_registry",
@@ -753,7 +753,7 @@ def database_mode(postgres_engine, monkeypatch: pytest.MonkeyPatch):
 
 @pytest.fixture()
 def initialized_database(database_mode):
-    """database_mode seeded by sync-from-files (v001, v002, pointer v002 at version 1)."""
+    """database_mode seeded by sync-from-files from the mirror (pointer at version 1)."""
 
     database.sync_from_files(database_mode)
     return database_mode
@@ -779,6 +779,20 @@ def _register_trained(trained_metadata_paths, versions) -> None:
         register_model_from_artifacts(metadata_path=trained_metadata_paths[version])
 
 
+def _serve_own_single_model(trained_metadata_paths) -> tuple[str, list[str]]:
+    """Register and promote this test's own single model (through the database).
+
+    Returns its version and ordered feature names, so a test does not depend on
+    which model the repository pointer makes live.
+    """
+    from anomaly_detection.registry import promote_model_version
+
+    _register_trained(trained_metadata_paths, ["v101"])
+    promote_model_version(model_name="isolation_forest", model_version="v101")
+    metadata = json.loads(trained_metadata_paths["v101"].read_text(encoding="utf-8"))
+    return "v101", list(metadata["feature_names"])
+
+
 def _assert_mirror_matches_database(engine, isolate_repo_state: Path) -> None:
     import yaml
 
@@ -801,12 +815,14 @@ def test_sync_from_files_is_idempotent_and_never_touches_the_files(
     mirror_pointer = isolate_repo_state / "configs" / "active_model.yaml"
     files_before = (mirror_registry.read_bytes(), mirror_pointer.read_bytes())
 
+    registered_count = len(load_model_registry(mirror_registry))
+
     first = database.sync_from_files(database_mode)
     second = database.sync_from_files(database_mode)
 
-    assert first["registry_inserted"] == 2
+    assert first["registry_inserted"] == registered_count
     assert first["pointer_version"] == 1 and first["pointer_changed"] is True
-    assert second["registry_unchanged"] == 2
+    assert second["registry_unchanged"] == registered_count
     assert second["snapshot_rows_inserted"] == 0
     assert second["pointer_version"] == 1 and second["pointer_changed"] is False
     assert (mirror_registry.read_bytes(), mirror_pointer.read_bytes()) == files_before
@@ -985,7 +1001,7 @@ def _write_attempts(trained_metadata_paths: dict[str, Path]):
             metadata_path=trained_metadata_paths["v101"]
         ),
         "promote": lambda: promote_model_version(
-            model_name="isolation_forest", model_version="v002"
+            model_name="isolation_forest", model_version="v101"
         ),
         "status_change": lambda: promote_model(
             model_name="isolation_forest", model_version="v001", target_status="archived"
@@ -1027,7 +1043,7 @@ def test_writes_refuse_an_uninitialized_database_without_touching_anything(
     fake_state = RegistryState(
         entries=entries,
         model_name="isolation_forest",
-        active_model_version="v002" if pointer_version else None,
+        active_model_version="v101" if pointer_version else None,
         pointer_version=pointer_version,
         source=registry.POINTER_SOURCE_POSTGRES,
     )
@@ -1137,13 +1153,6 @@ def test_reader_role_setup_never_sends_or_returns_the_password() -> None:
     assert not any(text.startswith("GRANT") and " ml." in text for text in texts)
 
 
-def _v002_feature_names() -> list[str]:
-    metadata_path = (
-        REPO_ROOT / "artifacts" / "models" / "isolation_forest" / "model_version=v002"
-    ) / "metadata.json"
-    return json.loads(metadata_path.read_text(encoding="utf-8"))["feature_names"]
-
-
 def _count(engine, sql: str, params: dict | None = None) -> int:
     from sqlalchemy import text
 
@@ -1154,17 +1163,20 @@ def _count(engine, sql: str, params: dict | None = None) -> int:
 @pytest.mark.postgres
 def test_predict_and_predict_batch_write_online_rows_in_one_transaction(
     initialized_database,
+    trained_metadata_paths: dict[str, Path],
 ) -> None:
     from fastapi.testclient import TestClient
 
     from api.main import app
 
-    payload = {name: 1.0 for name in _v002_feature_names()}
+    version, feature_names = _serve_own_single_model(trained_metadata_paths)
+    payload = {name: 1.0 for name in feature_names}
     with TestClient(app) as client:
         single = client.post("/predict", json={"feature_payload": payload})
         batch = client.post("/predict/batch", json={"feature_payloads": [payload] * 3})
 
     assert single.status_code == 200 and batch.status_code == 200
+    assert single.json()["model_version"] == version
     assert _count(
         initialized_database,
         "SELECT COUNT(*) FROM ml.online_predictions WHERE prediction_id = :id",
@@ -1188,18 +1200,21 @@ def test_predict_and_predict_batch_write_online_rows_in_one_transaction(
 def test_batch_inference_run_writes_all_rows_in_one_transaction(
     initialized_database,
     tmp_path: Path,
+    trained_metadata_paths: dict[str, Path],
 ) -> None:
     import pandas as pd
 
     from anomaly_detection.batch_inference import run_batch_inference
 
-    feature_names = _v002_feature_names()
+    version, feature_names = _serve_own_single_model(trained_metadata_paths)
     features = pd.DataFrame(
         [{"entity_id": f"customer_{index}", **dict.fromkeys(feature_names, float(index))}
          for index in range(4)]
     )
 
     predictions = run_batch_inference(features, output_path=tmp_path / "batch.jsonl")
+
+    assert {prediction.model_version for prediction in predictions} == {version}
 
     assert _count(
         initialized_database,
@@ -1213,12 +1228,12 @@ def test_batch_inference_run_writes_all_rows_in_one_transaction(
     ) == 1
 
 
-def _v002_drift_and_alert():
+def _drift_and_alert(model_version: str):
     from dataclasses import replace
 
-    drift_event = replace(_sample_drift_event(), model_version="v002")
+    drift_event = replace(_sample_drift_event(), model_version=model_version)
     alert_event = replace(
-        _sample_alert_event(drift_event.drift_event_id), model_version="v002"
+        _sample_alert_event(drift_event.drift_event_id), model_version=model_version
     )
     return drift_event, alert_event
 
@@ -1228,7 +1243,10 @@ def test_drift_and_alert_database_writers_insert_valid_rows(initialized_database
     from anomaly_detection.alerts import insert_alert_events_database
     from anomaly_detection.drift import insert_drift_events_database
 
-    drift_event, alert_event = _v002_drift_and_alert()
+    # Events of whichever model the synced pointer makes live.
+    drift_event, alert_event = _drift_and_alert(
+        _database_pointer(initialized_database)["model_version"]
+    )
 
     assert insert_drift_events_database([drift_event]) == 1
     assert insert_alert_events_database([alert_event]) == 1
@@ -1244,6 +1262,7 @@ def test_drift_and_alert_database_writers_insert_valid_rows(initialized_database
 def test_integration_views_return_expected_rows_and_columns(
     initialized_database,
     tmp_path: Path,
+    trained_metadata_paths: dict[str, Path],
 ) -> None:
     import pandas as pd
     from sqlalchemy import text
@@ -1252,13 +1271,15 @@ def test_integration_views_return_expected_rows_and_columns(
     from anomaly_detection.batch_inference import run_batch_inference
     from anomaly_detection.drift import insert_drift_events_database
 
-    feature_names = _v002_feature_names()
+    version, feature_names = _serve_own_single_model(trained_metadata_paths)
     database.insert_online_predictions(
         [
             {
                 **_sample_online_prediction().__dict__,
-                "model_version": "v002",
-                "dataset_snapshot_id": "real_source_20260610T060738Z",
+                "model_version": version,
+                "dataset_snapshot_id": _database_entries(initialized_database)[
+                    version
+                ].snapshot_id,
             }
         ]
     )
@@ -1266,14 +1287,24 @@ def test_integration_views_return_expected_rows_and_columns(
         pd.DataFrame([{"entity_id": "customer_1", **dict.fromkeys(feature_names, 1.0)}]),
         output_path=tmp_path / "batch.jsonl",
     )
-    drift_event, alert_event = _v002_drift_and_alert()
+    drift_event, alert_event = _drift_and_alert(version)
     insert_drift_events_database([drift_event])
     insert_alert_events_database([alert_event])
+    # Rollback events reference registered versions; use this test's own two models.
+    from dataclasses import replace
+
+    _register_trained(trained_metadata_paths, ["v102"])
     with initialized_database.begin() as connection:
         database.insert_row(
             connection,
             "audit.rollback_events",
-            database.rollback_event_row(_sample_rollback_event()),
+            database.rollback_event_row(
+                replace(
+                    _sample_rollback_event(),
+                    from_model_version=version,
+                    to_model_version="v102",
+                )
+            ),
         )
 
     with initialized_database.connect() as connection:
@@ -1301,9 +1332,12 @@ def test_integration_views_return_expected_rows_and_columns(
             assert row["source_entity"] == view.split(".")[1]
             assert row["domain_tag"] == VIEW_DOMAIN_TAGS[view]
 
+    # Every registered version, and only the pointer's version active.
+    active_version = _database_pointer(initialized_database)["model_version"]
+    assert active_version == version
     assert [(row["model_version"], row["is_active"]) for row in models] == [
-        ("v001", False),
-        ("v002", True),
+        (registered, registered == active_version)
+        for registered in sorted(_database_entries(initialized_database))
     ]
     assert sorted(row["prediction_source"] for row in predictions) == ["batch", "online"]
     assert sorted(row["event_type"] for row in events) == ["alert", "drift", "rollback"]
