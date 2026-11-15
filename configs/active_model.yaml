@@ -1,16 +1,12 @@
 model_name: isolation_forest
-active_model_version: v002
-artifact_path: artifacts/models/isolation_forest/model_version=v002/model.joblib
-feature_schema_version: feature_schema_v001
+active_model_version: v004
+artifact_path: artifacts/models/isolation_forest/model_version=v004/model.joblib
+feature_schema_version: feature_schema_v003
 status: production
-last_updated_at: '2026-06-10T07:01:28.975154+00:00'
-notes: v002 is the first production model trained from real Project 1 and Project
-  2/3 local source extracts. v001 remains the earlier demo-trained baseline.
-dataset_snapshot_id: real_source_20260610T060738Z
+dataset_snapshot_id: real_source_20261115T010701Z
 training_dataset_id: null
-updated_at: '2026-06-10T07:01:28.971798+00:00'
-baseline_anomaly_rate: 0.05002985074626866
-feature_count: 51
+feature_count: 52
+baseline_anomaly_rate: 0.05071884984025559
 source_projects:
 - project_1
 - project_2_3
@@ -22,5 +18,8 @@ source_tables:
 - marts.mart_product_sales
 - warehouse.fact_web_events
 snapshot_type: real_source_extract
+last_updated_at: '2026-11-15T02:47:08.235361+00:00'
+updated_at: '2026-11-15T02:47:08.235361+00:00'
+notes: 'Promoted segmented v004 (D5: one IsolationForest per entity type)'
 latency_budget:
   online_prediction_p95_ms: 200
