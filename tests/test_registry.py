@@ -842,10 +842,20 @@ def test_retire_v003_in_file_mode_changes_only_its_status_and_note_and_keeps_fil
 
 
 def test_retire_refuses_the_active_version() -> None:
+    from anomaly_detection import registry
     from anomaly_detection.registry import retire_model_version
 
+    # Whatever version the (mirrored) pointer makes active.
+    pointer_path = registry.DEFAULT_ACTIVE_MODEL_PATH
+    active_version = read_active_model_pointer(pointer_path).active_model_version
+    registry_before = registry.DEFAULT_REGISTRY_PATH.read_bytes()
+
     with pytest.raises(RegistryError, match="active model version"):
-        retire_model_version(model_name="isolation_forest", model_version="v002", notes="no")
+        retire_model_version(
+            model_name="isolation_forest", model_version=active_version, notes="no"
+        )
+
+    assert registry.DEFAULT_REGISTRY_PATH.read_bytes() == registry_before
 
 
 def test_retire_v003_in_database_mode_writes_only_its_row_and_never_the_pointer(

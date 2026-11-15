@@ -205,12 +205,19 @@ def test_model_active_reports_model_kind_and_segments(segmented_client) -> None:
     assert health["active_model_version"] == "v202"
 
 
-def test_single_model_reports_its_kind_and_no_segments(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_single_model_reports_its_kind_and_no_segments(
+    tmp_path: Path,
+    trained_metadata_paths: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _register_copy(tmp_path, trained_metadata_paths["v101"], "v101")  # a single model
+    _promote("v101")
+
     monkeypatch.setattr(state, "inference_service", None)
     with TestClient(app) as client:
         body = client.get("/model/active").json()
 
-    assert body["model_version"] == "v002"
+    assert body["model_version"] == "v101"
     assert body["model_kind"] == "isolation_forest"
     assert body["segments"] is None
 
@@ -331,23 +338,37 @@ def test_rollback_between_compatible_segmented_models_swaps_and_serves(
 # --- registry CLI promote -------------------------------------------------------------
 
 
-def test_cli_promotes_the_real_v004_candidate_and_the_api_serves_every_segment(
+def _real_segmented_entry() -> registry.ModelRegistryEntry | None:
+    """The newest real registry version whose bundle is a segmented model, if any."""
+
+    segmented = []
+    for entry in registry.load_model_registry(registry.DEFAULT_REGISTRY_PATH):
+        metadata_path = registry.PROJECT_ROOT / entry.metadata_path
+        if not metadata_path.is_file():
+            continue
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if metadata.get("model_kind") == "segmented_isolation_forest":
+            segmented.append(entry)
+    return max(segmented, key=lambda entry: int(entry.model_version[1:]), default=None)
+
+
+def test_cli_promotes_a_real_segmented_bundle_and_the_api_serves_every_segment(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    entries = {
-        e.model_version: e for e in registry.load_model_registry(registry.DEFAULT_REGISTRY_PATH)
-    }
-    if "v004" not in entries:
-        pytest.skip("v004 is not in the real registry")
-    metadata_path = registry.PROJECT_ROOT / entries["v004"].metadata_path
-    segments = _segments(metadata_path)
+    # Whether or not it is already the live model, the real segmented bundle must
+    # pass the CLI's serving check, become active, and serve every segment.
+    entry = _real_segmented_entry()
+    if entry is None:
+        pytest.skip("the real registry has no segmented model")
+    version = entry.model_version
+    segments = _segments(registry.PROJECT_ROOT / entry.metadata_path)
 
-    assert registry.main(["promote", "--model-version", "v004"]) == 0
-    assert "v004" in capsys.readouterr().out
+    assert registry.main(["promote", "--model-version", version]) == 0
+    assert version in capsys.readouterr().out
     pointer = yaml.safe_load(registry.DEFAULT_ACTIVE_MODEL_PATH.read_text(encoding="utf-8"))
-    assert pointer["active_model_version"] == "v004"
-    assert pointer["feature_schema_version"] == "feature_schema_v003"
+    assert pointer["active_model_version"] == version
+    assert pointer["feature_schema_version"] == entry.feature_schema_version
 
     monkeypatch.setattr(state, "inference_service", None)
     with TestClient(app) as client:
@@ -360,7 +381,7 @@ def test_cli_promotes_the_real_v004_candidate_and_the_api_serves_every_segment(
                 json={"entity_type": entity_type, "feature_payload": _payload(features)},
             )
             assert response.status_code == 200, (entity_type, response.text)
-            assert response.json()["model_version"] == "v004"
+            assert response.json()["model_version"] == version
 
 
 def _corrupt_model(artifact_dir: Path) -> None:
@@ -405,13 +426,36 @@ def test_cli_promote_refuses_a_candidate_serving_cannot_score(
 # --- image build check ----------------------------------------------------------------
 
 
-def test_bundle_check_passes_for_the_mirror_pointer() -> None:
+def _pointer_bundle_dir(pointer_path: Path) -> Path:
+    pointer = yaml.safe_load(pointer_path.read_text(encoding="utf-8"))
+    artifact_path = Path(pointer["artifact_path"])
+    if not artifact_path.is_absolute():
+        artifact_path = registry.PROJECT_ROOT / artifact_path
+    return artifact_path.parent
+
+
+def test_bundle_check_passes_for_the_mirror_pointer(
+    tmp_path: Path,
+    trained_metadata_paths: dict[str, Path],
+    segmented_metadata_paths: dict[str, Path],
+) -> None:
     from anomaly_detection.bundle_check import check_active_bundle, main
 
-    checked = check_active_bundle(registry.DEFAULT_ACTIVE_MODEL_PATH)
+    pointer_path = registry.DEFAULT_ACTIVE_MODEL_PATH  # per-test mirror (conftest)
 
-    assert checked.name == "model_version=v002"
-    assert main(["--active-model", str(registry.DEFAULT_ACTIVE_MODEL_PATH)]) == 0
+    # The pointer as copied from the repository, whichever model it activates ...
+    assert check_active_bundle(pointer_path) == _pointer_bundle_dir(pointer_path)
+    assert main(["--active-model", str(pointer_path)]) == 0
+
+    # ... and the mirror pointer on a single and on a segmented model of its own.
+    for version, metadata_paths in (
+        ("v101", trained_metadata_paths),
+        ("v202", segmented_metadata_paths),
+    ):
+        artifact_dir = _register_copy(tmp_path, metadata_paths[version], version)
+        _promote(version)
+        assert check_active_bundle(pointer_path) == artifact_dir
+        assert main(["--active-model", str(pointer_path)]) == 0
 
 
 def test_bundle_check_fails_for_a_pointer_whose_bundle_is_missing(tmp_path: Path) -> None:
@@ -433,12 +477,15 @@ def test_bundle_check_fails_for_a_pointer_whose_bundle_is_missing(tmp_path: Path
 
 def test_benchmark_sends_entity_type_and_that_segments_features(
     tmp_path: Path,
+    trained_metadata_paths: dict[str, Path],
     segmented_metadata_paths: dict[str, Path],
 ) -> None:
     from anomaly_detection.online_inference import OnlineInferenceService
     from scripts.benchmark_latency import benchmark_entity_types, build_request_body
 
-    single = OnlineInferenceService()  # mirror pointer: v002, single model
+    _register_copy(tmp_path, trained_metadata_paths["v101"], "v101")  # a single model
+    _promote("v101")
+    single = OnlineInferenceService()
     assert benchmark_entity_types(single, None) == ["user"]
     body = build_request_body(single, entity_id="b0", entity_type="user")
     assert set(body["feature_payload"]) - {"entity_id"} == set(single.feature_names)
