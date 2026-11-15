@@ -201,11 +201,11 @@ def test_retrain_writes_bundle_registers_candidate_and_leaves_pointer(tmp_path: 
 
     result = retrain(
         snapshot=str(snapshot.snapshot_path),
-        model_version="v004",
+        model_version="v010",
         artifact_root=tmp_path / "artifacts",
     )
 
-    artifact_dir = tmp_path / "artifacts" / "isolation_forest" / "model_version=v004"
+    artifact_dir = tmp_path / "artifacts" / "isolation_forest" / "model_version=v010"
     for name in (
         "model.joblib",
         "metadata.json",
@@ -224,14 +224,14 @@ def test_retrain_writes_bundle_registers_candidate_and_leaves_pointer(tmp_path: 
     # Registered as a candidate; the active pointer and production version are untouched.
     assert result.registry_source == registry.POINTER_SOURCE_FILE
     entries = _registry_versions(registry_path)
-    assert entries["v004"].status == "candidate"
-    assert entries["v004"].approved_for_prod is False
-    assert entries["v004"].feature_schema_version == "feature_schema_v003"
+    assert entries["v010"].status == "candidate"
+    assert entries["v010"].approved_for_prod is False
+    assert entries["v010"].feature_schema_version == "feature_schema_v003"
     assert entries["v002"] == active_before
     assert pointer_path.read_bytes() == pointer_before
 
     report = json.loads((artifact_dir / "evaluation_report.json").read_text(encoding="utf-8"))
-    assert report["model_version"] == "v004"
+    assert report["model_version"] == "v010"
     assert report["model_kind"] == "segmented_isolation_forest"
     for entity_type in ENTITY_TYPES:
         segment = report["segments"][entity_type]

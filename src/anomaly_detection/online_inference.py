@@ -29,7 +29,11 @@ from anomaly_detection.batch_inference import (
     hash_feature_payload,
     load_active_model_artifacts,
     prepare_feature_matrix,
+    required_feature_names_for,
+    score_entity_matrix,
+    segment_feature_names,
 )
+from anomaly_detection.segmented_model import SEGMENTED_MODEL_KIND, SINGLE_MODEL_KIND
 
 
 class OnlineInferenceError(RuntimeError):
@@ -77,6 +81,9 @@ class ActiveModelInfo:
     snapshot_type: str | None
     latency_budget_p95_ms: float | None
     loaded_at: str
+    model_kind: str = SINGLE_MODEL_KIND
+    # Segmented models: {entity_type: feature_count}; None for a single model.
+    segments: dict[str, int] | None = None
 
 
 def _as_float(value: Any, default: float | None = None) -> float | None:
@@ -148,8 +155,18 @@ class OnlineInferenceService:
             self.artifacts = load_active_model_artifacts(self.active_model_path)
 
         self.active_model_config = self._load_active_model_config()
+        # Single models: all features. Segmented models: the ordered union of segments.
         self.feature_names = get_required_feature_names(self.artifacts)
+        self.segments = segment_feature_names(self.artifacts)
         self.threshold = resolve_threshold(self.artifacts.baseline_stats)
+
+    def feature_names_for(self, entity_type: str) -> list[str]:
+        """Features a payload of this entity_type must contain."""
+
+        try:
+            return required_feature_names_for(self.artifacts, str(entity_type))
+        except BatchInferenceError as exc:
+            raise OnlineInferenceError(str(exc)) from exc
 
     def _load_active_model_config(self) -> dict[str, Any]:
         """Load active model pointer metadata for API reporting."""
@@ -214,6 +231,12 @@ class OnlineInferenceService:
             snapshot_type=snapshot_type,
             latency_budget_p95_ms=latency_budget_p95_ms,
             loaded_at=self.loaded_at,
+            model_kind=SINGLE_MODEL_KIND if self.segments is None else SEGMENTED_MODEL_KIND,
+            segments=(
+                None
+                if self.segments is None
+                else {entity_type: len(names) for entity_type, names in self.segments.items()}
+            ),
         )
 
     def predict(
@@ -237,10 +260,15 @@ class OnlineInferenceService:
 
         started_at = time.perf_counter()
 
+        # Segmented models score with the entity type's own segment and need only its
+        # features (unknown type -> error naming the allowed types); single models
+        # need all their features, as before.
+        required_feature_names = self.feature_names_for(entity_type)
+
         try:
             feature_frame = pd.DataFrame([feature_payload])
-            matrix = prepare_feature_matrix(feature_frame, self.feature_names)
-            scores = self.artifacts.model.decision_function(matrix)
+            matrix = prepare_feature_matrix(feature_frame, required_feature_names)
+            scores = score_entity_matrix(self.artifacts, matrix, str(entity_type))
             anomaly_score = float(scores[0])
             is_anomaly = bool(anomaly_score < self.threshold)
             feature_payload_hash = hash_feature_payload(feature_payload)
@@ -272,7 +300,12 @@ class OnlineInferenceService:
         *,
         entity_type: str = "user",
     ) -> list[OnlinePredictionRecord]:
-        """Score multiple online payloads using the in-memory model."""
+        """Score multiple online payloads using the in-memory model.
+
+        For a segmented model, a payload's own "entity_type" key overrides the
+        request-level entity_type, so one batch may mix entity types. Single
+        models ignore that key, as before.
+        """
 
         if not isinstance(feature_payloads, list) or not feature_payloads:
             raise OnlineInferenceError("feature_payloads must be a non-empty list")
@@ -282,11 +315,15 @@ class OnlineInferenceService:
             if not isinstance(payload, dict):
                 raise OnlineInferenceError("each batch item must be an object")
 
+            payload_entity_type = entity_type
+            if self.segments is not None and payload.get("entity_type") is not None:
+                payload_entity_type = str(payload["entity_type"])
+
             predictions.append(
                 self.predict(
                     payload,
                     entity_id=payload.get("entity_id") or payload.get("user_id"),
-                    entity_type=entity_type,
+                    entity_type=payload_entity_type,
                 )
             )
 

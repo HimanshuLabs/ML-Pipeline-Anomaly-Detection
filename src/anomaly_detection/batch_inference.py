@@ -28,6 +28,7 @@ import sklearn
 import yaml
 
 from anomaly_detection.prediction_logging import write_batch_predictions_jsonl
+from anomaly_detection.segmented_model import SEGMENTED_MODEL_KIND, SegmentedIsolationForest
 
 LOGGER = logging.getLogger(__name__)
 
@@ -256,6 +257,13 @@ def load_active_model_artifacts(
 
     model = joblib.load(model_path)
 
+    declares_segmented = metadata.get("model_kind") == SEGMENTED_MODEL_KIND
+    if declares_segmented != isinstance(model, SegmentedIsolationForest):
+        raise BatchInferenceError(
+            f"metadata.json model_kind {metadata.get('model_kind')!r} does not match the "
+            f"loaded artifact ({type(model).__name__}) for model {model_version}"
+        )
+
     return ActiveModelArtifacts(
         model_name=model_name,
         model_version=model_version,
@@ -281,6 +289,49 @@ def get_required_feature_names(artifacts: ActiveModelArtifacts) -> list[str]:
         raise BatchInferenceError("Active model metadata has no feature_names")
 
     return [str(feature_name) for feature_name in feature_names]
+
+
+def segment_feature_names(artifacts: ActiveModelArtifacts) -> dict[str, list[str]] | None:
+    """Entity type -> ordered features for a segmented model; None for a single model."""
+
+    if isinstance(artifacts.model, SegmentedIsolationForest):
+        return artifacts.model.feature_spec()
+    return None
+
+
+def required_feature_names_for(artifacts: ActiveModelArtifacts, entity_type: str) -> list[str]:
+    """Features needed to score one entity_type.
+
+    Single models need all their features whatever the entity type. Segmented
+    models need only that entity type's segment, and refuse a type they have no
+    segment for.
+    """
+
+    segments = segment_feature_names(artifacts)
+    if segments is None:
+        return get_required_feature_names(artifacts)
+
+    if entity_type not in segments:
+        raise BatchInferenceError(
+            f"entity_type {entity_type!r} is not served by model {artifacts.model_version}; "
+            f"allowed entity types: {sorted(segments)}"
+        )
+    return segments[entity_type]
+
+
+def score_entity_matrix(
+    artifacts: ActiveModelArtifacts,
+    matrix: pd.DataFrame,
+    entity_type: str,
+) -> np.ndarray:
+    """decision_function for rows of one entity_type (segmented: that type's segment)."""
+
+    if isinstance(artifacts.model, SegmentedIsolationForest):
+        return np.asarray(
+            artifacts.model.decision_function(matrix.assign(entity_type=entity_type)),
+            dtype=float,
+        )
+    return np.asarray(artifacts.model.decision_function(matrix), dtype=float)
 
 
 def prepare_feature_matrix(
@@ -369,9 +420,26 @@ def score_feature_batch(
     source_table: str | None = None,
     batch_run_id: str | None = None,
 ) -> list[BatchPredictionRecord]:
-    """Score a batch of features with the active model."""
+    """Score a batch of features with the active model.
+
+    Segmented models route each row by its entity_type column (or, without
+    that column, every row is entity_type) to that type's segment and need
+    only that segment's features. Single models score every row on all their
+    features and label every record with entity_type.
+    """
 
     batch_id = batch_run_id or str(uuid4())
+
+    if segment_feature_names(artifacts) is not None:
+        return _score_segmented_batch(
+            features,
+            artifacts,
+            entity_type=entity_type,
+            source_project=source_project,
+            source_table=source_table,
+            batch_id=batch_id,
+        )
+
     feature_names = get_required_feature_names(artifacts)
     feature_matrix = prepare_feature_matrix(features, feature_names)
 
@@ -397,6 +465,86 @@ def score_feature_batch(
     elapsed_ms = (time.perf_counter() - started) * 1000
     per_record_latency_ms = elapsed_ms / max(len(feature_matrix), 1)
 
+    return _build_records(
+        features,
+        artifacts,
+        scores=scores,
+        anomaly_flags=anomaly_flags,
+        threshold_used=threshold_used,
+        row_feature_names=[feature_names] * len(features),
+        row_entity_types=[entity_type] * len(features),
+        per_record_latency_ms=per_record_latency_ms,
+        source_project=source_project,
+        source_table=source_table,
+        batch_id=batch_id,
+    )
+
+
+def _score_segmented_batch(
+    features: pd.DataFrame,
+    artifacts: ActiveModelArtifacts,
+    *,
+    entity_type: str,
+    source_project: str | None,
+    source_table: str | None,
+    batch_id: str,
+) -> list[BatchPredictionRecord]:
+    if features.empty:
+        raise BatchInferenceError("Cannot score an empty feature batch")
+
+    if "entity_type" in features.columns:
+        if features["entity_type"].isna().any():
+            raise BatchInferenceError("Input batch has rows with a null entity_type")
+        row_entity_types = features["entity_type"].astype(str).tolist()
+    else:
+        row_entity_types = [str(entity_type)] * len(features)
+
+    types = np.asarray(row_entity_types)
+    names_by_type = {
+        value: required_feature_names_for(artifacts, value)
+        for value in sorted(set(row_entity_types))
+    }
+    matrices = {
+        value: prepare_feature_matrix(features.loc[types == value], names)
+        for value, names in names_by_type.items()
+    }
+
+    started = time.perf_counter()
+    scores = np.empty(len(features), dtype=float)
+    for value, matrix in matrices.items():
+        scores[types == value] = score_entity_matrix(artifacts, matrix, value)
+    elapsed_ms = (time.perf_counter() - started) * 1000
+
+    threshold_used = 0.0
+    return _build_records(
+        features,
+        artifacts,
+        scores=scores,
+        anomaly_flags=scores < threshold_used,
+        threshold_used=threshold_used,
+        row_feature_names=[names_by_type[value] for value in row_entity_types],
+        row_entity_types=row_entity_types,
+        per_record_latency_ms=elapsed_ms / len(features),
+        source_project=source_project,
+        source_table=source_table,
+        batch_id=batch_id,
+    )
+
+
+def _build_records(
+    features: pd.DataFrame,
+    artifacts: ActiveModelArtifacts,
+    *,
+    scores: Any,
+    anomaly_flags: Any,
+    threshold_used: float,
+    row_feature_names: list[list[str]],
+    row_entity_types: list[str],
+    per_record_latency_ms: float,
+    source_project: str | None,
+    source_table: str | None,
+    batch_id: str,
+) -> list[BatchPredictionRecord]:
     score_timestamp = datetime.now(UTC).isoformat()
     entity_key = str(artifacts.feature_schema.get("entity_key") or "entity_id")
 
@@ -405,7 +553,7 @@ def score_feature_batch(
     for row_number, (_row_index, row) in enumerate(features.iterrows()):
         feature_payload = {
             feature_name: _json_safe(row[feature_name])
-            for feature_name in feature_names
+            for feature_name in row_feature_names[row_number]
         }
 
         entity_id = _get_entity_id(row, row_number, entity_key)
@@ -419,7 +567,7 @@ def score_feature_batch(
                 dataset_snapshot_id=artifacts.dataset_snapshot_id,
                 training_dataset_id=artifacts.training_dataset_id,
                 feature_schema_version=artifacts.feature_schema_version,
-                entity_type=entity_type,
+                entity_type=row_entity_types[row_number],
                 entity_id=entity_id,
                 source_project=source_project,
                 source_table=source_table,

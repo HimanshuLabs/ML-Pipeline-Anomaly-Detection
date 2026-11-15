@@ -269,3 +269,76 @@ def active_model_version(active_model_pointer: dict[str, Any]) -> str:
     """The active model version from the real pointer."""
 
     return str(active_model_pointer["active_model_version"])
+
+
+SEGMENTED_TEST_TYPES = ("user", "campaign", "product")
+
+
+def real_source_test_frame(
+    entity_types: tuple[str, ...] = SEGMENTED_TEST_TYPES,
+    rows_per_type: int = 40,
+    seed: int = 7,
+) -> Any:
+    """Real-source-shaped rows (all 52 columns) that pass validate_real_source_features."""
+
+    import numpy as np
+    import pandas as pd
+
+    from anomaly_detection.source_extract import MODEL_FEATURE_COLUMNS
+
+    rng = np.random.default_rng(seed)
+    rows = []
+    for entity_type in entity_types:
+        for index in range(rows_per_type):
+            row = {
+                "source_project": "project_1" if entity_type == "user" else "project_2_3",
+                "source_table": f"test.{entity_type}",
+                "entity_type": entity_type,
+                "entity_id": f"{entity_type}_{index:03d}",
+                "source_event_timestamp": "2026-11-01T00:00:00+00:00",
+            }
+            row.update({column: float(rng.random()) for column in MODEL_FEATURE_COLUMNS})
+            row["repeat_purchase_signal"] = float(index % 2)
+            row["never_ordered"] = float(index % 3 == 0)
+            row["extracted_at"] = "2026-11-15T00:00:00+00:00"
+            rows.append(row)
+    return pd.DataFrame(rows)
+
+
+@pytest.fixture(scope="session")
+def segmented_metadata_paths(tmp_path_factory: pytest.TempPathFactory) -> dict[str, Path]:
+    """Two segmented models (same segment spec) trained by the real training path.
+
+    Artifacts live outside the repository and are shared read-only by tests.
+    """
+    from anomaly_detection.source_extract import write_snapshot
+    from anomaly_detection.training import train_isolation_forest_from_snapshot
+
+    root = tmp_path_factory.mktemp("segmented_models")
+    metadata_paths: dict[str, Path] = {}
+    for index, version in enumerate(("v201", "v202")):
+        snapshot_root = root / "snapshots" / version
+        snapshot = write_snapshot(
+            real_source_test_frame(seed=7 + index),
+            {
+                "snapshot_type": "real_source_extract",
+                "feature_schema_version": "feature_schema_v002",
+                "output_snapshot_prefix": f"real_source_{version}",
+                "output": {"root": str(snapshot_root)},
+                "project_1": {"enabled": True, "schema": "public", "table": "user_features"},
+                "project_2_3": {
+                    "enabled": True,
+                    "tables": {"campaign": {"schema": "marts", "table": "mart_campaign"}},
+                },
+            },
+            output_root=snapshot_root,
+        )
+        artifact = train_isolation_forest_from_snapshot(
+            features_path=snapshot.features_path,
+            snapshot_metadata_path=snapshot.metadata_path,
+            model_version=version,
+            artifact_root_override=root / "artifacts",
+            registry_path=root / "training_label_registry.json",
+        )
+        metadata_paths[version] = Path(artifact.metadata_path)
+    return metadata_paths
