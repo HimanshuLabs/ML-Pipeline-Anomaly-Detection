@@ -16,11 +16,11 @@
         "x": 0,
         "y": 0,
         "w": 24,
-        "h": 3
+        "h": 4
       },
       "options": {
         "mode": "markdown",
-        "content": "## ML Anomaly Detection Platform\nProduction-style anomaly monitoring over the active Isolation Forest model. This dashboard summarizes model health, traffic, anomaly behavior, latency, drift, prediction reliability, and rollback evidence."
+        "content": "### ML Anomaly Detection Platform\nHealth of the active Isolation Forest model: traffic, anomalies, latency, drift, errors and rollbacks."
       }
     },
     {
@@ -34,7 +34,7 @@
       "description": "Current production model version loaded by the FastAPI inference service.",
       "gridPos": {
         "x": 0,
-        "y": 3,
+        "y": 4,
         "w": 6,
         "h": 4
       },
@@ -44,7 +44,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "active_model_version == 1",
+          "expr": "(active_model_version == 1) or on() label_replace(vector(0), \"model_version\", \"no active model\", \"\", \"\")",
           "legendFormat": "{{model_version}}",
           "refId": "A",
           "instant": true,
@@ -54,7 +54,21 @@
       "fieldConfig": {
         "defaults": {
           "unit": "short",
-          "mappings": [],
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "color": "red",
+                  "index": 0
+                },
+                "1": {
+                  "color": "text",
+                  "index": 1
+                }
+              }
+            }
+          ],
           "noValue": "no active model"
         },
         "overrides": []
@@ -69,7 +83,7 @@
         },
         "orientation": "auto",
         "textMode": "name",
-        "colorMode": "none",
+        "colorMode": "value",
         "graphMode": "none",
         "justifyMode": "center"
       }
@@ -85,7 +99,7 @@
       "description": "API calls in the last 15 minutes; a /predict/batch call counts once.",
       "gridPos": {
         "x": 6,
-        "y": 3,
+        "y": 4,
         "w": 6,
         "h": 4
       },
@@ -95,7 +109,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "round(sum(increase(prediction_requests_total[15m])))",
+          "expr": "round(sum(increase(prediction_requests_total[15m]))) or vector(0)",
           "legendFormat": "requests (calls)",
           "refId": "A",
           "instant": true,
@@ -148,7 +162,7 @@
       "description": "Anomalous rows as a percentage of rows scored (predictions_scored_total, so every /predict/batch row counts). Yellow at 7.5% and red at 10% are 1.5x and 2x the model contamination 0.05 in configs/model_config.yaml; update them if contamination changes.",
       "gridPos": {
         "x": 12,
-        "y": 3,
+        "y": 4,
         "w": 6,
         "h": 4
       },
@@ -216,7 +230,7 @@
       "description": "Failed prediction calls in the last 15 minutes (0 when none).",
       "gridPos": {
         "x": 18,
-        "y": 3,
+        "y": 4,
         "w": 6,
         "h": 4
       },
@@ -279,7 +293,7 @@
       "description": "API calls per second and anomalous rows per second.",
       "gridPos": {
         "x": 0,
-        "y": 7,
+        "y": 8,
         "w": 12,
         "h": 7
       },
@@ -341,7 +355,7 @@
       "description": "Anomalous rows as a percentage of rows scored (predictions_scored_total, so every /predict/batch row counts). Yellow at 7.5% and red at 10% are 1.5x and 2x the model contamination 0.05 in configs/model_config.yaml; update them if contamination changes.",
       "gridPos": {
         "x": 12,
-        "y": 7,
+        "y": 8,
         "w": 12,
         "h": 7
       },
@@ -408,7 +422,7 @@
       "description": "p95 latency of single predictions (/predict) over 5 minutes; budget 200 ms. Shows idle when there is no /predict traffic.",
       "gridPos": {
         "x": 0,
-        "y": 14,
+        "y": 15,
         "w": 6,
         "h": 4
       },
@@ -476,7 +490,7 @@
       "description": "Warning or critical features in drift runs the API loaded in the last 15 minutes (0 when none).",
       "gridPos": {
         "x": 6,
-        "y": 14,
+        "y": 15,
         "w": 6,
         "h": 4
       },
@@ -539,7 +553,7 @@
       "description": "Model rollbacks applied through /admin/rollback in the last 24 hours (0 when none).",
       "gridPos": {
         "x": 12,
-        "y": 14,
+        "y": 15,
         "w": 6,
         "h": 4
       },
@@ -602,7 +616,7 @@
       "description": "Rows flagged anomalous in the last 15 minutes (every batch row counts).",
       "gridPos": {
         "x": 18,
-        "y": 14,
+        "y": 15,
         "w": 6,
         "h": 4
       },
@@ -612,7 +626,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "round(sum(increase(anomalies_detected_total[15m])))",
+          "expr": "round(sum(increase(anomalies_detected_total[15m]))) or vector(0)",
           "legendFormat": "anomalies",
           "refId": "A",
           "instant": true,
@@ -665,7 +679,7 @@
       "description": "p95 of single predictions (/predict) against the 200 ms budget (dashed).",
       "gridPos": {
         "x": 0,
-        "y": 18,
+        "y": 19,
         "w": 12,
         "h": 7
       },
@@ -703,7 +717,9 @@
           "custom": {
             "thresholdsStyle": {
               "mode": "dashed"
-            }
+            },
+            "axisSoftMin": 0,
+            "axisSoftMax": 220
           }
         },
         "overrides": []
@@ -731,7 +747,7 @@
       "description": "Worst feature drift status per segment in the latest drift run: 0 normal, 1 warning, 2 critical.",
       "gridPos": {
         "x": 12,
-        "y": 18,
+        "y": 19,
         "w": 12,
         "h": 7
       },
@@ -818,13 +834,13 @@
       "type": "text",
       "gridPos": {
         "x": 0,
-        "y": 25,
+        "y": 26,
         "w": 24,
-        "h": 4
+        "h": 7
       },
       "options": {
         "mode": "markdown",
-        "content": "### How to read this dashboard\n- Healthy: the active model version is shown, requests move, p95 latency of single predictions stays below 200 ms, prediction errors stay at 0, and every segment's drift status is normal.\n- Investigate: the anomaly rate rises above 7.5% (1.5x the model contamination of 5%), p95 crosses 200 ms, a segment turns warning or critical, or rollbacks appear.\n- Rollback is live: every rollback applied through /admin/rollback is counted here."
+        "content": "### How to read this dashboard\n- **Healthy:** active model shown, requests moving, p95 of single predictions below 200 ms, errors at 0, every segment's drift normal.\n- **Investigate:** anomaly rate above 7.5% (1.5x contamination 0.05), p95 above 200 ms, a segment at warning or critical, or a rollback.\n- **Rollback is live:** every rollback applied through /admin/rollback is counted."
       }
     }
   ],

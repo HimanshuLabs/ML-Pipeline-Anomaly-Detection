@@ -357,7 +357,13 @@ PROMQL_WORDS = {
     "sum", "max", "min", "avg", "count", "rate", "irate", "increase", "round", "by",
     "without", "on", "ignoring", "clamp_min", "clamp_max", "histogram_quantile", "absent",
     "and", "or", "unless", "le", "bool", "offset", "time", "vector", "topk", "bottomk",
+    "label_replace",
 }
+
+ACTIVE_MODEL_EXPR = (
+    '(active_model_version == 1) or on() '
+    'label_replace(vector(0), "model_version", "no active model", "", "")'
+)
 
 
 def _queried_metric_names(expr: str) -> set[str]:
@@ -534,9 +540,110 @@ def test_delta_tables_are_instant_tables_merged_with_drift_status() -> None:
         assert set(renamed.values()) >= {
             "segment", "feature", "status", "mean delta", "variance delta"
         }
-        sort = next(t for t in panel["transformations"] if t["id"] == "sortBy")
+        sort = [t for t in panel["transformations"] if t["id"] == "sortBy"][-1]
         assert sort["options"]["sort"][0] == {"field": "status", "desc": True}
         assert "own units" in panel["description"]
+
+
+def _board_panel(board: str, panel_id: int) -> dict:
+    return next(panel for panel in _dashboards()[board]["panels"] if panel["id"] == panel_id)
+
+
+def _overrides(panel: dict) -> dict[str, dict]:
+    return {
+        override["matcher"]["options"]: {p["id"]: p["value"] for p in override["properties"]}
+        for override in panel["fieldConfig"]["overrides"]
+        if override["matcher"]["id"] == "byName"
+    }
+
+
+def test_count_stats_show_zero_after_an_api_restart_and_rollback_trend_shows_none() -> None:
+    for board, panel_ids in (
+        ("anomaly_detection_dashboard.json", (2, 3)),
+        ("anomaly_detection_executive_dashboard.json", (3, 11)),
+    ):
+        for panel_id in panel_ids:
+            (expr,) = _exprs(_board_panel(board, panel_id))
+            assert expr.replace(" ", "").endswith("orvector(0)"), (board, panel_id)
+
+    rollbacks = _main_panel(16)
+    assert _exprs(rollbacks) == ["sum by (status) (increase(model_rollback_total[1h]))"]
+    assert rollbacks["targets"][0]["legendFormat"] == "{{status}}"
+    assert rollbacks["fieldConfig"]["defaults"]["noValue"] == "No rollbacks in range"
+
+
+def test_latency_timeseries_always_show_the_200ms_sla_line() -> None:
+    latency = [
+        panel for _, panel in _panels()
+        if panel["type"] == "timeseries" and "histogram_quantile" in " ".join(_exprs(panel))
+    ]
+    assert len(latency) == 3
+    for panel in latency:
+        custom = panel["fieldConfig"]["defaults"]["custom"]
+        assert custom["axisSoftMin"] == 0, panel["title"]
+        assert custom["axisSoftMax"] >= 200, panel["title"]
+        assert custom["thresholdsStyle"]["mode"] == "dashed", panel["title"]
+        assert [(s["color"], s["value"]) for s in _steps(panel)] == [
+            ("green", None), ("yellow", 150), ("red", 200)
+        ]
+
+
+def test_feature_drift_detail_has_4_decimal_deltas_full_sort_and_fixed_narrow_columns() -> None:
+    panel = _main_panel(9)
+    overrides = _overrides(panel)
+
+    assert overrides["mean delta"]["decimals"] == 4
+    assert overrides["variance delta"]["decimals"] == 4
+    # Grafana sorts by one field per sortBy step and keeps ties in order, so the last
+    # step is the primary key: status desc, then segment, then feature.
+    sorts = [t["options"]["sort"][0] for t in panel["transformations"] if t["id"] == "sortBy"]
+    assert sorts == [
+        {"field": "feature", "desc": False},
+        {"field": "segment", "desc": False},
+        {"field": "status", "desc": True},
+    ]
+    widths = {name: props.get("custom.width") for name, props in overrides.items()}
+    assert widths.get("feature") is None  # takes the remaining width
+    assert widths["segment"] and widths["status"]
+    assert max(widths["segment"], widths["status"]) < widths["mean delta"]
+    assert panel["gridPos"]["w"] == 24
+    assert _main_panel(10)["gridPos"]["y"] >= panel["gridPos"]["y"] + panel["gridPos"]["h"]
+
+
+def test_no_two_panels_overlap_and_all_fit_the_24_column_grid() -> None:
+    def overlap(a: dict, b: dict) -> bool:
+        return (
+            a["x"] < b["x"] + b["w"] and b["x"] < a["x"] + a["w"]
+            and a["y"] < b["y"] + b["h"] and b["y"] < a["y"] + a["h"]
+        )
+
+    assert overlap({"x": 0, "y": 0, "w": 12, "h": 4}, {"x": 6, "y": 3, "w": 6, "h": 4})
+    for name, board in _dashboards().items():
+        grids = [(panel["id"], panel["gridPos"]) for panel in board["panels"]]
+        for panel_id, grid in grids:
+            assert grid["x"] >= 0 and grid["x"] + grid["w"] <= 24, (name, panel_id)
+        clashes = [
+            (first_id, second_id)
+            for index, (first_id, first) in enumerate(grids)
+            for second_id, second in grids[index + 1:]
+            if overlap(first, second)
+        ]
+        assert not clashes, name
+
+
+def test_stats_use_background_colour_except_the_active_model_marker() -> None:
+    for name, panel in _stats():
+        expected = "value" if "active_model_version" in " ".join(_exprs(panel)) else "background"
+        assert panel["options"]["colorMode"] == expected, (name, panel["title"])
+
+
+def test_executive_text_panels_are_tall_enough_for_their_markdown() -> None:
+    board = "anomaly_detection_executive_dashboard.json"
+    for panel_id in (1, 14):
+        panel = _board_panel(board, panel_id)
+        lines = [line for line in panel["options"]["content"].splitlines() if line.strip()]
+        # One grid unit is ~30 px; leave 2 units for the title bar and padding.
+        assert panel["gridPos"]["h"] >= len(lines) + 2, panel["title"]
 
 
 def test_drifting_features_by_segment_is_an_instant_bargauge() -> None:
@@ -587,6 +694,16 @@ def test_active_model_stats_show_the_version_label_without_sparkline_or_threshol
     ]
     assert len(markers) == 2
     for panel in markers:
+        # A real series when no model is loaded: Grafana 13 renders a no-series
+        # textMode "name" stat blank instead of showing noValue.
+        assert _exprs(panel) == [ACTIVE_MODEL_EXPR]
+        assert panel["targets"][0]["legendFormat"] == "{{model_version}}"
+        mapping = panel["fieldConfig"]["defaults"]["mappings"][0]
+        assert mapping["type"] == "value"
+        assert mapping["options"]["0"]["color"] == "red"
+        assert mapping["options"]["1"]["color"] == "text"
+        assert panel["fieldConfig"]["defaults"]["noValue"] == "no active model"
+        assert panel["options"]["colorMode"] == "value"
         assert panel["options"]["textMode"] == "name"
         assert panel["options"]["graphMode"] == "none"
         assert "thresholds" not in panel["fieldConfig"]["defaults"]
