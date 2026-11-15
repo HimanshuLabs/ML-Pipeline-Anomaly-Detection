@@ -7,7 +7,11 @@ model:
   max_samples: auto
 
 features:
+  # Label of the 11-feature demo contract below (feature_builder, training_snapshot).
   schema_version: feature_schema_v001
+  # Label stamped on models trained from real-source snapshots (the 52 features in
+  # source_extract.MODEL_FEATURE_COLUMNS); must match source_extract.yaml.
+  real_source_schema_version: feature_schema_v002
   entity_key: entity_id
   timestamp_column: feature_timestamp
   required_numeric_features:
