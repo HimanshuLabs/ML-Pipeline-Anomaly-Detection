@@ -111,6 +111,7 @@ def test_api_startup_configures_logging(
         ("anomaly_detection.registry", ["retire", "--model-version", "v900", "--notes", "x"]),
         ("anomaly_detection.drift_job", ["--input", "missing.parquet"]),
         ("anomaly_detection.database", ["check"]),
+        ("anomaly_detection.tracking", ["backfill", "--model-version", "v900"]),
     ],
 )
 def test_every_cli_configures_logging(fresh_logging, module: str, argv: list[str]) -> None:

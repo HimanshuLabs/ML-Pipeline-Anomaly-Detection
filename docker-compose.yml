@@ -101,6 +101,51 @@ services:
     depends_on:
       - prometheus
 
+  # MLflow tracking server on 127.0.0.1:5004: a record of training runs, never the
+  # source of truth (the Postgres registry and active-model pointer are). Runs from
+  # the API image; no restart policy. Backend store: the dedicated database
+  # project4_mlflow (role project4_mlflow) in anomaly-postgres, created once with
+  # sql/create_mlflow_database.sql; never the project4_ml database. The URI (with the
+  # password) reaches the server only through MLFLOW_BACKEND_STORE_URI. Without
+  # PROJECT4_MLFLOW_DB_PASSWORD in .env only this container refuses to start.
+  # Artifacts are served from the mlflow_artifacts volume, mounted at /app/logs because
+  # that is the image's only directory the non-root app user can write to.
+  mlflow:
+    image: project4-anomaly-api:local
+    ports:
+      - "127.0.0.1:5004:5000"
+    environment:
+      HOME: /tmp
+      MLFLOW_DISABLE_TELEMETRY: "true"
+      GIT_PYTHON_REFRESH: quiet
+      PROJECT4_MLFLOW_DB_PASSWORD: ${PROJECT4_MLFLOW_DB_PASSWORD:-}
+      MLFLOW_BACKEND_STORE_URI: postgresql+psycopg2://project4_mlflow:${PROJECT4_MLFLOW_DB_PASSWORD:-}@anomaly-postgres:5432/project4_mlflow
+    entrypoint:
+      - sh
+      - -c
+      - >-
+        if [ -z "$$PROJECT4_MLFLOW_DB_PASSWORD" ]; then
+        echo "PROJECT4_MLFLOW_DB_PASSWORD is not set in .env; refusing to start" >&2;
+        exit 1; fi; exec mlflow server --host 0.0.0.0 --port 5000
+        --serve-artifacts --artifacts-destination /app/logs/mlflow-artifacts
+    volumes:
+      - mlflow_artifacts:/app/logs
+    # The image's own healthcheck probes the API port; check the MLflow server instead.
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health', timeout=3).read()"
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    depends_on:
+      anomaly-postgres:
+        condition: service_healthy
+
 volumes:
   anomaly_postgres_data:
   grafana_data:
+  mlflow_artifacts:
