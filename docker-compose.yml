@@ -2,7 +2,8 @@ services:
   anomaly-api:
     build:
       context: .
-      dockerfile: docker/Dockerfile.api
+      dockerfile: docker/Dockerfile
+      target: runtime
     image: project4-anomaly-api:local
     ports:
       - "${PROJECT4_API_HOST_PORT:-8014}:8004"
@@ -26,8 +27,9 @@ services:
       - batch
     build:
       context: .
-      dockerfile: docker/Dockerfile.batch
-    image: project4-anomaly-batch:local
+      dockerfile: docker/Dockerfile
+      target: tools
+    image: project4-anomaly-tools:local
     environment:
       PYTHONPATH: /app/src
       PYTHONUNBUFFERED: "1"
@@ -103,7 +105,7 @@ services:
 
   # MLflow tracking server on 127.0.0.1:5004: a record of training runs, never the
   # source of truth (the Postgres registry and active-model pointer are). Runs from
-  # the API image; no restart policy. Backend store: the dedicated database
+  # the tools image (the API image has no mlflow); no restart policy. Backend store: the dedicated database
   # project4_mlflow (role project4_mlflow) in anomaly-postgres, created once with
   # sql/create_mlflow_database.sql; never the project4_ml database. The URI (with the
   # password) reaches the server only through MLFLOW_BACKEND_STORE_URI. Without
@@ -111,7 +113,7 @@ services:
   # Artifacts are served from the mlflow_artifacts volume, mounted at /app/logs because
   # that is the image's only directory the non-root app user can write to.
   mlflow:
-    image: project4-anomaly-api:local
+    image: project4-anomaly-tools:local
     ports:
       - "127.0.0.1:5004:5000"
     environment:

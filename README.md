@@ -208,7 +208,7 @@ already have a backfilled run:
 ```bash
 docker run --rm --network host --user "$(id -u):$(id -g)" -e HOME=/tmp \
   -e MLFLOW_TRACKING_URI=http://127.0.0.1:5004 -v "$PWD":/app:ro -w /app \
-  --entrypoint "" project4-anomaly-api:local \
+  --entrypoint "" project4-anomaly-tools:local \
   python -m anomaly_detection.tracking backfill --model-version v002 --model-version v004
 ```
 
@@ -551,22 +551,27 @@ Until then, anomaly-quality discussion remains proxy-based and explicitly labele
 
 ## Dockerized runtimes
 
-Project 4 provides two local Docker application images.
+Project 4 builds three local images from one `docker/Dockerfile` (base
+`python:3.12.16-slim`, pinned by digest), each with its own dependency set:
 
-| Image | Purpose |
-|---|---|
-| `project4-anomaly-api:local` | Online FastAPI anomaly inference runtime |
-| `project4-anomaly-batch:local` | Batch/offline anomaly scoring runtime |
+| Image | Target | Requirements | Purpose |
+|---|---|---|---|
+| `project4-anomaly-api:local` | `runtime` | `requirements-runtime.txt` | Online FastAPI anomaly inference only. The build refuses mlflow, pyarrow and test tools. |
+| `project4-anomaly-tools:local` | `tools` | `requirements-tools.txt` | Batch scoring, source extraction, training, retrain, drift job, MLflow tracking and the MLflow server |
+| `project4-anomaly-dev:local` | `dev` | `requirements-dev.txt` | Tests and lint (pytest, ruff), run with the repository mounted at `/app` |
+
+All three install against `constraints.txt` (frozen from the dev image).
 
 The API container runs FastAPI internally on port `8004`.
 
 Docker Compose publishes the API on host port `8014` by default to avoid collision with local `uvicorn` runs on port `8004`.
 
-Build both images:
+Build the images:
 
 ```bash
-docker build -f docker/Dockerfile.api -t project4-anomaly-api:local .
-docker build -f docker/Dockerfile.batch -t project4-anomaly-batch:local .
+docker build -f docker/Dockerfile --target runtime -t project4-anomaly-api:local .
+docker build -f docker/Dockerfile --target tools -t project4-anomaly-tools:local .
+docker build -f docker/Dockerfile --target dev -t project4-anomaly-dev:local .
 ```
 
 Run the API container:
@@ -712,8 +717,9 @@ PYTHONPATH=src python scripts/benchmark_latency.py \
 Build Docker images:
 
 ```bash
-docker build -f docker/Dockerfile.api -t project4-anomaly-api:local .
-docker build -f docker/Dockerfile.batch -t project4-anomaly-batch:local .
+docker build -f docker/Dockerfile --target runtime -t project4-anomaly-api:local .
+docker build -f docker/Dockerfile --target tools -t project4-anomaly-tools:local .
+docker build -f docker/Dockerfile --target dev -t project4-anomaly-dev:local .
 ```
 
 Run Docker API:
@@ -747,8 +753,7 @@ docker compose down --remove-orphans
 ├── data/
 │   └── features/
 ├── docker/
-│   ├── Dockerfile.api
-│   └── Dockerfile.batch
+│   └── Dockerfile
 ├── docs/
 │   ├── architecture.md
 │   ├── data_contract.md
@@ -774,7 +779,11 @@ docker compose down --remove-orphans
 ├── tests/
 ├── docker-compose.yml
 ├── pyproject.toml
+├── constraints.txt
 ├── requirements.txt
+├── requirements-runtime.txt
+├── requirements-tools.txt
+├── requirements-dev.txt
 └── README.md
 ```
 
