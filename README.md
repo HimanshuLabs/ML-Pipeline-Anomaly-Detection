@@ -1,6 +1,6 @@
 # ML Pipeline & Anomaly Detection Platform
 
-A local-first anomaly detection platform that turns upstream behavioral and warehouse data into validated ML features, trains a versioned Isolation Forest model, serves anomaly scores through batch and online inference paths, monitors drift and runtime behavior, emits alert evidence, and supports rollback to a previous stable model.
+A local-first anomaly detection platform that turns upstream behavioral and warehouse data into validated ML features, trains versioned Isolation Forest models (one per entity type for segmented models), serves anomaly scores through batch and online inference paths, monitors drift and runtime behavior, emits alert evidence, and supports rollback to a previous stable model.
 
 This project treats the model as a production artifact, not a notebook output.
 
@@ -9,7 +9,8 @@ The core system proves:
 - source extraction from upstream data platforms
 - feature validation before training and inference
 - reproducible training snapshots
-- model versioning and active model control
+- model versioning in a Postgres model registry, with one shared active-model pointer
+- segmented models: one Isolation Forest per entity type
 - baseline metrics and feature statistics
 - batch anomaly scoring
 - online FastAPI inference
@@ -18,9 +19,11 @@ The core system proves:
 - Prometheus metrics
 - Grafana dashboards
 - alert events
-- rollback controls
+- token-protected rollback controls
 - latency-budget validation
-- Dockerized API and batch runtimes
+- Docker images for the API, tools and tests
+- MLflow experiment tracking (a record of training, not the source of truth)
+- hardened Kubernetes manifests, validated live on a local kind cluster
 - CI/CD validation
 
 ## System architecture
@@ -37,13 +40,13 @@ feature validation
         ↓
 training snapshot
         ↓
-Isolation Forest training
+Isolation Forest training (one model per entity type)
         ↓
 versioned local artifacts
         ↓
-model registry
+model registry (Postgres, with a JSON file mirror)
         ↓
-active production model pointer
+active model pointer (database; every API replica follows it)
         ↓
 batch inference + online FastAPI inference
         ↓
@@ -73,16 +76,16 @@ rollback to previous stable model
 | Feature validation | Implemented | Validates schema, required columns, numeric types, nulls, ranges, and timestamp behavior. |
 | Training snapshots | Implemented | Writes reproducible feature snapshots and metadata under `data/features/training/`. |
 | Isolation Forest training | Implemented | Trains anomaly detection models from validated training snapshots. |
-| Model registry | Implemented locally | Tracks model versions, artifact paths, lineage, status, and active production version. |
+| Model registry | Implemented | `ml.model_registry` and `ml.active_model_pointer` in Postgres (JSON file mirror in the repository): versions, artifact paths, lineage, status, and the active version. |
 | Baseline metrics | Implemented | Stores anomaly rate and per-feature baseline statistics. |
 | Batch inference | Implemented | Scores model-ready feature batches and writes prediction evidence. |
 | Online inference | Implemented | FastAPI service scores single and batch payloads using the active model. |
-| Prediction logging | Implemented locally | Batch and online paths write JSONL prediction evidence. |
-| Drift checks | Implemented | Compares current feature mean/variance against approved training baselines. |
+| Prediction logging | Implemented | JSONL evidence, plus `ml.online_predictions` / `ml.batch_predictions` when the database is configured. |
+| Drift checks | Implemented | Compares current feature mean/variance against the active model's baseline, per segment; hourly drift job. |
 | Prometheus metrics | Implemented | Exposes request, error, anomaly, latency, drift, active-model, and rollback metrics. |
 | Grafana dashboards | Implemented locally | Operator and executive dashboards are stored under `monitoring/grafana/dashboards/`. |
-| Alert events | Implemented locally | Writes alert evidence for drift, anomaly-rate, latency, and prediction-error conditions. |
-| Rollback controls | Implemented locally | Supports dry-run and applied rollback to a previous stable model. |
+| Alert events | Implemented | Writes alert evidence (JSONL, plus `monitoring.alert_events`) for drift, anomaly-rate, latency, and prediction-error conditions. |
+| Rollback controls | Implemented | `POST /admin/rollback` (X-Admin-Token) with dry run; an applied rollback moves the shared pointer and every API replica follows. |
 | Latency validation | Implemented | Includes benchmark script and p95 latency target. |
 | Docker API runtime | Implemented | Builds and runs the FastAPI anomaly inference service. |
 | Docker batch runtime | Implemented | Builds and runs the batch anomaly scoring runtime. |
@@ -90,28 +93,65 @@ rollback to previous stable model
 
 ## Model lifecycle
 
-The platform currently has two model versions.
+Registered versions on 2026-11-15:
 
-| Version | Status | Source | Purpose |
-|---|---|---|---|
-| `v001` | Archived and rollback-eligible | Project 4 demo training snapshot | Proved training, artifact layout, registry, baseline metrics, and promotion mechanics. |
-| `v002` | Active production model | Real local extracts from Project 1 and Project 2/3 | Active anomaly model used by batch and online inference. |
+| Version | Status | Kind | Feature schema | Why |
+|---|---|---|---|---|
+| `v001` | retired | single | `feature_schema_v001` | First model, trained on a Project 4 demo snapshot to prove training, artifacts, registry, and promotion. |
+| `v002` | archived | single | `feature_schema_v001` | First real-source model (Project 1 + Project 2/3 extracts, 51 features); production until v004. |
+| `v003` | retired | single | `feature_schema_v002` | Superseded: the single model learned the entity type rather than anomalies (see its `evaluation_report.json`). |
+| `v004` | production | segmented | `feature_schema_v003` | One Isolation Forest per entity type (6 segments, 52 features in total). |
 
 Current active model:
 
 | Field | Value |
 |---|---|
 | Model name | `isolation_forest` |
-| Active version | `v002` |
-| Snapshot type | `real_source_extract` |
-| Feature schema version | `feature_schema_v001` |
-| Training row count | `16,750` |
-| Feature count | `51` |
-| Baseline anomaly rate | `0.05002985074626866` |
+| Active version | `v004` |
+| Model kind | segmented: `campaign`, `customer`, `funnel_day`, `product`, `user`, `web_customer` |
+| Snapshot | `real_source_20261115T010701Z` (`real_source_extract`) |
+| Feature schema version | `feature_schema_v003` |
+| Feature count | `52` (each segment scores its own subset) |
+| Baseline anomaly rate | `0.0507` |
 | Label availability | `unlabeled_proxy_metrics` |
-| Artifact path | `artifacts/models/isolation_forest/model_version=v002/model.joblib` |
+| Artifact path | `artifacts/models/isolation_forest/model_version=v004/model.joblib` |
 
-Model artifacts are stored locally under:
+The table is a dated snapshot. The live state comes from the API and the registry:
+
+```bash
+curl -s http://127.0.0.1:8014/model/active
+docker compose exec -T anomaly-postgres psql -U manshu -d project4_ml -c "
+  SELECT r.model_version, r.status, r.approved_for_prod, r.feature_schema_version,
+         p.pointer_version
+  FROM ml.model_registry AS r
+  LEFT JOIN ml.active_model_pointer AS p
+    ON p.model_name = r.model_name AND p.model_version = r.model_version
+  ORDER BY r.model_version"
+```
+
+Where the registry lives: with `PROJECT4_POSTGRES_*` configured, `ml.model_registry` and
+`ml.active_model_pointer` are the source of truth, and `artifacts/models/_registry/model_registry.json`
+plus `configs/active_model.yaml` are a file mirror (written unless
+`PROJECT4_REGISTRY_FILE_MIRROR=false`, as in Kubernetes). Without a database, the files are
+the registry.
+
+Lifecycle: training and retraining register a version as `candidate`; `promote` makes it
+`production` after a serving check and archives the previous production version; `retire`
+takes a non-active version out of use (its files are kept); a rollback marks the version
+it leaves `rolled_back`.
+
+```bash
+# tools() runs the tools image (see "Local runbook"); retrain never promotes
+tools python -m anomaly_detection.retrain --snapshot latest --model-version v005
+tools python -m anomaly_detection.registry promote --model-version v005 --notes "why"
+tools python -m anomaly_detection.registry retire --model-version v003 --notes "why"
+```
+
+Registration (`register_model_from_artifacts`, used by training and retraining) takes a
+relative `metadata.json` path as relative to the repository root, never to the current
+directory.
+
+Model artifacts are stored under:
 
 ```text
 artifacts/models/isolation_forest/model_version=<version>/
@@ -124,7 +164,12 @@ model.joblib
 metadata.json
 feature_schema.json
 baseline_stats.json
+evaluation_report.json   (versions trained by retrain)
 ```
+
+New versions store their bundle paths in `metadata.json` relative to the repository root;
+v001–v004 keep the absolute paths they were written with, and registration finds their
+files next to `metadata.json` wherever the bundle is.
 
 ## Experiment tracking (MLflow)
 
@@ -257,11 +302,13 @@ It builds a controlled anomaly feature dataframe first. The validated model feat
 - latency and system-performance features
 - lineage columns for source traceability
 
-The active feature schema is:
+The active feature schema (from `configs/active_model.yaml`) is:
 
 ```text
-feature_schema_v001
+feature_schema_v003
 ```
+
+`feature_schema_v001` is the contract of v001/v002 and `feature_schema_v002` that of v003.
 
 The validation layer protects the model from:
 
@@ -324,13 +371,9 @@ Batch prediction evidence is written to:
 logs/predictions/batch_predictions.jsonl
 ```
 
-The SQL contract for database persistence exists at:
-
-```text
-sql/create_prediction_tables.sql
-```
-
-The implemented local path is JSONL-first. Direct PostgreSQL inserts are planned hardening, not currently claimed as implemented.
+With `PROJECT4_POSTGRES_*` configured, every batch run is also inserted into
+`ml.batch_predictions` (table contract: `sql/create_prediction_tables.sql`), which the
+drift job reads.
 
 ## Online FastAPI inference
 
@@ -340,24 +383,54 @@ Implemented endpoints:
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /health` | Returns API health and model-load status. |
+| `GET /livez` | Liveness: the process is up (never touches the model). |
+| `GET /health` | API health, model-load status, and `pointer_source` (`postgres` or `file`). |
 | `GET /model/active` | Returns active model metadata. |
-| `POST /predict` | Scores one model-ready feature payload. |
-| `POST /predict/batch` | Scores multiple model-ready payloads. |
+| `POST /predict` | Scores one feature payload; a segmented model needs its `entity_type`. |
+| `POST /predict/batch` | Scores multiple payloads of one entity type. |
 | `GET /metrics` | Exposes Prometheus metrics. |
-| `POST /admin/rollback` | Supports dry-run and applied rollback requests. |
+| `POST /admin/rollback` | Dry-run and applied rollback; needs `X-Admin-Token`. |
 
-Online prediction evidence is written to:
+Online prediction evidence is written to `logs/predictions/online_predictions.jsonl`
+and, with the database configured, to `ml.online_predictions`.
 
-```text
-logs/predictions/online_predictions.jsonl
+The API serves the version named by the shared pointer: `ml.active_model_pointer` when
+`PROJECT4_POSTGRES_*` is configured (`pointer_source: postgres`), else
+`configs/active_model.yaml` (`pointer_source: file`). It polls the database pointer every
+`PROJECT4_POINTER_POLL_SECONDS` (default 30) and swaps the model in-process, so a promote
+or rollback through any replica reaches every replica without a restart.
+
+### Admin authentication
+
+`/admin/*` requires the header `X-Admin-Token`, compared in constant time with the
+server's `ADMIN_TOKEN` (at least 16 characters). Without a configured token every admin
+call returns **503** (admin disabled); a missing or wrong header returns **401**. There
+are no users or roles.
+
+Compose passes `PROJECT4_ADMIN_TOKEN` from `.env` to the API as `ADMIN_TOKEN`. Generate it
+once; nobody types or sees it, and nothing happens when `.env` already has a value:
+
+```bash
+grep -q '^PROJECT4_ADMIN_TOKEN=.' .env || {
+  sed -i '/^PROJECT4_ADMIN_TOKEN=/d' .env
+  printf 'PROJECT4_ADMIN_TOKEN=%s\n' "$(openssl rand -hex 32)" >> .env
+}
+docker compose up -d anomaly-api
 ```
 
-Online inference uses the active model pointer:
+Call an admin endpoint by reading the token into a variable (never onto the screen) and
+unsetting it afterwards:
 
-```text
-configs/active_model.yaml
+```bash
+ADMIN_TOKEN="$(grep '^PROJECT4_ADMIN_TOKEN=' .env | cut -d= -f2-)"
+curl -s -X POST http://127.0.0.1:8014/admin/rollback \
+  -H "X-Admin-Token: $ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"dry_run": true, "rollback_reason": "manual check", "triggered_by": "operator"}'
+unset ADMIN_TOKEN
 ```
+
+In Kubernetes the token lives in the secret `project4-admin`; see
+[the Kubernetes runtime validation](docs/kubernetes_runtime_validation.md), step 7.
 
 ## Prediction evidence
 
@@ -379,9 +452,27 @@ Each prediction record includes:
 
 Prediction evidence exists so anomalies can be audited after scoring. A record can be traced back to the model version, scored entity, score, threshold, and feature payload hash.
 
+`feature_payload_hash` is the sha256 of exactly the features the model scored for the
+record (a segmented model's segment features for its entity type), as floats, in
+sorted-key canonical JSON; extra request keys never enter it. Since stage 14c-5 the same
+row hashes identically online and in batch. Earlier online rows hashed the whole request
+payload as sent, so hashes do not match across that cutover.
+
 ## Drift monitoring
 
-Drift monitoring compares current feature behavior against the approved `v002` training baseline.
+Drift monitoring compares current feature behavior against the active model's training
+baseline; a segmented model is evaluated per segment against that segment's baseline.
+
+The drift job evaluates the last hours of batch predictions (or a feature file):
+
+```bash
+tools python -m anomaly_detection.drift_job --source batch-predictions --hours 24
+```
+
+With no batch predictions in the window it reports `not_evaluated` and exits 0. It logs a
+WARNING when the model was batch-scored before but not in the window (batch scoring may
+have stalled), and INFO when it was never batch-scored or the last run used another
+version (e.g. right after a promote).
 
 Implemented method:
 
@@ -398,23 +489,14 @@ warning
 critical
 ```
 
-Drift evidence is written locally to:
-
-```text
-logs/alerts/drift_events.jsonl
-```
-
-The PostgreSQL table contract exists in:
-
-```text
-sql/create_monitoring_tables.sql
-```
+Drift evidence is written to `logs/alerts/drift_events.jsonl` and, with the database
+configured, to `monitoring.drift_events` (`sql/create_monitoring_tables.sql`).
 
 Drift checks are intentionally lightweight. This is not presented as a full statistical drift platform. It is an operational signal that shows whether current scoring data has moved away from the approved training baseline.
 
 ## Alert events
 
-Alert events are implemented as local operational evidence.
+Alert events are operational evidence (JSONL, plus `monitoring.alert_events` with the database configured).
 
 Alert types include:
 
@@ -440,35 +522,28 @@ Alert events are evidence for operator review. They do not automatically prove t
 
 ## Rollback
 
-Rollback is implemented locally.
+`POST /admin/rollback` (see "Admin authentication") moves the active model back to the
+previous stable version. The target must:
 
-Validated rollback path:
+- have status `archived` and be `approved_for_prod`
+- be loadable and serve the same feature contract as the active model: the same ordered
+  features for single models, the same segment spec for segmented models; a single and a
+  segmented model are never compatible
 
-```text
-current production model: v002
-previous stable target: v001
-```
+Among eligible versions the most recently archived one is chosen. **Today there is no
+compatible target until v005**: v001 and v003 are retired, and v002 (single) is never
+compatible with the segmented v004, so a dry run returns HTTP 400
+`No compatible rollback target for isolation_forest: …`.
 
 Rollback supports:
 
-- dry-run validation
-- applied rollback
-- active model pointer update
-- rollback event logging
-- rollback metric emission
-- audit table contract
+- dry-run validation (always first; it changes nothing)
+- applied rollback: registry and pointer change together (one transaction in database
+  mode), the API swaps the model in-process, and every replica follows the shared pointer
+- rollback event logging and the `model_rollback_total` metric
 
-Rollback evidence is written to:
-
-```text
-logs/alerts/rollback_events.jsonl
-```
-
-The rollback audit table contract exists as:
-
-```text
-audit.rollback_events
-```
+Rollback evidence is written to `logs/alerts/rollback_events.jsonl` and, in the same
+transaction as the pointer change, to `audit.rollback_events`.
 
 Rollback is a recovery control, not blind automation. It should be used after reviewing drift events, alert events, prediction evidence, active model metadata, and registry state.
 
@@ -485,13 +560,19 @@ Core metric families:
 ```text
 prediction_requests_total
 prediction_errors_total
+predictions_scored_total
 anomalies_detected_total
 prediction_latency_ms
+prediction_persist_failures_total
 drift_detected_total
+feature_drift_status
 feature_mean_delta
 feature_variance_delta
 active_model_version
+model_reload_total
 model_rollback_total
+active_pointer_poll_failures_total
+registry_mirror_write_failures_total
 ```
 
 Grafana dashboard files:
@@ -530,7 +611,30 @@ Benchmark script:
 scripts/benchmark_latency.py
 ```
 
-Current local benchmark result:
+Live measurement of the active v004 (2026-11-15): 1,644 `/predict` requests built from
+real feature rows, sent through the compose API, read from the Prometheus histogram
+`prediction_latency_ms` (5 ms buckets):
+
+```text
+model_version=v004
+requests=1644
+errors=0
+p50_latency_ms≈47.6
+p95_latency_ms≈54.4
+pass_latency_budget=true
+```
+
+About 29% of the requests fell in the 15–20 ms bucket, so the latency has two groups;
+the percentiles above are bucket estimates, not exact values.
+
+What the histogram measures: inside the `/predict` handler, from just before the model
+call to just after the request counters, i.e. model scoring, the cached drift-status
+lookup, and the metric updates. It excludes request parsing, response serialization,
+and the JSONL and database evidence writes, which run as a background task after the
+response is sent.
+
+Earlier v002 measurement (single model, `scripts/benchmark_latency.py`, kept for
+history):
 
 ```text
 model_version=v002
@@ -542,7 +646,8 @@ api_p95_latency_ms=19.994
 pass_latency_budget=true
 ```
 
-This benchmark proves local single-client scoring latency. It does not claim cloud latency, production network latency, external feature-store latency, or database-write latency.
+These measure local single-client scoring latency. They do not claim cloud latency,
+production network latency, or external feature-store latency.
 
 ## False-positive and false-negative position
 
@@ -578,6 +683,19 @@ Real supervised quality metrics require one of the following:
 - verified backtesting labels
 
 Until then, anomaly-quality discussion remains proxy-based and explicitly labeled as such.
+
+## Evaluation limits
+
+The data is unlabeled, so no precision, recall, or F1 can be computed. Isolation Forest
+flags the lowest-scoring `contamination` share of the training rows (0.05), so the
+training anomaly rate (v004: 0.0507 overall, 0.050–0.054 per entity type) is about 5% by
+construction and says nothing about quality. `evaluation_report.json` is computed on the
+training snapshot itself, not on a hold-out set. The only signals are proxy and
+operational ones: score distributions, the anomaly rate over time against that baseline,
+mean/variance drift, and latency. Real quality figures need labelled outcomes for scored
+records (human review, incident links, or delayed business labels) collected after
+scoring; precision and recall are then measured on a held-out, later time window at the
+deployed threshold.
 
 ## Dockerized runtimes
 
@@ -648,16 +766,58 @@ Docker scope:
 
 | Capability | Status |
 |---|---|
-| API image build | Implemented |
-| Batch image build | Implemented |
+| Runtime (API), tools, and dev image builds | Implemented |
 | Docker Compose API runtime | Implemented |
 | Docker Compose batch profile | Implemented |
-| Active `v002` model packaged into images | Implemented |
+| Every tracked model bundle packaged into the images; the pointer selects one | Implemented |
 | Prometheus metrics from containerized API | Implemented |
-| CI validation for API image build | Implemented |
-| CI validation for batch image build | Implemented |
-| Kubernetes runtime manifests | Implemented and validated locally with kind, Metrics Server, and HPA |
+| CI builds of all three images and an image content check | Implemented |
+| Kubernetes runtime manifests | Implemented; validated live on kind on 2026-11-15 |
 | Cloud deployment | Not implemented |
+
+## Kubernetes runtime manifests
+
+Project 4 runs in its own kind cluster `project4-local` (context `kind-project4-local`).
+Every command below names that context explicitly; never rely on the current kubectl
+context, which may point at another project's cluster.
+
+| File | Purpose |
+|---|---|
+| `k8s/namespace.yaml` | Creates the `project4-ml` namespace |
+| `k8s/configmap.yaml` | `LOG_LEVEL` and `PROJECT4_REGISTRY_FILE_MIRROR=false` (database mode, read-only root filesystem) |
+| `k8s/deployment.yaml` | Two hardened API replicas in database mode as `project4_app` (non-root uid 999, read-only root, no capabilities, RuntimeDefault seccomp, no service-account token) |
+| `k8s/service.yaml` | Exposes the API internally as a `ClusterIP` service |
+| `k8s/hpa.yaml` | CPU-based autoscaling from 2 to 5 replicas |
+| `k8s/pdb.yaml` | Keeps at least one API pod during voluntary disruptions |
+| `k8s/cronjob-drift.yaml` | Hourly drift job from the tools image, hardened like the API, as `project4_app` |
+| `k8s/postgres.yaml` | In-cluster Postgres: StatefulSet and headless Service, `postgres:16.14` (the compose image), 1Gi volume |
+| `k8s/networkpolicy.yaml` | 5 NetworkPolicies: default deny, then DNS, API ingress, and Postgres ingress/egress allowed explicitly |
+| `k8s/seed-job.yaml` | One-off seed (schema, registry rows, `project4_app` role); applied by the runbook once Postgres is ready, not in the kustomization |
+| `k8s/secret.example.yaml` | Example secrets (placeholders only; never applied, not in the kustomization) |
+| `k8s/kustomization.yaml` | Renders the resources above except the seed job and the secrets |
+
+The API and the drift job read `PROJECT4_POSTGRES_*` from the secret `project4-app-db`
+(the least-privilege role `project4_app`); only the in-cluster Postgres and its seed job
+use the owner secret `project4-postgres-owner`.
+
+Validation status:
+
+- Passed: YAML parsing and manifest tests (`tests/test_k8s.py`: hardening, images, secrets, kustomization).
+- Passed in CI: kubeconform v0.8.0, strict, against Kubernetes 1.36.1.
+- Validated live on 2026-11-15 on the dedicated kind cluster `project4-local`: seed job, both replicas on the database pointer, promote propagation across replicas, network-policy deny checks, drift job, non-root read-only pods, and HPA. See [the live validation](docs/kubernetes_runtime_validation.md#live-validation-2026-11-15).
+- Not implemented: cloud Kubernetes deployment, public ingress, managed load balancer, or managed cluster autoscaler.
+
+Render the manifests offline (no cluster is contacted):
+
+    kubectl --context kind-project4-local kustomize k8s/ > /tmp/project4_k8s_rendered.yaml
+
+The tested, step-by-step procedure is
+[the Kubernetes runtime validation](docs/kubernetes_runtime_validation.md): images,
+cluster creation (restoring the context that was current before), generated secrets, apply,
+seed, checks, and teardown. On a running cluster:
+
+    kubectl --context kind-project4-local -n project4-ml get pods,svc,hpa,pdb,cronjob,networkpolicy
+    kubectl --context kind-project4-local -n project4-ml port-forward svc/project4-anomaly-api 8015:8004
 
 ## CI/CD validation
 
@@ -675,77 +835,61 @@ ML Platform Validation
 
 Implemented CI gates:
 
-- Python import validation
-- Ruff linting
-- Dependencies from `requirements-dev.txt` with `constraints.txt`
-- Full pytest suite against a disposable PostgreSQL service (`postgres:16.14`, the compose image); postgres-marked tests are required and never skip
-- JUnit pytest artifact upload
-- SQL file smoke validation
-- source extraction smoke validation
-- baseline metrics audit
-- active model metadata validation
-- drift tests
-- alert tests
-- rollback tests
-- FastAPI tests
-- metrics tests
-- Docker image builds: runtime (API), tools, dev
-- image content check: the runtime image has no mlflow, pyarrow, pytest, ruff, httpx or `/app/sql` and imports `api.main`; the tools image carries `/app/sql`
-- Kubernetes manifests (`k8s-manifests` job): kubeconform v0.8.0 (sha256-verified) validates the kustomize output, the seed job and the secret example strictly against Kubernetes 1.36.1
-- basic secret-pattern scan
+- **Install Python dependencies**: `requirements-dev.txt` with `constraints.txt`
+- **Run Ruff quality gate**
+- **Run secret scan basics**: private keys and common token patterns
+- **Apply PostgreSQL schema twice (idempotency) and check**: against a disposable `postgres:16.14` service (the compose image)
+- **Run PostgreSQL integration tests**: the database tests, required (never skipped)
+- **Run training smoke tests**
+- **Run source extraction smoke tests**
+- **Run registry and baseline audit**: registry tests, then the active bundle's metadata, baseline, and schema, per segment for segmented models
+- **Run drift and rollback tests**: drift, alert, and rollback tests
+- **Run FastAPI and metrics tests**: API, metrics, and prediction logging tests
+- **Run full pytest suite with JUnit report**: every test, with postgres-marked tests required
+- **Publish pytest summary**: totals from the JUnit report in the job summary
+- **Upload pytest report artifact**: `pytest-results`
+- **Build runtime (API) Docker image**
+- **Build tools Docker image**
+- **Build dev Docker image**
+- **Check image contents**: the runtime image has no mlflow, pyarrow, pytest, ruff, httpx, or `/app/sql` and imports `api.main`; the tools image carries `/app/sql`
+- **Download and verify kubeconform v0.8.0**: sha256-checked release archive
+- **Show `kubectl` client**: fails clearly when the binary is missing
+- **Validate manifests with kubeconform (strict)**: the kustomize output, the seed job, and the secret example against Kubernetes 1.36.1
 
-Latest validated CI evidence:
+Each bullet is a step name in `.github/workflows/ci.yml`: the job `Validate ML platform`
+runs everything up to "Check image contents", the job `Validate Kubernetes manifests` the
+last three. Each job first checks out the repository; the first also sets up Python 3.12.
 
-```text
-tests=112
-passed=112
-failures=0
-errors=0
-skipped=0
-```
+CI evidence: the latest *ML Platform Validation* run in the repository's Actions tab. Its
+job summary lists the totals from the JUnit report, and the `pytest-results` artifact
+holds the report itself. Postgres-marked tests are required in CI, so the summary shows
+0 skipped.
 
 ## Local runbook
 
-Activate the environment:
+The images run the same dependency sets as CI. Two shell functions wrap them, with the
+repository mounted at `/app`:
 
 ```bash
 cd ~/Desktop/Project-4-ML-Pipeline-Anomaly-Detection
-source .venv/bin/activate
+# Tests and lint: dev image, no network.
+dev() { docker run --rm --network none --user "$(id -u):$(id -g)" -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 -v "$PWD":/app -w /app --entrypoint "" project4-anomaly-dev:local "$@"; }
+# Training, retraining, registry, batch, and drift: tools image on the host network;
+# .env supplies PROJECT4_POSTGRES_* (see .env.example).
+tools() { docker run --rm --network host --user "$(id -u):$(id -g)" -e HOME=/tmp --env-file .env -v "$PWD":/app -w /app --entrypoint "" project4-anomaly-tools:local "$@"; }
 ```
-
-Run the full test suite:
 
 ```bash
-PYTHONPATH=src pytest -q
+dev env -u PYTHONPATH python -m pytest -p no:cacheprovider -o addopts= -q
+dev ruff check --no-cache .
+tools python -m anomaly_detection.registry promote --model-version v005 --notes "why"
 ```
 
-Run linting:
+Postgres-marked tests skip unless `PROJECT4_TEST_DATABASE_URL` points at a disposable
+database; with `PROJECT4_REQUIRE_TEST_DATABASE=1` they fail instead of skipping (as in CI).
 
-```bash
-ruff check .
-```
-
-Run the API locally:
-
-```bash
-PYTHONPATH=src uvicorn api.main:app --host 0.0.0.0 --port 8004
-```
-
-Validate local API:
-
-```bash
-curl http://localhost:8004/health
-curl http://localhost:8004/model/active
-curl http://localhost:8004/metrics | head -50
-```
-
-Run latency benchmark:
-
-```bash
-PYTHONPATH=src python scripts/benchmark_latency.py \
-  --url http://localhost:8004/predict \
-  --requests 100
-```
+Outside Docker, a Python 3.12 virtual environment works too:
+`python3.12 -m venv .venv && . .venv/bin/activate && pip install -r requirements-dev.txt -c constraints.txt`.
 
 Build Docker images:
 
@@ -772,6 +916,9 @@ docker compose down --remove-orphans
 
 ```text
 .
+├── .github/
+│   └── workflows/
+│       └── ci.yml
 ├── api/
 │   ├── main.py
 │   └── schemas.py
@@ -793,10 +940,12 @@ docker compose down --remove-orphans
 │   ├── false_positive_false_negative_analysis.md
 │   ├── feature_engineering.md
 │   ├── inference_design.md
+│   ├── kubernetes_runtime_validation.md
 │   ├── latency_budget.md
 │   ├── model_lifecycle.md
 │   ├── rollback_runbook.md
 │   └── source_integration.md
+├── k8s/
 ├── logs/
 │   ├── alerts/
 │   └── predictions/
@@ -810,6 +959,7 @@ docker compose down --remove-orphans
 │   └── anomaly_detection/
 ├── tests/
 ├── docker-compose.yml
+├── LICENSE
 ├── pyproject.toml
 ├── constraints.txt
 ├── requirements.txt
@@ -833,17 +983,17 @@ docker compose down --remove-orphans
 | `docs/latency_budget.md` | Online inference latency target and benchmark evidence |
 | `docs/false_positive_false_negative_analysis.md` | Threshold behavior and label limitations |
 | `docs/rollback_runbook.md` | Dry-run and applied rollback procedure |
+| `docs/kubernetes_runtime_validation.md` | Kubernetes runbook on a dedicated kind cluster, and the 2026-11-15 live validation |
 
 ## Known limitations
 
 Implemented locally, not production-deployed:
 
-- local artifact registry instead of managed model registry
-- JSONL persistence before direct database insert wiring
+- a self-hosted Postgres model registry, not a managed one
 - local Prometheus and Grafana configuration
-- local Docker runtime
+- local Docker runtime and a local kind cluster
 - local rollback controls
-- no authentication on local administrative API endpoints
+- administrative endpoints protected by one shared token (no users or roles)
 - no managed cloud deployment
 - no real production traffic
 - no verified anomaly labels
@@ -856,73 +1006,11 @@ These are intentional boundaries. The project is built to prove production ML pl
 Project 4 is complete when:
 
 - full local validation passes
-- Docker API and batch images build
+- the runtime, tools and dev images build
 - API health and model endpoints respond
 - Prometheus metrics are exposed
 - Grafana dashboard JSON validates
-- active model metadata points to `v002`
+- the active pointer names a bundle that passes `bundle_check`
 - rollback path remains recoverable
 - GitHub Actions passes on the remote branch
 - final documentation does not exaggerate implementation state
-
-- [Kubernetes runtime validation](docs/kubernetes_runtime_validation.md)
-
-## Kubernetes runtime manifests
-
-Project 4 now includes local Kubernetes runtime manifests for the anomaly inference API.
-
-Project 4 runs in its own kind cluster `project4-local` (context `kind-project4-local`).
-Every command below names that context explicitly; never rely on the current kubectl
-context, which may point at another project's cluster.
-
-Implemented Kubernetes files:
-
-| File | Purpose |
-|---|---|
-| `k8s/namespace.yaml` | Creates the `project4-ml` namespace |
-| `k8s/configmap.yaml` | `LOG_LEVEL` and `PROJECT4_REGISTRY_FILE_MIRROR=false` (database mode, read-only root filesystem) |
-| `k8s/deployment.yaml` | Two hardened API replicas in database mode as `project4_app` (non-root uid 999, read-only root, no capabilities, RuntimeDefault seccomp, no service-account token) |
-| `k8s/service.yaml` | Exposes the API internally as a `ClusterIP` service |
-| `k8s/hpa.yaml` | Defines CPU-based autoscaling from 2 to 5 replicas |
-| `k8s/pdb.yaml` | Keeps at least one API pod during voluntary disruptions |
-| `k8s/cronjob-drift.yaml` | Hourly drift job from the tools image, hardened like the API, as `project4_app` |
-| `k8s/secret.example.yaml` | Example secrets (placeholders only; never applied, not in the kustomization) |
-| `k8s/kustomization.yaml` | Renders the resources above (no secrets) |
-
-The API and the drift job read `PROJECT4_POSTGRES_*` from the secret `project4-app-db`
-(the least-privilege role `project4_app`); only the in-cluster Postgres and its seed job
-use the owner secret `project4-postgres-owner`.
-
-Validation status:
-
-- Implemented: Kubernetes manifests for local runtime deployment design.
-- Passed: YAML parsing and manifest tests (`tests/test_k8s.py`: hardening, images, secrets, kustomization).
-- Passed: offline kustomize render.
-- Performed earlier on a since-deleted kind cluster: rollout with replicated API pods, service routing, Metrics Server, and HPA validation.
-- Not implemented: cloud Kubernetes deployment, public ingress, managed load balancer, or managed cluster autoscaler.
-
-Run offline render validation (no cluster is contacted):
-
-    kubectl --context kind-project4-local kustomize k8s/ > /tmp/project4_k8s_rendered.yaml
-
-Create the secrets with generated values (never typed or printed). The app password must
-equal `PROJECT4_APP_PASSWORD` given to the seed job that runs `apply-schema`:
-
-    kubectl --context kind-project4-local apply -f k8s/namespace.yaml
-    kubectl --context kind-project4-local -n project4-ml create secret generic project4-app-db \
-      --from-literal=PROJECT4_POSTGRES_HOST=project4-postgres \
-      --from-literal=PROJECT4_POSTGRES_PORT=5432 \
-      --from-literal=PROJECT4_POSTGRES_DB=project4_ml \
-      --from-literal=PROJECT4_POSTGRES_USER=project4_app \
-      --from-literal=PROJECT4_POSTGRES_PASSWORD="$(openssl rand -hex 24)"
-    kubectl --context kind-project4-local -n project4-ml create secret generic project4-postgres-owner \
-      --from-literal=POSTGRES_USER=project4_owner \
-      --from-literal=POSTGRES_PASSWORD="$(openssl rand -hex 24)" \
-      --from-literal=POSTGRES_DB=project4_ml
-    kubectl --context kind-project4-local -n project4-ml create secret generic project4-admin \
-      --from-literal=admin-token="$(openssl rand -hex 32)"
-
-Apply and check:
-
-    kubectl --context kind-project4-local apply -k k8s/
-    kubectl --context kind-project4-local -n project4-ml get pods,svc,hpa,pdb,cronjob
