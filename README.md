@@ -213,6 +213,34 @@ docker run --rm --network host --user "$(id -u):$(id -g)" -e HOME=/tmp \
   python -m anomaly_detection.tracking backfill --model-version v002 --model-version v004
 ```
 
+## Database access
+
+Who connects to the `anomaly-postgres` instance (127.0.0.1:5435), and as what:
+
+| Who | Role | Database | Rights |
+|---|---|---|---|
+| Project 4 API, CLIs and drift job | `manshu` (the instance owner, a superuser) | `project4_ml` | everything |
+| Project 5 today | `manshu`, the same owner role | `project4_ml` | everything (to be replaced by `project5_reader`) |
+| Project 5 (intended) | `project5_reader`, created by `apply-schema` | `project4_ml` | CONNECT plus SELECT on the `integration.*` views only; LOGIN only when `PROJECT4_P5_READER_PASSWORD` is set |
+| MLflow server | `project4_mlflow` | `project4_mlflow` only | owner of its own database; cannot connect to `project4_ml` once PUBLIC's CONNECT is revoked |
+
+`sql/restrict_project4_ml_connect.sql` revokes CONNECT and TEMPORARY on `project4_ml`
+from PUBLIC and grants CONNECT to `project5_reader`, so no other role can connect.
+Superusers are not affected. It is re-runnable, refuses (changing nothing) when
+`project5_reader` does not exist yet, and ends by listing every login role with whether
+it can connect. `apply-schema` also grants `project5_reader` CONNECT, so a fresh
+database keeps working. Run it once:
+
+```bash
+docker compose exec -T anomaly-postgres psql -v ON_ERROR_STOP=1 -U manshu -d project4_ml < sql/restrict_project4_ml_connect.sql
+```
+
+Undo it:
+
+```bash
+docker compose exec -T anomaly-postgres psql -v ON_ERROR_STOP=1 -U manshu -d project4_ml -c 'GRANT CONNECT, TEMPORARY ON DATABASE project4_ml TO PUBLIC'
+```
+
 ## Feature contract
 
 Project 4 does not train directly on raw upstream tables.

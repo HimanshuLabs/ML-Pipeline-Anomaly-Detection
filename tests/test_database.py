@@ -1171,6 +1171,10 @@ def test_reader_role_setup_never_sends_or_returns_the_password() -> None:
         assert SECRET_PASSWORD not in sql_text
         assert SECRET_PASSWORD not in repr(parameters)
     texts = [sql_text for sql_text, _ in statements]
+    assert any(
+        "GRANT CONNECT ON DATABASE" in text and "current_database()" in text
+        and "project5_reader" in text for text in texts
+    )  # explicit CONNECT: still connects after PUBLIC's CONNECT is revoked
     assert "GRANT USAGE ON SCHEMA integration TO project5_reader" in texts
     for view in database.INTEGRATION_VIEWS:
         assert f"GRANT SELECT ON {view} TO project5_reader" in texts
@@ -1418,3 +1422,148 @@ def test_apply_schema_twice_with_reader_password_stays_idempotent(database_mode)
     assert set(report["tables"]) == set(database.INSERTABLE_TABLES)
     assert report["views"] == sorted(database.INTEGRATION_VIEWS)
     database.apply_schema(database_mode, reader_password="")
+
+
+# --- stage 13g: CONNECT on the Project 4 database --------------------------------------
+
+RESTRICT_CONNECT_SQL = REPO_ROOT / "sql" / "restrict_project4_ml_connect.sql"
+CONNECT_READER_PASSWORD = "connect-test-reader-password"
+MLFLOW_ROLE = "project4_mlflow"  # same name as the real MLflow role; test instance only
+MLFLOW_ROLE_PASSWORD = "connect-test-mlflow-password"
+
+
+def _run_restrict_connect_script(engine) -> list[tuple]:
+    """Run the script as the superuser; returns its final SELECT (role, super, connect)."""
+
+    with engine.begin() as connection:
+        result = connection.exec_driver_sql(RESTRICT_CONNECT_SQL.read_text(encoding="utf-8"))
+        return [tuple(row) for row in result.fetchall()]
+
+
+def _connect_as(role: str, password: str, sql: str = "SELECT 1"):
+    """Connect to the test database as role and run sql; returns the rows."""
+
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.engine import make_url
+
+    url = make_url(os.environ["PROJECT4_TEST_DATABASE_URL"]).set(
+        username=role, password=password
+    )
+    engine = create_engine(url)
+    try:
+        with engine.connect() as connection:
+            return connection.execute(text(sql)).fetchall()
+    finally:
+        engine.dispose()
+
+
+def _database_acl(engine) -> str:
+    return _count(engine, "SELECT datacl::text FROM pg_database WHERE datname = current_database()")
+
+
+@pytest.fixture()
+def connect_roles(database_mode):
+    """project5_reader (LOGIN) and a LOGIN project4_mlflow role; restores PUBLIC after."""
+
+    database.apply_schema(database_mode, reader_password=CONNECT_READER_PASSWORD)
+    with database_mode.begin() as connection:
+        connection.exec_driver_sql(
+            "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = "
+            f"'{MLFLOW_ROLE}') THEN CREATE ROLE {MLFLOW_ROLE} LOGIN; END IF; END $$"
+        )
+        connection.exec_driver_sql(
+            f"ALTER ROLE {MLFLOW_ROLE} WITH LOGIN PASSWORD %(verifier)s",
+            {"verifier": database.scram_sha256_verifier(MLFLOW_ROLE_PASSWORD)},
+        )
+    yield database_mode
+    with database_mode.begin() as connection:
+        connection.exec_driver_sql(
+            "DO $$ BEGIN EXECUTE 'GRANT CONNECT, TEMPORARY ON DATABASE ' "
+            "|| quote_ident(current_database()) || ' TO PUBLIC'; END $$"
+        )
+        connection.exec_driver_sql(f"DROP ROLE IF EXISTS {MLFLOW_ROLE}")
+    database.apply_schema(database_mode, reader_password="")
+
+
+@pytest.mark.postgres
+def test_restrict_connect_keeps_project5_reader_and_the_owner_and_shuts_out_others(
+    connect_roles,
+) -> None:
+    from sqlalchemy.engine import make_url
+    from sqlalchemy.exc import OperationalError
+
+    owner = make_url(os.environ["PROJECT4_TEST_DATABASE_URL"]).username
+    # Before: every LOGIN role connects through PUBLIC.
+    assert _connect_as(MLFLOW_ROLE, MLFLOW_ROLE_PASSWORD) == [(1,)]
+
+    rows = _run_restrict_connect_script(connect_roles)
+    print("\nrestrict_project4_ml_connect.sql final SELECT (role, superuser, can_connect):")
+    for row in rows:
+        print("  ", row)
+
+    status = {role: (superuser, can_connect) for role, superuser, can_connect in rows}
+    assert status[owner] == (True, True)
+    assert status[database.PROJECT5_READER_ROLE] == (False, True)
+    assert status[MLFLOW_ROLE] == (False, False)
+
+    view_rows = _connect_as(
+        database.PROJECT5_READER_ROLE, CONNECT_READER_PASSWORD,
+        "SELECT count(*) FROM integration.model_metadata",
+    )
+    assert view_rows[0][0] >= 0
+    with pytest.raises(OperationalError, match="permission denied for database"):
+        _connect_as(MLFLOW_ROLE, MLFLOW_ROLE_PASSWORD)
+    assert _count(connect_roles, "SELECT 1") == 1  # the superuser still connects
+
+
+@pytest.mark.postgres
+def test_restrict_connect_script_is_idempotent(connect_roles) -> None:
+    first_rows = _run_restrict_connect_script(connect_roles)
+    first_acl = _database_acl(connect_roles)
+
+    second_rows = _run_restrict_connect_script(connect_roles)
+
+    assert second_rows == first_rows
+    assert _database_acl(connect_roles) == first_acl
+    entries = first_acl.strip("{}").split(",")
+    assert not any(entry.startswith("=") for entry in entries)  # no PUBLIC (empty grantee)
+    assert any(entry.startswith("project5_reader=c/") for entry in entries)
+
+
+@pytest.mark.postgres
+def test_restrict_connect_refuses_and_changes_nothing_without_project5_reader(
+    connect_roles,
+) -> None:
+    from sqlalchemy.exc import DBAPIError
+
+    acl_before = _database_acl(connect_roles)
+    with connect_roles.connect() as connection:
+        transaction = connection.begin()
+        connection.exec_driver_sql(f"DROP OWNED BY {database.PROJECT5_READER_ROLE}")
+        connection.exec_driver_sql(f"DROP ROLE {database.PROJECT5_READER_ROLE}")
+        with pytest.raises(DBAPIError, match="project5_reader does not exist"):
+            connection.exec_driver_sql(RESTRICT_CONNECT_SQL.read_text(encoding="utf-8"))
+        transaction.rollback()
+
+    assert _database_acl(connect_roles) == acl_before
+
+
+@pytest.mark.postgres
+def test_apply_schema_after_the_revoke_gives_project5_reader_connect_again(
+    connect_roles,
+) -> None:
+    from sqlalchemy.exc import OperationalError
+
+    _run_restrict_connect_script(connect_roles)
+    # A fresh or re-created reader role has no CONNECT once PUBLIC lost it.
+    with connect_roles.begin() as connection:
+        connection.exec_driver_sql(
+            "DO $$ BEGIN EXECUTE 'REVOKE CONNECT ON DATABASE ' "
+            "|| quote_ident(current_database()) || ' FROM project5_reader'; END $$"
+        )
+    with pytest.raises(OperationalError, match="permission denied for database"):
+        _connect_as(database.PROJECT5_READER_ROLE, CONNECT_READER_PASSWORD)
+
+    database.apply_schema(connect_roles, reader_password=CONNECT_READER_PASSWORD)
+
+    assert _connect_as(database.PROJECT5_READER_ROLE, CONNECT_READER_PASSWORD) == [(1,)]
