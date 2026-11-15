@@ -393,3 +393,96 @@ def _finish_validation(
         raise FeatureValidationError("; ".join(result.errors))
 
     return result
+
+
+# --- real-source (Project 1 + Project 2/3) snapshot contract ----------------------------
+#
+# Ranges follow the current sources: P2 *_pct columns are percentages 0-100 (the
+# bounded ones; session_to_order_conversion_rate_pct is orders/sessions*100 and
+# not capped by P2, so it is only non-negative); P1/P2 probabilities and P2
+# fraud scores are 0-1; P1 engagement scores are unbounded above, so only
+# non-negative. budget_remaining is negative when a campaign overspends.
+
+REAL_SOURCE_SIGNED_FEATURES: tuple[str, ...] = ("budget_remaining",)
+REAL_SOURCE_PERCENT_FEATURES: tuple[str, ...] = (
+    "customer_conversion_rate_pct",
+    "click_through_rate_pct",
+    "funnel_conversion_rate_pct",
+    "product_conversion_rate_pct",
+    "category_revenue_share_pct",
+)
+REAL_SOURCE_PROBABILITY_FEATURES: tuple[str, ...] = (
+    "avg_purchase_probability",
+    "avg_cart_abandonment_probability",
+    "avg_fraud_score",
+)
+REAL_SOURCE_BINARY_FEATURES: tuple[str, ...] = ("repeat_purchase_signal", "never_ordered")
+
+
+def validate_real_source_features(
+    frame: pd.DataFrame,
+    feature_columns: list[str] | tuple[str, ...],
+) -> FeatureValidationResult:
+    """Validate every feature of a real-source snapshot after transformation.
+
+    Errors name the feature and the rule; the snapshot is trainable only when
+    there are none.
+    """
+
+    errors: list[str] = []
+
+    if frame.empty:
+        errors.append("Feature dataframe is empty.")
+
+    missing = [column for column in feature_columns if column not in frame.columns]
+    if missing:
+        errors.append("Missing feature columns: " + ", ".join(missing))
+
+    for column in feature_columns:
+        if column not in frame.columns:
+            continue
+
+        values = pd.to_numeric(frame[column], errors="coerce")
+        non_numeric = int((values.isna() & frame[column].notna()).sum())
+        if non_numeric:
+            errors.append(f"Feature {column} has {non_numeric} non-numeric value(s).")
+            continue
+
+        missing_count = int(values.isna().sum())
+        if missing_count:
+            errors.append(f"Feature {column} has {missing_count} missing (NaN) value(s).")
+
+        finite = values.dropna()
+        infinite_count = int((~np.isfinite(finite.to_numpy(dtype=float))).sum())
+        if infinite_count:
+            errors.append(f"Feature {column} has {infinite_count} infinite value(s).")
+        finite = finite[np.isfinite(finite.to_numpy(dtype=float))]
+
+        if column not in REAL_SOURCE_SIGNED_FEATURES:
+            negative = int((finite < 0).sum())
+            if negative:
+                errors.append(f"Feature {column} has {negative} negative value(s).")
+
+        if column in REAL_SOURCE_PERCENT_FEATURES:
+            outside = int(((finite < 0) | (finite > 100)).sum())
+            if outside:
+                errors.append(f"Feature {column} has {outside} value(s) outside 0-100.")
+
+        if column in REAL_SOURCE_PROBABILITY_FEATURES:
+            outside = int(((finite < 0) | (finite > 1)).sum())
+            if outside:
+                errors.append(f"Feature {column} has {outside} value(s) outside 0-1.")
+
+        if column in REAL_SOURCE_BINARY_FEATURES:
+            not_binary = int((~finite.isin([0.0, 1.0])).sum())
+            if not_binary:
+                errors.append(f"Feature {column} has {not_binary} value(s) that are not 0/1.")
+
+    return FeatureValidationResult(
+        is_valid=not errors,
+        row_count=len(frame),
+        feature_count=len(feature_columns),
+        schema_version=None,
+        errors=tuple(errors),
+        warnings=(),
+    )
