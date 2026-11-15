@@ -748,7 +748,6 @@ docker compose down --remove-orphans
 │   └── models/
 ├── configs/
 │   ├── active_model.yaml
-│   ├── database.yaml.example
 │   ├── drift_thresholds.yaml
 │   ├── model_config.yaml
 │   └── source_extract.yaml
