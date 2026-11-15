@@ -436,8 +436,6 @@ def test_runbook_creates_its_own_cluster_restores_the_context_and_tears_down() -
     ]
     assert between == []
     for step in (
-        "kind load docker-image project4-anomaly-api:local project4-anomaly-tools:local "
-        + _compose_postgres_image() + " --name project4-local",
         "kind delete cluster --name project4-local",
         "apply -f k8s/seed-job.yaml",
         "--kubelet-insecure-tls",
@@ -451,6 +449,39 @@ def test_runbook_creates_its_own_cluster_restores_the_context_and_tears_down() -
 
 def _section(text: str, number: int) -> str:
     return text.split(f"\n## {number}. ", 1)[1].split("\n## ", 1)[0]
+
+
+def test_runbook_loads_single_platform_image_archives_not_docker_images() -> None:
+    # `kind load docker-image` imports every platform of Docker's multi-platform image
+    # index and fails ("ctr: content digest … not found"); archives of one platform work.
+    text = RUNBOOK.read_text(encoding="utf-8")
+    step = _section(text, 3)
+
+    assert "kind load docker-image" not in text
+    assert 'for IMAGE in project4-anomaly-api:local project4-anomaly-tools:local ' \
+        f'{_compose_postgres_image()}; do' in step
+    assert 'docker save --platform "$PLATFORM" "$IMAGE" -o "$ARCHIVE"' in step
+    assert 'kind load image-archive "$ARCHIVE" --name project4-local' in step
+    assert 'rm -f "$ARCHIVE"' in step
+    assert "uname -m" in step and "linux/amd64" in step and "linux/arm64" in step
+    assert "docker exec project4-local-control-plane crictl images | grep -E 'project4|postgres'" \
+        in step
+    assert "content digest" in step  # why: the observed failure
+
+
+def test_runbook_records_the_live_validation_above_the_historical_note() -> None:
+    text = RUNBOOK.read_text(encoding="utf-8")
+    live = text.split("\n## Live validation (2026-11-15)\n", 1)[1].split("\n## ", 1)[0]
+
+    assert text.index("## Live validation (2026-11-15)") < text.index("## Earlier validation")
+    for observed in (
+        "pointer_source", "predictions_scored_total", "registry_mirror_write_failures_total",
+        "never compatible", "v002", "pointer_version 3", "TimeoutError",
+        "kubernetes.default.svc:443", "not_evaluated", "uid 999", "1%/70%",
+        "v1.36.1", "v0.9.0", "29.9.3",
+    ):
+        assert observed in live, observed
+    assert "'/app/probe': Read-only file system" in _section(text, 10)
 
 
 def test_runbook_metrics_server_is_pinned_to_v0_9_0() -> None:
