@@ -15,6 +15,7 @@ import hashlib
 import json
 import logging
 import time
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -159,6 +160,30 @@ def hash_feature_payload(payload: dict[str, Any]) -> str:
         ensure_ascii=False,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _as_hash_value(value: Any) -> Any:
+    if value is None or isinstance(value, str):
+        return _json_safe(value)
+    try:
+        return _json_safe(float(value))  # 4, 4.0, np.int64(4) -> 4.0; NaN/inf -> None
+    except (TypeError, ValueError):
+        return _json_safe(value)
+
+
+def canonical_feature_payload_hash(
+    payload: Mapping[str, Any], feature_names: Sequence[str]
+) -> str:
+    """feature_payload_hash of a scored record, the same for online and batch scoring.
+
+    Only the features the model scored for the record (a segmented model's segment
+    features for its entity type, a single model's features) enter the hash, as
+    floats (NaN/inf as null), in sorted-key canonical JSON. Extra keys (entity_id,
+    entity_type, unknown keys) never do. Stage 14c-5 onwards; earlier online rows
+    hashed the whole request payload as sent.
+    """
+
+    return hash_feature_payload({name: _as_hash_value(payload[name]) for name in feature_names})
 
 
 def _log_training_runtime_versions(metadata: dict[str, Any], *, model_version: str) -> None:
@@ -576,7 +601,9 @@ def _build_records(
                 anomaly_score=float(scores[row_number]),
                 is_anomaly=bool(anomaly_flags[row_number]),
                 threshold_used=float(threshold_used),
-                feature_payload_hash=hash_feature_payload(feature_payload),
+                feature_payload_hash=canonical_feature_payload_hash(
+                    feature_payload, row_feature_names[row_number]
+                ),
                 feature_payload=feature_payload,
                 inference_latency_ms=float(per_record_latency_ms),
             )
