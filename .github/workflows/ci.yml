@@ -16,7 +16,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
-    # Disposable database for the schema checks; same image tag as docker-compose.yml.
+    # Disposable database for the schema checks and the postgres-marked tests; same image
+    # as compose's anomaly-postgres, on 5547 (never the real 5433/5434/5435 ports).
     services:
       postgres:
         image: postgres:16.14
@@ -25,7 +26,7 @@ jobs:
           POSTGRES_PASSWORD: project4_ci_only
           POSTGRES_DB: project4_ml
         ports:
-          - 5435:5432
+          - 5547:5432
         options: >-
           --health-cmd "pg_isready -U manshu -d project4_ml"
           --health-interval 5s
@@ -44,7 +45,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade "pip>=25,<26"
-          python -m pip install -r requirements.txt -c constraints.txt
+          python -m pip install -r requirements-dev.txt -c constraints.txt
 
       - name: Run Ruff quality gate
         run: |
@@ -107,7 +108,7 @@ jobs:
       - name: Apply PostgreSQL schema twice (idempotency) and check
         env:
           PROJECT4_POSTGRES_HOST: 127.0.0.1
-          PROJECT4_POSTGRES_PORT: "5435"
+          PROJECT4_POSTGRES_PORT: "5547"
           PROJECT4_POSTGRES_DB: project4_ml
           PROJECT4_POSTGRES_USER: manshu
           PROJECT4_POSTGRES_PASSWORD: project4_ci_only
@@ -118,7 +119,7 @@ jobs:
 
       - name: Run PostgreSQL integration tests
         env:
-          PROJECT4_TEST_DATABASE_URL: postgresql+psycopg2://manshu:project4_ci_only@127.0.0.1:5435/project4_ml
+          PROJECT4_TEST_DATABASE_URL: postgresql+psycopg2://manshu:project4_ci_only@127.0.0.1:5547/project4_ml
           PROJECT4_REQUIRE_TEST_DATABASE: "1"
         run: |
           PYTHONPATH=src pytest -m postgres tests/test_database.py -q
@@ -203,7 +204,12 @@ jobs:
         run: |
           PYTHONPATH=src pytest tests/test_api.py tests/test_metrics.py tests/test_prediction_logging.py -q
 
+      # Every postgres-marked test runs against the service; with the require flag a
+      # missing URL fails the suite instead of skipping those tests.
       - name: Run full pytest suite with JUnit report
+        env:
+          PROJECT4_TEST_DATABASE_URL: postgresql+psycopg2://manshu:project4_ci_only@127.0.0.1:5547/project4_ml
+          PROJECT4_REQUIRE_TEST_DATABASE: "1"
         run: |
           mkdir -p reports
           PYTHONPATH=src pytest -q --junitxml=reports/pytest-results.xml
@@ -283,3 +289,52 @@ jobs:
       - name: Build dev Docker image
         run: |
           docker build -f docker/Dockerfile --target dev -t project4-anomaly-dev:ci .
+
+      - name: Check image contents
+        run: |
+          docker run --rm --network none project4-anomaly-api:ci python -c '
+          import importlib.util, sys
+          from pathlib import Path
+          present = [m for m in ("mlflow", "pyarrow", "pytest", "ruff", "httpx") if importlib.util.find_spec(m)]
+          if present or Path("/app/sql").exists():
+              sys.exit(f"runtime image must not contain {present} or /app/sql")
+          import api.main
+          print("OK: runtime image has no tools, tests or sql and imports api.main")'
+          docker run --rm --network none project4-anomaly-tools:ci test -d /app/sql
+          docker run --rm --network none project4-anomaly-tools:ci sh -c 'ls /app/sql/*.sql'
+
+  k8s-manifests:
+    name: Validate Kubernetes manifests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Download and verify kubeconform v0.8.0
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/kubeconform"
+          cd "$RUNNER_TEMP/kubeconform"
+          curl -fsSL -o kubeconform-linux-amd64.tar.gz https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-amd64.tar.gz
+          echo "9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883  kubeconform-linux-amd64.tar.gz" | sha256sum -c -
+          tar -xzf kubeconform-linux-amd64.tar.gz
+          ./kubeconform -v
+          echo "$RUNNER_TEMP/kubeconform" >> "$GITHUB_PATH"
+
+      - name: Show kubectl client
+        run: |
+          if ! command -v kubectl >/dev/null; then
+            echo "::error::kubectl is not installed on this runner; kubectl kustomize is required"
+            exit 1
+          fi
+          kubectl version --client
+
+      # Kubernetes 1.36.1: the kind node version of the live validation (runbook). Every
+      # kind must have a schema: a kind without one fails the step.
+      - name: Validate manifests with kubeconform (strict)
+        run: |
+          set -euo pipefail
+          kubectl kustomize k8s/ | kubeconform -strict -summary -kubernetes-version 1.36.1 -
+          kubeconform -strict -summary -kubernetes-version 1.36.1 k8s/seed-job.yaml k8s/secret.example.yaml

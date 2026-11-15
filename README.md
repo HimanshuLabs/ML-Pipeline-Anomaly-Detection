@@ -677,7 +677,8 @@ Implemented CI gates:
 
 - Python import validation
 - Ruff linting
-- Full pytest suite
+- Dependencies from `requirements-dev.txt` with `constraints.txt`
+- Full pytest suite against a disposable PostgreSQL service (`postgres:16.14`, the compose image); postgres-marked tests are required and never skip
 - JUnit pytest artifact upload
 - SQL file smoke validation
 - source extraction smoke validation
@@ -688,8 +689,9 @@ Implemented CI gates:
 - rollback tests
 - FastAPI tests
 - metrics tests
-- Docker API image build
-- Docker batch image build
+- Docker image builds: runtime (API), tools, dev
+- image content check: the runtime image has no mlflow, pyarrow, pytest, ruff, httpx or `/app/sql` and imports `api.main`; the tools image carries `/app/sql`
+- Kubernetes manifests (`k8s-manifests` job): kubeconform v0.8.0 (sha256-verified) validates the kustomize output, the seed job and the secret example strictly against Kubernetes 1.36.1
 - basic secret-pattern scan
 
 Latest validated CI evidence:
