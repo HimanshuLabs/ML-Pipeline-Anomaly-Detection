@@ -402,10 +402,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s - %(message)s",
-    )
+    from anomaly_detection.logging_config import configure_logging
+
+    configure_logging()
     args = parse_args(argv)
 
     try:

@@ -1,5 +1,7 @@
 drift:
   method: mean_variance_threshold
+  # The drift job refuses a segment with fewer current rows than this (no noise).
+  min_rows_per_segment: 30
   status_levels:
     normal: "Feature movement is within expected range."
     warning: "Feature movement should be reviewed."

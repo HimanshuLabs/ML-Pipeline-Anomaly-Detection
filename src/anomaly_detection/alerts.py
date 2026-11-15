@@ -280,6 +280,8 @@ def create_critical_drift_alerts(drift_result: Any) -> list[AlertEvent]:
             continue
 
         feature_name = str(event.get("feature_name", "unknown_feature"))
+        segment = event.get("entity_type")
+        segment_text = f" (segment {segment})" if segment else ""
         mean_delta_percent = _required_finite_float(
             event.get("mean_delta_percent", 0.0),
             field_name="mean_delta_percent",
@@ -320,10 +322,11 @@ def create_critical_drift_alerts(drift_result: Any) -> list[AlertEvent]:
                 entity_id=feature_name,
                 message=(
                     "Critical drift detected for feature "
-                    f"{feature_name} on model {model_version}."
+                    f"{feature_name}{segment_text} on model {model_version}."
                 ),
                 details={
                     "feature_name": feature_name,
+                    "segment": segment,
                     "feature_dtype": event.get("feature_dtype"),
                     "baseline_mean": event.get("baseline_mean"),
                     "current_mean": event.get("current_mean"),

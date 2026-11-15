@@ -1107,6 +1107,30 @@ VIEW_DOMAIN_TAGS = {
     "integration.prediction_outputs": "anomaly_predictions",
     "integration.drift_validation_rollback": "ml_observability",
 }
+# integration.drift_validation_rollback columns before stage 11, in order (P5 contract).
+DRIFT_VALIDATION_ROLLBACK_COLUMNS = (
+    "source_project",
+    "source_system",
+    "source_entity",
+    "source_record_id",
+    "event_timestamp",
+    "schema_version",
+    "domain_tag",
+    "recorded_at",
+    "event_type",
+    "model_name",
+    "model_version",
+    "status",
+    "severity",
+    "subject",
+    "message",
+    "metric_name",
+    "metric_value",
+    "threshold_value",
+    "from_model_version",
+    "to_model_version",
+    "triggered_by",
+)
 
 
 def test_integration_views_expose_project5_metadata_columns() -> None:
@@ -1264,6 +1288,8 @@ def test_integration_views_return_expected_rows_and_columns(
     tmp_path: Path,
     trained_metadata_paths: dict[str, Path],
 ) -> None:
+    from dataclasses import replace
+
     import pandas as pd
     from sqlalchemy import text
 
@@ -1288,11 +1314,10 @@ def test_integration_views_return_expected_rows_and_columns(
         output_path=tmp_path / "batch.jsonl",
     )
     drift_event, alert_event = _drift_and_alert(version)
+    drift_event = replace(drift_event, entity_type="campaign")
     insert_drift_events_database([drift_event])
     insert_alert_events_database([alert_event])
     # Rollback events reference registered versions; use this test's own two models.
-    from dataclasses import replace
-
     _register_trained(trained_metadata_paths, ["v102"])
     with initialized_database.begin() as connection:
         database.insert_row(
@@ -1341,6 +1366,15 @@ def test_integration_views_return_expected_rows_and_columns(
     ]
     assert sorted(row["prediction_source"] for row in predictions) == ["batch", "online"]
     assert sorted(row["event_type"] for row in events) == ["alert", "drift", "rollback"]
+
+    # entity_type is appended as the last column; every existing column keeps its place.
+    for row in events:
+        assert list(row.keys()) == [*DRIFT_VALIDATION_ROLLBACK_COLUMNS, "entity_type"]
+    assert {row["event_type"]: row["entity_type"] for row in events} == {
+        "drift": "campaign",
+        "alert": None,
+        "rollback": None,
+    }
 
 
 @pytest.mark.postgres

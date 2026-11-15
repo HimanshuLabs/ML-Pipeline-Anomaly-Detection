@@ -210,6 +210,46 @@ def insert_alert_events(events: Sequence[Any]) -> int:
     return _insert_rows("monitoring.alert_events", [alert_event_row(e) for e in events])
 
 
+def read_batch_feature_payloads(
+    *,
+    model_name: str,
+    model_version: str,
+    since: datetime,
+) -> list[dict[str, Any]]:
+    """entity_type and feature_payload of successful batch predictions since a time."""
+
+    with get_shared_engine().connect() as connection:
+        rows = connection.execute(
+            text(
+                "SELECT entity_type, feature_payload FROM ml.batch_predictions "
+                "WHERE model_name = :model_name AND model_version = :model_version "
+                "AND prediction_status = 'success' AND score_timestamp >= :since"
+            ),
+            {"model_name": model_name, "model_version": model_version, "since": since},
+        ).mappings()
+        return [dict(row) for row in rows]
+
+
+def read_latest_drift_rows(*, model_name: str, model_version: str) -> list[dict[str, Any]]:
+    """Drift events of the latest run (greatest detected_at) per entity_type."""
+
+    with get_shared_engine().connect() as connection:
+        rows = connection.execute(
+            text(
+                "SELECT d.model_name, d.model_version, d.entity_type, d.feature_name, "
+                "d.drift_status, d.mean_delta, d.variance_delta, d.detected_at "
+                "FROM monitoring.drift_events AS d "
+                "WHERE d.model_name = :model_name AND d.model_version = :model_version "
+                "AND d.detected_at = ("
+                "  SELECT max(l.detected_at) FROM monitoring.drift_events AS l"
+                "  WHERE l.model_name = d.model_name AND l.model_version = d.model_version"
+                "  AND l.entity_type IS NOT DISTINCT FROM d.entity_type)"
+            ),
+            {"model_name": model_name, "model_version": model_version},
+        ).mappings()
+        return [dict(row) for row in rows]
+
+
 def schema_file_paths() -> list[Path]:
     """The DDL files in the order they must run."""
 
@@ -746,6 +786,9 @@ def sync_from_files(
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    from anomaly_detection.logging_config import configure_logging
+
+    configure_logging()
     parser = argparse.ArgumentParser(description="Project 4 PostgreSQL schema tools.")
     parser.add_argument("command", choices=["apply-schema", "check", "sync-from-files"])
     args = parser.parse_args(argv)

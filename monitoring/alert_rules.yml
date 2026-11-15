@@ -1,0 +1,36 @@
+groups:
+  - name: project4-anomaly-detection
+    rules:
+      - alert: Project4NoActiveModel
+        expr: absent(active_model_version == 1)
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "No active model is loaded by the Project 4 anomaly API."
+
+      - alert: Project4FeatureDriftCritical
+        expr: max by (model_version, segment) (feature_drift_status) >= 2
+        labels:
+          severity: critical
+        annotations:
+          summary: "Critical drift in segment {{ $labels.segment }} of model {{ $labels.model_version }}."
+
+      - alert: Project4PredictionErrorRate
+        expr: >
+          sum(rate(prediction_errors_total[10m]))
+          / clamp_min(sum(rate(prediction_requests_total[10m])), 0.001) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "More than 5% of Project 4 prediction requests fail."
+
+      - alert: Project4LatencyBudgetBreach
+        expr: >
+          histogram_quantile(0.95, sum(rate(prediction_latency_ms_bucket[5m])) by (le)) > 200
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Project 4 p95 prediction latency is above the 200 ms budget."

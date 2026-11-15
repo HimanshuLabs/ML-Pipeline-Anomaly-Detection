@@ -9,6 +9,7 @@ import threading
 import time
 from collections.abc import Callable
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Annotated, Any
@@ -23,11 +24,13 @@ from fastapi import (
     Response,
 )
 
+from anomaly_detection import drift
 from anomaly_detection.database import insert_online_predictions
+from anomaly_detection.logging_config import configure_logging
 from anomaly_detection.metrics import (
-    ACTIVE_MODEL_VERSION,
     observe_prediction_latency_ms,
     prometheus_content_type,
+    publish_latest_drift,
     record_anomaly_detected,
     record_model_reload,
     record_model_rollback,
@@ -36,11 +39,12 @@ from anomaly_detection.metrics import (
     record_prediction_persist_failure,
     record_prediction_request,
     render_prometheus_metrics,
-    set_active_model_version,
+    replace_active_model_version,
 )
 from anomaly_detection.online_inference import (
     OnlineInferenceError,
     OnlineInferenceService,
+    OnlinePredictionRecord,
     model_info_to_dict,
     prediction_to_dict,
 )
@@ -113,6 +117,73 @@ def require_admin_token(
 admin_router = APIRouter(prefix="/admin", dependencies=[Depends(require_admin_token)])
 
 
+class DriftStatusCache:
+    """Latest drift run per segment of the served model version, held in memory.
+
+    Refreshed when a model is swapped in and on every pointer poll (database
+    mode), never per request. Postgres when the database is configured, else the
+    JSONL drift events. A failed refresh keeps the previous result for the same
+    model version.
+    """
+
+    def __init__(self) -> None:
+        self.model_name: str | None = None
+        self.model_version: str | None = None
+        self.summaries: dict[str | None, drift.SegmentDriftSummary] = {}
+        self._refresh_failing = False
+
+    def status_for(self, entity_type: str | None) -> str:
+        """normal | warning | critical of the request's segment, else not_evaluated."""
+
+        summaries = self.summaries
+        summary = summaries.get(entity_type) or summaries.get(None)
+        return summary.drift_status if summary is not None else drift.NOT_EVALUATED
+
+    def refresh(self, *, model_name: str, model_version: str) -> None:
+        try:
+            if database_enabled():
+                summaries = drift.read_latest_drift_database(
+                    model_name=model_name, model_version=model_version
+                )
+            else:
+                summaries = drift.read_latest_drift_jsonl(
+                    drift.DEFAULT_DRIFT_EVENTS_PATH,
+                    model_name=model_name,
+                    model_version=model_version,
+                )
+        except Exception:  # noqa: BLE001 - drift status must never affect serving
+            if not self._refresh_failing:
+                logger.warning(
+                    "Could not read the latest drift result for %s %s; keeping the cached one",
+                    model_name,
+                    model_version,
+                    exc_info=True,
+                )
+                self._refresh_failing = True
+            if (self.model_name, self.model_version) != (model_name, model_version):
+                self.model_name, self.model_version, self.summaries = model_name, model_version, {}
+            return
+        self._refresh_failing = False
+
+        same_model = (self.model_name, self.model_version) == (model_name, model_version)
+        previous = self.summaries if same_model else {}
+        new_runs = {
+            segment
+            for segment, summary in summaries.items()
+            if segment not in previous or previous[segment].detected_at != summary.detected_at
+        }
+        self.model_name, self.model_version, self.summaries = model_name, model_version, summaries
+        publish_latest_drift(model_version=model_version, summaries=summaries, new_runs=new_runs)
+        for segment in sorted(new_runs, key=str):
+            logger.info(
+                "Loaded drift run of %s %s segment=%s: %s",
+                model_name,
+                model_version,
+                segment or "all",
+                summaries[segment].drift_status,
+            )
+
+
 class AppState:
     """Mutable serving state of one API process."""
 
@@ -121,6 +192,17 @@ class AppState:
         self.pointer_source: str = POINTER_SOURCE_FILE
         self.pointer_version: int | None = None
         self.poller: PointerPoller | None = None
+        self.drift_cache = DriftStatusCache()
+
+
+def refresh_drift_status(holder: AppState) -> None:
+    """Reload the latest drift result of the served model version into the cache."""
+
+    service = holder.inference_service
+    if service is None:
+        return
+    info = service.active_model_info()
+    holder.drift_cache.refresh(model_name=info.model_name, model_version=info.model_version)
 
 
 def swap_inference_service(
@@ -132,23 +214,15 @@ def swap_inference_service(
 ) -> None:
     """Serve new_service from the next request on (one assignment) and update metrics."""
 
-    previous_service = holder.inference_service
     holder.inference_service = new_service
     holder.pointer_version = pointer_version
     holder.pointer_source = pointer_source
 
     new_info = new_service.active_model_info()
-    if previous_service is not None:
-        previous_info = previous_service.active_model_info()
-        if (previous_info.model_name, previous_info.model_version) != (
-            new_info.model_name,
-            new_info.model_version,
-        ):
-            ACTIVE_MODEL_VERSION.labels(
-                model_name=previous_info.model_name,
-                model_version=previous_info.model_version,
-            ).set(0)
-    set_active_model_version(model_name=new_info.model_name, model_version=new_info.model_version)
+    replace_active_model_version(
+        model_name=new_info.model_name, model_version=new_info.model_version
+    )
+    refresh_drift_status(holder)
 
 
 def load_service_from_shared_pointer() -> tuple[OnlineInferenceService, int]:
@@ -221,6 +295,8 @@ class PointerPoller:
             self._in_outage = False
 
         if version is None or version == self.holder.pointer_version:
+            # Same model: pick up drift runs written since the last poll.
+            refresh_drift_status(self.holder)
             return False
 
         try:
@@ -306,6 +382,12 @@ def persist_online_prediction_evidence(
         _persist_to_sink("postgres", lambda: insert_online_predictions(prediction_records))
 
 
+def with_cached_drift_status(prediction: OnlinePredictionRecord) -> OnlinePredictionRecord:
+    """The prediction with its segment's drift status from the in-memory cache."""
+
+    return replace(prediction, drift_status=state.drift_cache.status_for(prediction.entity_type))
+
+
 def get_inference_service() -> OnlineInferenceService:
     """Return the loaded online inference service."""
 
@@ -321,6 +403,8 @@ def get_inference_service() -> OnlineInferenceService:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Load active production model once during API startup."""
+
+    configure_logging()
 
     if _configured_admin_token() is None:
         logger.warning(
@@ -436,10 +520,12 @@ def predict(request: PredictRequest, background_tasks: BackgroundTasks) -> Predi
     started_at = time.perf_counter()
 
     try:
-        prediction = service.predict(
-            request.feature_payload,
-            entity_id=request.entity_id,
-            entity_type=request.entity_type,
+        prediction = with_cached_drift_status(
+            service.predict(
+                request.feature_payload,
+                entity_id=request.entity_id,
+                entity_type=request.entity_type,
+            )
         )
 
         if prediction.is_anomaly:
@@ -490,10 +576,13 @@ def predict_batch(
     started_at = time.perf_counter()
 
     try:
-        predictions = service.predict_batch(
-            request.feature_payloads,
-            entity_type=request.entity_type,
-        )
+        predictions = [
+            with_cached_drift_status(prediction)
+            for prediction in service.predict_batch(
+                request.feature_payloads,
+                entity_type=request.entity_type,
+            )
+        ]
 
         for prediction in predictions:
             if prediction.is_anomaly:

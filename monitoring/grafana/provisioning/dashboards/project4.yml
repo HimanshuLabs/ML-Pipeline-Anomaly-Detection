@@ -1,0 +1,10 @@
+apiVersion: 1
+
+providers:
+  - name: project4
+    folder: Project 4
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards
