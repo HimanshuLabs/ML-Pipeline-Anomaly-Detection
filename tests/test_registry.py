@@ -788,11 +788,34 @@ def _only_v003_status_and_notes_changed(before, after) -> None:
 
 @pytest.fixture()
 def real_v003_registered() -> None:
+    """The real v003 entry, as the candidate it was before retirement, in the mirror only.
+
+    The real registry has v003 retired since the owner ran the retirement; the
+    per-test mirror is put back to the pre-retirement state so the retirement
+    path is exercised against the real v003 entry and files.
+    """
     from anomaly_detection import registry
+    from anomaly_detection.registry import ModelRegistryEntry, save_model_registry
 
     entries = load_model_registry(registry.DEFAULT_REGISTRY_PATH)
     if not any(entry.model_version == "v003" for entry in entries):
         pytest.skip("v003 is not in the real registry")
+
+    save_model_registry(
+        [
+            ModelRegistryEntry(
+                **{
+                    **entry.to_dict(),
+                    "status": "candidate",
+                    "notes": "Candidate retrained from real_source_20261115T010701Z.",
+                }
+            )
+            if entry.model_version == "v003"
+            else entry
+            for entry in entries
+        ],
+        registry.DEFAULT_REGISTRY_PATH,  # per-test mirror (conftest)
+    )
 
 
 def test_retire_v003_in_file_mode_changes_only_its_status_and_note_and_keeps_files(

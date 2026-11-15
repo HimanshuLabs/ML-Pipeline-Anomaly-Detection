@@ -1432,11 +1432,50 @@ def get_active_model(
     return payload
 
 
-# --- CLI -------------------------------------------------------------------------
+# --- serving check and CLI -----------------------------------------------------------
+
+
+def verify_servable(entry: ModelRegistryEntry) -> None:
+    """Refuse a version the serving code cannot load and score.
+
+    The artifact must load and match its metadata (load_verified_feature_spec);
+    then a serving model is built from a temporary pointer for the version, as
+    the API would build it, and a probe payload is scored for every segment
+    (single models: once). Nothing is written to the registry or the pointer.
+    """
+
+    load_verified_feature_spec(entry)
+
+    from tempfile import TemporaryDirectory
+
+    from anomaly_detection.online_inference import OnlineInferenceService
+
+    as_active = ModelRegistryEntry(
+        **{**entry.to_dict(), "status": ModelStatus.PRODUCTION.value, "approved_for_prod": True}
+    )
+    with TemporaryDirectory(prefix="project4_promote_candidate_") as candidate_dir:
+        pointer_path = Path(candidate_dir) / "active_model.yaml"
+        try:
+            write_active_model_pointer(entry=as_active, active_model_path=pointer_path)
+            service = OnlineInferenceService(active_model_path=pointer_path)
+            probes = service.segments or {"user": service.feature_names}
+            for entity_type, feature_names in probes.items():
+                service.predict({name: 0.0 for name in feature_names}, entity_type=entity_type)
+        except Exception as exc:  # noqa: BLE001 - any failure means serving cannot score it
+            raise RegistryError(
+                f"{entry.model_name} {entry.model_version} cannot be served: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """python -m anomaly_detection.registry retire --model-version v003 --notes "..." """
+    """Registry tools.
+
+    python -m anomaly_detection.registry retire --model-version v003 --notes "..."
+    python -m anomaly_detection.registry promote --model-version v004
+
+    Postgres when PROJECT4_POSTGRES_* is configured (with the file mirror), else files.
+    """
 
     import argparse
     import sys
@@ -1450,15 +1489,43 @@ def main(argv: Sequence[str] | None = None) -> int:
     retire.add_argument("--model-version", required=True)
     retire.add_argument("--notes", required=True)
     retire.add_argument("--model-name", default=None, help="Default: model_config.yaml.")
+    promote = commands.add_parser(
+        "promote",
+        help="Make a registered version the active production model after a serving check.",
+    )
+    promote.add_argument("--model-version", required=True)
+    promote.add_argument("--notes", default=None)
+    promote.add_argument("--model-name", default=None, help="Default: model_config.yaml.")
     args = parser.parse_args(argv)
 
     model_name = args.model_name or default_model_name()
     try:
-        entry = retire_model_version(
-            model_name=model_name,
-            model_version=args.model_version,
-            notes=args.notes,
-        )
+        if args.command == "retire":
+            entry = retire_model_version(
+                model_name=model_name,
+                model_version=args.model_version,
+                notes=args.notes,
+            )
+        else:
+            before = load_registry_state(model_name=model_name)
+            candidate = next(
+                (
+                    item
+                    for item in before.entries
+                    if item.model_name == model_name and item.model_version == args.model_version
+                ),
+                None,
+            )
+            if candidate is None:
+                raise RegistryError(
+                    f"Model version not registered: {model_name} {args.model_version}"
+                )
+            verify_servable(candidate)
+            entry = promote_model_version(
+                model_name=model_name,
+                model_version=args.model_version,
+                notes=args.notes,
+            )
         state = load_registry_state(model_name=model_name)
     except RegistryError as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)
@@ -1466,7 +1533,10 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     print(f"OK: {entry.model_name} {entry.model_version} status={entry.status}")
     print(f"notes={entry.notes}")
-    print(f"registry={state.source} active_model_version={state.active_model_version}")
+    print(
+        f"registry={state.source} active_model_version={state.active_model_version} "
+        f"pointer_version={state.pointer_version}"
+    )
     return 0
 
 
