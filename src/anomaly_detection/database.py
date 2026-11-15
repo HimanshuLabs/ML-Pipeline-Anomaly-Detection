@@ -297,6 +297,12 @@ def configure_project5_reader(connection: Connection, password: str | None) -> s
         connection.exec_driver_sql(f"ALTER ROLE {role} WITH NOLOGIN")
         status = f"role {role}: NOLOGIN ({ENV_P5_READER_PASSWORD} is not set)"
 
+    # Explicit CONNECT: the role keeps connecting after sql/restrict_project4_ml_connect.sql
+    # revokes CONNECT from PUBLIC (also on a fresh database or a re-created role).
+    connection.exec_driver_sql(
+        "DO $$ BEGIN EXECUTE 'GRANT CONNECT ON DATABASE ' "
+        f"|| quote_ident(current_database()) || ' TO {role}'; END $$"
+    )
     for schema in PROJECT4_SCHEMAS:
         connection.exec_driver_sql(f"REVOKE ALL ON ALL TABLES IN SCHEMA {schema} FROM {role}")
         connection.exec_driver_sql(f"REVOKE ALL ON SCHEMA {schema} FROM {role}")
