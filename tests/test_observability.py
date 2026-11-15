@@ -332,19 +332,26 @@ def test_drift_gauges_follow_the_cached_latest_run(
 
 
 def _emitted_metric_names() -> set[str]:
-    from prometheus_client import REGISTRY
+    """Every series name the metrics defined in anomaly_detection/metrics.py expose."""
+    from prometheus_client.metrics import MetricWrapperBase
 
-    import api.main  # noqa: F401 - registers every metric the API process emits
+    from anomaly_detection import metrics
 
     names: set[str] = set()
-    for metric in REGISTRY.collect():
-        names.add(metric.name)
-        if metric.type == "counter":
-            names.update({f"{metric.name}_total", f"{metric.name}_created"})
-        if metric.type == "histogram":
-            names.update(f"{metric.name}{suffix}" for suffix in ("_bucket", "_sum", "_count"))
+    for value in vars(metrics).values():
+        if not isinstance(value, MetricWrapperBase):
+            continue
+        for metric in value.describe():
+            names.add(metric.name)
+            if metric.type == "counter":
+                names.update({f"{metric.name}_total", f"{metric.name}_created"})
+            if metric.type == "histogram":
+                names.update(f"{metric.name}{suffix}" for suffix in ("_bucket", "_sum", "_count"))
     return names
 
+
+# Series Prometheus itself creates (alert state), allowed in dashboards.
+PROMETHEUS_SERIES = {"ALERTS"}
 
 PROMQL_WORDS = {
     "sum", "max", "min", "avg", "count", "rate", "irate", "increase", "round", "by",
@@ -365,30 +372,286 @@ def _queried_metric_names(expr: str) -> set[str]:
     }
 
 
+DASHBOARDS = MONITORING / "grafana" / "dashboards"
+
+
+def _dashboards() -> dict[str, dict]:
+    return {
+        path.name: json.loads(path.read_text(encoding="utf-8"))
+        for path in sorted(DASHBOARDS.glob("*.json"))
+    }
+
+
+def _panels() -> list[tuple[str, dict]]:
+    return [(name, panel) for name, board in _dashboards().items() for panel in board["panels"]]
+
+
+def _exprs(panel: dict) -> list[str]:
+    return [target["expr"] for target in panel.get("targets", []) if "expr" in target]
+
+
+def _alert_rules() -> dict[str, dict]:
+    rules = yaml.safe_load((MONITORING / "alert_rules.yml").read_text(encoding="utf-8"))
+    return {rule["alert"]: rule for group in rules["groups"] for rule in group["rules"]}
+
+
 def _monitoring_expressions() -> list[tuple[str, str]]:
-    expressions: list[tuple[str, str]] = []
-    for path in sorted((MONITORING / "grafana" / "dashboards").glob("*.json")):
-        text = path.read_text(encoding="utf-8")
-        expressions += [(path.name, expr) for expr in re.findall(r'"expr":\s*"([^"]*)"', text)]
-    for path in sorted(MONITORING.glob("*rules*.yml")):
-        rules = yaml.safe_load(path.read_text(encoding="utf-8"))
-        for group in rules["groups"]:
-            expressions += [(path.name, rule["expr"]) for rule in group["rules"]]
+    expressions = [(name, expr) for name, panel in _panels() for expr in _exprs(panel)]
+    expressions += [("alert_rules.yml", rule["expr"]) for rule in _alert_rules().values()]
     return expressions
 
 
-def test_every_metric_in_dashboards_and_alert_rules_is_emitted() -> None:
-    emitted = _emitted_metric_names()
+def test_monitoring_expressions_are_parsed_whole() -> None:
     expressions = _monitoring_expressions()
 
+    assert any(name.endswith(".json") for name, _ in expressions)
     assert any(name.endswith("rules.yml") for name, _ in expressions)
+    for source, expr in expressions:
+        assert expr.count("(") == expr.count(")"), (source, expr)
+        assert expr.count("{") == expr.count("}"), (source, expr)
+
+
+def test_every_metric_in_dashboards_and_alert_rules_is_defined_in_metrics_py() -> None:
+    emitted = _emitted_metric_names() | PROMETHEUS_SERIES
     missing = {
         (source, name)
-        for source, expr in expressions
+        for source, expr in _monitoring_expressions()
         for name in _queried_metric_names(expr)
         if name not in emitted
     }
     assert not missing
+
+
+# --- dashboard guards ------------------------------------------------------------------
+
+# Taken from `git show HEAD:monitoring/grafana/dashboards/<file>` before stage 14a; links
+# and bookmarks depend on these.
+HEAD_DASHBOARD_IDENTITY = {
+    "anomaly_detection_dashboard.json": (
+        "project4-anomaly-monitoring",
+        "Project 4 — ML Anomaly Detection Monitoring",
+        set(range(1, 17)),
+    ),
+    "anomaly_detection_executive_dashboard.json": (
+        "project4-executive-ml-health",
+        "Project 4 — Executive ML Health Dashboard",
+        set(range(1, 15)),
+    ),
+}
+SPARSE_COUNTERS = ("drift_detected_total", "model_rollback_total", "prediction_errors_total")
+COUNT_METRICS = (
+    "prediction_requests_total",
+    "anomalies_detected_total",
+    "model_rollback_total",
+    "drift_detected_total",
+)
+
+
+def _steps(panel: dict) -> list[dict]:
+    return panel["fieldConfig"]["defaults"].get("thresholds", {}).get("steps", [])
+
+
+def _stats() -> list[tuple[str, dict]]:
+    return [(name, panel) for name, panel in _panels() if panel["type"] == "stat"]
+
+
+def test_dashboard_uids_titles_and_panel_ids_are_unchanged() -> None:
+    import shutil
+    import subprocess
+
+    boards = _dashboards()
+    assert set(boards) == set(HEAD_DASHBOARD_IDENTITY)
+    for name, (uid, title, panel_ids) in HEAD_DASHBOARD_IDENTITY.items():
+        ids = [panel["id"] for panel in boards[name]["panels"]]
+        assert (boards[name]["uid"], boards[name]["title"]) == (uid, title)
+        assert panel_ids <= set(ids) and len(ids) == len(set(ids)), name
+
+        if shutil.which("git"):  # also compare with HEAD where git exists (not in the image)
+            head = json.loads(subprocess.run(
+                ["git", "show", f"HEAD:monitoring/grafana/dashboards/{name}"],
+                cwd=REPO_ROOT, capture_output=True, text=True, check=True,
+            ).stdout)
+            assert (head["uid"], head["title"]) == (uid, title)
+            assert {panel["id"] for panel in head["panels"]} <= set(ids)
+
+
+def test_dashboards_have_no_outdated_checkpoint_wording() -> None:
+    for path in DASHBOARDS.glob("*.json"):
+        text = path.read_text(encoding="utf-8").lower()
+        assert "checkpoint" not in text, path.name
+        assert "becomes active after rollback" not in text, path.name
+        assert "once rollback controls" not in text, path.name
+
+
+def test_sparse_counter_and_alert_stats_show_zero_instead_of_no_data() -> None:
+    checked = 0
+    for name, panel in _stats():
+        for expr in _exprs(panel):
+            if any(metric in expr for metric in (*SPARSE_COUNTERS, "ALERTS")):
+                checked += 1
+                assert expr.replace(" ", "").endswith("orvector(0)"), (name, panel["title"])
+    assert checked >= 6
+
+
+def test_count_stats_use_one_neutral_colour_and_error_counts_go_red_at_one() -> None:
+    counts, errors = 0, 0
+    for name, panel in _stats():
+        exprs = " ".join(_exprs(panel))
+        if "/" in exprs or "histogram_quantile" in exprs:
+            continue
+        if "prediction_errors_total" in exprs or "ALERTS" in exprs:
+            errors += 1
+            colours = [(step["color"], step["value"]) for step in _steps(panel)]
+            assert colours == [("green", None), ("red", 1)], (name, panel["title"])
+        elif any(metric in exprs for metric in COUNT_METRICS):
+            counts += 1
+            assert len(_steps(panel)) == 1, (name, panel["title"])
+            assert _steps(panel)[0]["color"] not in {"red", "yellow", "green"}
+            assert panel["fieldConfig"]["defaults"]["color"]["mode"] == "fixed"
+    assert counts >= 8 and errors >= 3
+
+
+def _main_panel(panel_id: int) -> dict:
+    board = _dashboards()["anomaly_detection_dashboard.json"]
+    return next(panel for panel in board["panels"] if panel["id"] == panel_id)
+
+
+def test_delta_tables_are_instant_tables_merged_with_drift_status() -> None:
+    tables = [_main_panel(9)]
+    assert tables[0]["title"] == "Feature drift detail"
+    for panel in tables:
+        assert panel["type"] == "table"
+        assert all(t["instant"] is True and t["format"] == "table" for t in panel["targets"])
+        exprs = " ".join(_exprs(panel))
+        for metric in ("feature_mean_delta", "feature_variance_delta", "feature_drift_status"):
+            assert metric in exprs
+        kinds = [transformation["id"] for transformation in panel["transformations"]]
+        assert kinds[0] == "merge" and "organize" in kinds and "sortBy" in kinds
+        organize = next(t for t in panel["transformations"] if t["id"] == "organize")
+        hidden = organize["options"]["excludeByName"]
+        assert all(hidden.get(column) for column in ("Time", "__name__", "job", "instance"))
+        renamed = organize["options"]["renameByName"]
+        assert set(renamed.values()) >= {
+            "segment", "feature", "status", "mean delta", "variance delta"
+        }
+        sort = next(t for t in panel["transformations"] if t["id"] == "sortBy")
+        assert sort["options"]["sort"][0] == {"field": "status", "desc": True}
+        assert "own units" in panel["description"]
+
+
+def test_drifting_features_by_segment_is_an_instant_bargauge() -> None:
+    panel = _main_panel(10)
+
+    assert panel["title"] == "Drifting features by segment"
+    assert panel["type"] == "bargauge"
+    assert _exprs(panel) == ["sum by (segment) (feature_drift_status >= bool 1)"]
+    assert panel["targets"][0]["legendFormat"] == "{{segment}}"
+    assert all(t.get("instant") is True for t in panel["targets"])
+    assert "transformations" not in panel
+    defaults = panel["fieldConfig"]["defaults"]
+    assert defaults["min"] == 0
+    assert [(s["color"], s["value"]) for s in _steps(panel)] == [
+        ("green", None), ("yellow", 1), ("red", 5)
+    ]
+    assert panel["description"] == (
+        "Count of features at warning or critical in the latest drift run, per segment. "
+        "0 = all normal."
+    )
+
+
+def test_anomaly_rate_panels_show_idle_without_scored_predictions() -> None:
+    rates = [panel for _, panel in _panels() if panel["title"].lower().startswith("anomaly rate")]
+    stats = [panel for panel in rates if panel["type"] == "stat"]
+    assert len(rates) == 4 and len(stats) == 2
+    for panel in rates:
+        assert panel["fieldConfig"]["defaults"]["noValue"] == "idle", panel["title"]
+    for panel in stats:
+        (expr,) = _exprs(panel)
+        window = re.search(r"predictions_scored_total\[(\w+)\]", expr).group(1)
+        guard = f"and on() (sum(increase(predictions_scored_total[{window}])) > 0)"
+        assert expr.endswith(guard), panel["title"]
+        # Traffic without any anomaly yet is 0 %, not idle.
+        assert f"(sum(increase(anomalies_detected_total[{window}])) or vector(0))" in expr
+    for panel in (panel for panel in rates if panel["type"] == "timeseries"):
+        (expr,) = _exprs(panel)
+        assert expr == (
+            "((sum(rate(anomalies_detected_total[5m])) or vector(0)) / "
+            "clamp_min(sum(rate(predictions_scored_total[5m])), 0.001)) * 100"
+            " and on() (sum(rate(predictions_scored_total[5m])) > 0)"
+        ), panel["title"]
+
+
+def test_active_model_stats_show_the_version_label_without_sparkline_or_thresholds() -> None:
+    markers = [
+        panel for _, panel in _stats() if "active_model_version" in " ".join(_exprs(panel))
+    ]
+    assert len(markers) == 2
+    for panel in markers:
+        assert panel["options"]["textMode"] == "name"
+        assert panel["options"]["graphMode"] == "none"
+        assert "thresholds" not in panel["fieldConfig"]["defaults"]
+        assert all(t.get("instant") is True for t in panel["targets"])
+
+
+def test_anomaly_rate_panels_divide_by_scored_predictions_with_contamination_thresholds() -> None:
+    rates = [panel for _, panel in _panels() if panel["title"].lower().startswith("anomaly rate")]
+    assert len(rates) == 4
+    for panel in rates:
+        (expr,) = _exprs(panel)
+        assert "anomalies_detected_total" in expr and "predictions_scored_total" in expr
+        assert "prediction_requests_total" not in expr and "endpoint" not in expr
+        assert [(s["color"], s["value"]) for s in _steps(panel)] == [
+            ("green", None), ("yellow", 7.5), ("red", 10)
+        ]
+        assert "contamination" in panel["description"]
+        assert "configs/model_config.yaml" in panel["description"]
+
+
+def test_latency_panels_use_single_predictions_and_p95_stats_show_idle() -> None:
+    latency = [
+        panel for _, panel in _panels() if "histogram_quantile" in " ".join(_exprs(panel))
+    ]
+    for panel in latency:
+        for expr in _exprs(panel):
+            assert 'endpoint="/predict' in expr, panel["title"]
+        if panel["type"] == "stat":
+            assert all(t.get("instant") is True for t in panel["targets"])
+            assert panel["fieldConfig"]["defaults"]["noValue"] == "idle"
+            for expr in _exprs(panel):
+                assert "and on()" in expr and "> 0" in expr
+        else:
+            custom = panel["fieldConfig"]["defaults"]["custom"]
+            assert custom["thresholdsStyle"]["mode"].startswith("dashed")
+            assert (200 in [s["value"] for s in _steps(panel)])
+    batch = [
+        expr for _, panel in _panels() for expr in _exprs(panel)
+        if 'endpoint="/predict/batch"' in expr
+    ]
+    assert len(batch) == 1 and "0.95" in batch[0]
+    assert any(panel["type"] == "stat" for panel in latency)
+
+
+def test_drift_panels_read_the_drift_status_gauge() -> None:
+    by_title = {panel["title"]: panel for _, panel in _panels()}
+    trend = by_title["Drift signal trend"]
+    by_feature = by_title["Drift events by feature"]
+
+    assert _exprs(trend) == ["max by (segment) (feature_drift_status)"]
+    assert _exprs(by_feature) == ["max by (segment, feature_name) (feature_drift_status) > 0"]
+    assert by_feature["fieldConfig"]["defaults"]["noValue"] == "No drifting features"
+    for panel in (trend, by_feature):
+        mapping = panel["fieldConfig"]["defaults"]["mappings"][0]["options"]
+        assert {key: value["text"] for key, value in mapping.items()} == {
+            "0": "normal", "1": "warning", "2": "critical"
+        }
+
+
+def test_latency_alert_covers_single_predictions_only() -> None:
+    rule = _alert_rules()["Project4LatencyBudgetBreach"]
+
+    assert 'endpoint="/predict"' in rule["expr"]
+    assert "> 200" in rule["expr"]
+    assert "single prediction" in rule["annotations"]["description"]
 
 
 def test_prometheus_scrapes_the_api_over_the_compose_network_and_loads_rules() -> None:
@@ -437,3 +700,12 @@ def test_compose_monitoring_services_are_pinned_local_and_take_the_password_from
     compose_text = (REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     assert "admin/admin" not in compose_text
     assert "PROJECT4_GRAFANA_ADMIN_PASSWORD=" in (REPO_ROOT / ".env.example").read_text()
+
+
+def test_compose_sets_the_grafana_root_url_to_port_3004() -> None:
+    compose = yaml.safe_load((REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
+    root_url = compose["services"]["grafana"]["environment"]["GF_SERVER_ROOT_URL"]
+
+    assert root_url == "${PROJECT4_GRAFANA_ROOT_URL:-http://127.0.0.1:3004/}"
+    env_example = (REPO_ROOT / ".env.example").read_text(encoding="utf-8")
+    assert "PROJECT4_GRAFANA_ROOT_URL=http://127.0.0.1:3004/" in env_example.splitlines()

@@ -6,6 +6,7 @@ active model visibility, and rollback evidence.
 Metric names intentionally match the Project 4 monitoring contract:
 
 - prediction_requests_total
+- predictions_scored_total
 - prediction_errors_total
 - anomalies_detected_total
 - prediction_latency_ms
@@ -49,28 +50,32 @@ ANOMALIES_DETECTED_TOTAL = Counter(
     ["endpoint", "model_version"],
 )
 
+PREDICTIONS_SCORED_TOTAL = Counter(
+    "predictions_scored_total",
+    "Rows scored successfully (1 per /predict call, N per /predict/batch call of N rows).",
+    ["endpoint", "model_version"],
+)
+
+# 5 ms steps up to 100 ms and 10 ms steps up to 200 ms, so p50/p95 interpolate within
+# narrow buckets; 200 ms (the p95 budget the alert rule checks) stays a bucket edge.
+LATENCY_BUCKETS_MS = (
+    *range(5, 101, 5),
+    *range(110, 201, 10),
+    250,
+    300,
+    400,
+    500,
+    750,
+    1000,
+    2500,
+    5000,
+)
+
 PREDICTION_LATENCY_MS = Histogram(
     "prediction_latency_ms",
     "Prediction latency in milliseconds.",
     ["endpoint", "model_version"],
-    buckets=(
-        1,
-        2.5,
-        5,
-        10,
-        25,
-        50,
-        75,
-        100,
-        150,
-        200,
-        300,
-        500,
-        750,
-        1000,
-        2500,
-        5000,
-    ),
+    buckets=LATENCY_BUCKETS_MS,
 )
 
 # Segment label of a single (unsegmented) model's drift.
@@ -239,6 +244,20 @@ def record_anomaly_detected(
         endpoint=_clean_label(endpoint),
         model_version=_clean_label(model_version),
     ).inc()
+
+
+def record_predictions_scored(
+    *,
+    endpoint: str,
+    model_version: str | None,
+    count: int,
+) -> None:
+    """Count rows scored successfully by one request."""
+
+    PREDICTIONS_SCORED_TOTAL.labels(
+        endpoint=_clean_label(endpoint),
+        model_version=_clean_label(model_version),
+    ).inc(count)
 
 
 def observe_prediction_latency_ms(
