@@ -40,6 +40,7 @@ from anomaly_detection.registry import (
     load_registry_state,
     load_verified_feature_spec,
     materialize_active_pointer,
+    project_relative_path,
     restore_database_change,
     restore_registry_state,
     save_model_registry,
@@ -410,8 +411,9 @@ def rollback_active_model(
         triggered_at_utc=_utc_now(),
         validation_status="dry_run_validated" if dry_run else "applied",
         dry_run=dry_run,
-        active_model_path=str(active_model_path),
-        rollback_event_path=None if dry_run else str(rollback_events_path),
+        # Repo-relative inside the repository (JSONL and audit.rollback_events alike).
+        active_model_path=project_relative_path(active_model_path),
+        rollback_event_path=None if dry_run else project_relative_path(rollback_events_path),
     )
 
     updated_entries, target_entry = _committed_entries(

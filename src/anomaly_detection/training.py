@@ -35,7 +35,11 @@ from anomaly_detection.evaluation import (
     calculate_feature_baseline_stats,
 )
 from anomaly_detection.feature_validation import get_model_feature_matrix
-from anomaly_detection.registry import DEFAULT_REGISTRY_PATH, load_model_registry
+from anomaly_detection.registry import (
+    DEFAULT_REGISTRY_PATH,
+    load_model_registry,
+    project_relative_path,
+)
 from anomaly_detection.segmented_model import (
     SEGMENTED_MODEL_KIND,
     SINGLE_MODEL_KIND,
@@ -695,11 +699,12 @@ def train_isolation_forest_from_snapshot(
         model_name=config.model_name,
         model_version=resolved_model_version,
         algorithm=config.algorithm,
-        artifact_dir=str(artifact_dir),
-        model_path=str(model_path),
-        metadata_path=str(metadata_path),
-        feature_schema_path=str(feature_schema_path),
-        baseline_stats_path=str(baseline_stats_path),
+        # Repo-relative inside the repository, absolute for a bundle outside it.
+        artifact_dir=project_relative_path(artifact_dir),
+        model_path=project_relative_path(model_path),
+        metadata_path=project_relative_path(metadata_path),
+        feature_schema_path=project_relative_path(feature_schema_path),
+        baseline_stats_path=project_relative_path(baseline_stats_path),
         feature_schema_version=feature_schema_version,
         feature_names=feature_names,
         row_count=int(len(feature_matrix)),

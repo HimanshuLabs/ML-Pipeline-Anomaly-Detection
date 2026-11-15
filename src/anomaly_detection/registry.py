@@ -233,13 +233,70 @@ def _validate_status(status: str) -> None:
         )
 
 
-def _path_exists(path_value: str | None, *, label: str) -> None:
-    if not path_value:
-        raise RegistryError(f"{label} is missing from artifact metadata.")
+BUNDLE_PATH_FIELDS = (
+    "artifact_dir",
+    "model_path",
+    "metadata_path",
+    "feature_schema_path",
+    "baseline_stats_path",
+)
 
-    path = _resolve_registry_path(path_value)
-    if not path.exists():
-        raise RegistryError(f"{label} does not exist: {path}")
+
+def resolve_bundle_path(stored: str | Path | None, *, metadata_path: Path, field: str) -> Path:
+    """Where a path stored in a bundle's metadata.json is, for the bundle being read.
+
+    Bundles store these paths absolute (v001/v002 host paths, v003/v004 /app paths)
+    or, from stage 14c, repo-relative. In order: the stored path (absolute as is,
+    relative under PROJECT_ROOT) when it exists and lies in this bundle's directory;
+    otherwise the file of the same name next to metadata.json (for artifact_dir, the
+    directory holding metadata.json). A stored path into another bundle (a copy's
+    original, still on disk) is never used.
+    """
+    if stored in (None, ""):
+        raise RegistryError(f"{field} is missing from artifact metadata.")
+
+    bundle_dir = metadata_path.resolve().parent
+    path = Path(stored)
+    candidate = path if path.is_absolute() else PROJECT_ROOT / path
+    fallback = bundle_dir if field == "artifact_dir" else bundle_dir / path.name
+
+    def in_bundle(found: Path) -> bool:
+        resolved = found.resolve()
+        return resolved == bundle_dir if field == "artifact_dir" else resolved.parent == bundle_dir
+
+    if candidate.exists() and in_bundle(candidate):
+        return candidate
+    if fallback.exists():
+        return fallback
+    raise RegistryError(f"{field} does not exist: {stored} (nor {fallback})")
+
+
+def read_bundle_paths(
+    metadata_path: str | Path,
+    artifact_metadata: dict[str, Any] | None = None,
+) -> dict[str, Path]:
+    """The five bundle paths of a metadata.json, each resolved by resolve_bundle_path.
+
+    A relative metadata_path is taken under PROJECT_ROOT, like every registry path.
+    """
+    metadata_file = _resolve_registry_path(metadata_path)
+    metadata = _read_json(metadata_file) if artifact_metadata is None else artifact_metadata
+    return {
+        field: resolve_bundle_path(metadata.get(field), metadata_path=metadata_file, field=field)
+        for field in BUNDLE_PATH_FIELDS
+    }
+
+
+def project_relative_path(path_value: str | Path) -> str:
+    """Repo-relative when the path is inside PROJECT_ROOT, else absolute."""
+
+    return _to_registry_path(str(path_value))
+
+
+def resolve_project_path(path_value: str | Path) -> Path:
+    """A stored path as an absolute path: relative ones are under PROJECT_ROOT."""
+
+    return _resolve_registry_path(path_value)
 
 
 def _to_registry_path(path_value: str) -> str:
@@ -352,6 +409,7 @@ def _extract_training_dataset_id(training_snapshot_metadata: dict[str, Any]) -> 
 def _build_entry_from_artifact_metadata(
     *,
     artifact_metadata: dict[str, Any],
+    bundle_paths: dict[str, Path],
     baseline_stats: dict[str, Any],
     status: str,
     approved_for_prod: bool,
@@ -367,11 +425,11 @@ def _build_entry_from_artifact_metadata(
         model_name=model_name,
         model_version=model_version,
         algorithm=str(artifact_metadata["algorithm"]),
-        artifact_path=_to_registry_path(str(artifact_metadata["model_path"])),
-        artifact_dir=_to_registry_path(str(artifact_metadata["artifact_dir"])),
-        metadata_path=_to_registry_path(str(artifact_metadata["metadata_path"])),
-        feature_schema_path=_to_registry_path(str(artifact_metadata["feature_schema_path"])),
-        baseline_stats_path=_to_registry_path(str(artifact_metadata["baseline_stats_path"])),
+        artifact_path=project_relative_path(bundle_paths["model_path"]),
+        artifact_dir=project_relative_path(bundle_paths["artifact_dir"]),
+        metadata_path=project_relative_path(bundle_paths["metadata_path"]),
+        feature_schema_path=project_relative_path(bundle_paths["feature_schema_path"]),
+        baseline_stats_path=project_relative_path(bundle_paths["baseline_stats_path"]),
         snapshot_id=_extract_snapshot_id(training_snapshot_metadata),
         training_dataset_id=_extract_training_dataset_id(training_snapshot_metadata),
         feature_schema_version=str(artifact_metadata["feature_schema_version"]),
@@ -954,7 +1012,7 @@ def register_model_from_artifacts(
             "approved_for_prod=True is only valid when status='production'."
         )
 
-    artifact_metadata = _read_json(metadata_path)
+    artifact_metadata = _read_json(_resolve_registry_path(metadata_path))
 
     required_metadata_fields = [
         "model_name",
@@ -976,14 +1034,12 @@ def register_model_from_artifacts(
     if missing_fields:
         raise RegistryError(f"Artifact metadata missing fields: {missing_fields}")
 
-    _path_exists(artifact_metadata.get("model_path"), label="model_path")
-    _path_exists(artifact_metadata.get("feature_schema_path"), label="feature_schema_path")
-    _path_exists(artifact_metadata.get("baseline_stats_path"), label="baseline_stats_path")
-
-    baseline_stats = _read_json(_resolve_registry_path(artifact_metadata["baseline_stats_path"]))
+    bundle_paths = read_bundle_paths(metadata_path, artifact_metadata)
+    baseline_stats = _read_json(bundle_paths["baseline_stats_path"])
 
     entry = _build_entry_from_artifact_metadata(
         artifact_metadata=artifact_metadata,
+        bundle_paths=bundle_paths,
         baseline_stats=baseline_stats,
         status=status,
         approved_for_prod=approved_for_prod,
