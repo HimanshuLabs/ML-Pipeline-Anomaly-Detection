@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import stat
 import uuid
 from collections.abc import Callable, Mapping, Sequence
@@ -478,8 +479,14 @@ def snapshot_registry_state(
 
 
 def restore_registry_state(snapshot: RegistryStateSnapshot) -> None:
-    """Put the registry file and active pointer back to their snapshotted bytes."""
+    """Put the registry file and active pointer back to their snapshotted bytes.
 
+    Skipped in database mode with the file mirror off: the files were never written,
+    and restoring them on a read-only filesystem would hide the original error.
+    """
+
+    if not file_mirror_enabled() and database_enabled():
+        return
     for path, data in (
         (snapshot.registry_path, snapshot.registry_bytes),
         (snapshot.active_model_path, snapshot.pointer_bytes),
@@ -536,6 +543,20 @@ def database_enabled() -> bool:
     """True when the PROJECT4_POSTGRES_* settings are configured."""
 
     return bool(_database().is_configured())
+
+
+FILE_MIRROR_ENV = "PROJECT4_REGISTRY_FILE_MIRROR"
+
+
+def file_mirror_enabled() -> bool:
+    """PROJECT4_REGISTRY_FILE_MIRROR: on unless set to false/0/no/off.
+
+    Only database mode consults it (the JSON/YAML mirror of the database registry);
+    in file mode the files are the store. Off for a read-only root filesystem.
+    """
+
+    value = os.environ.get(FILE_MIRROR_ENV, "").strip().lower()
+    return value not in {"false", "0", "no", "off"}
 
 
 def default_model_name(model_config_path: str | Path = DEFAULT_MODEL_CONFIG_PATH) -> str:
@@ -646,6 +667,12 @@ def _write_file_mirror(
 ) -> None:
     """Write the JSON/YAML mirror after a committed database change; never raises."""
 
+    if not file_mirror_enabled():
+        LOGGER.info(
+            "Registry file mirror is off (%s=false); the database change is not mirrored",
+            FILE_MIRROR_ENV,
+        )
+        return
     try:
         save_model_registry(entries, registry_path)
         if pointer_entry is not None:

@@ -219,7 +219,8 @@ Who connects to the `anomaly-postgres` instance (127.0.0.1:5435), and as what:
 
 | Who | Role | Database | Rights |
 |---|---|---|---|
-| Project 4 API, CLIs and drift job | `manshu` (the instance owner, a superuser) | `project4_ml` | everything |
+| Project 4 API, CLIs and drift job (compose) | `manshu` (the instance owner, a superuser) | `project4_ml` | everything |
+| Project 4 API, registry CLI and drift job (Kubernetes) | `project4_app`, created by `apply-schema` | `project4_ml` | CONNECT; USAGE on `ml`, `monitoring`, `audit`; exactly the table privileges they use (`database.APP_TABLE_PRIVILEGES`); no DDL; LOGIN only when `PROJECT4_APP_PASSWORD` is set |
 | Project 5 today | `manshu`, the same owner role | `project4_ml` | everything (to be replaced by `project5_reader`) |
 | Project 5 (intended) | `project5_reader`, created by `apply-schema` | `project4_ml` | CONNECT plus SELECT on the `integration.*` views only; LOGIN only when `PROJECT4_P5_READER_PASSWORD` is set |
 | MLflow server | `project4_mlflow` | `project4_mlflow` only | owner of its own database; cannot connect to `project4_ml` once PUBLIC's CONNECT is revoked |

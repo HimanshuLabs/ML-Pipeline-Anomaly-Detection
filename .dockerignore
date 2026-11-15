@@ -24,7 +24,6 @@ monitoring
 k8s
 tests
 scripts
-sql
 
 *.md
 !README.md
