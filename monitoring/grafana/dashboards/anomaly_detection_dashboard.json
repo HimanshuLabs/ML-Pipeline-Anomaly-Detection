@@ -30,7 +30,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "active_model_version == 1",
+          "expr": "(active_model_version == 1) or on() label_replace(vector(0), \"model_version\", \"no active model\", \"\", \"\")",
           "legendFormat": "{{model_version}}",
           "refId": "A",
           "instant": true,
@@ -40,7 +40,21 @@
       "fieldConfig": {
         "defaults": {
           "unit": "short",
-          "mappings": [],
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "color": "red",
+                  "index": 0
+                },
+                "1": {
+                  "color": "text",
+                  "index": 1
+                }
+              }
+            }
+          ],
           "noValue": "no active model"
         },
         "overrides": []
@@ -55,7 +69,7 @@
         },
         "orientation": "auto",
         "textMode": "name",
-        "colorMode": "none",
+        "colorMode": "value",
         "graphMode": "none",
         "justifyMode": "auto"
       }
@@ -81,7 +95,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "round(sum(increase(prediction_requests_total[5m])))",
+          "expr": "round(sum(increase(prediction_requests_total[5m]))) or vector(0)",
           "legendFormat": "requests (calls)",
           "refId": "A",
           "instant": true,
@@ -118,7 +132,7 @@
         },
         "orientation": "auto",
         "textMode": "auto",
-        "colorMode": "value",
+        "colorMode": "background",
         "graphMode": "none",
         "justifyMode": "auto"
       }
@@ -144,7 +158,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "round(sum(increase(anomalies_detected_total[5m])))",
+          "expr": "round(sum(increase(anomalies_detected_total[5m]))) or vector(0)",
           "legendFormat": "anomalies",
           "refId": "A",
           "instant": true,
@@ -181,7 +195,7 @@
         },
         "orientation": "auto",
         "textMode": "auto",
-        "colorMode": "value",
+        "colorMode": "background",
         "graphMode": "none",
         "justifyMode": "auto"
       }
@@ -249,7 +263,7 @@
         },
         "orientation": "auto",
         "textMode": "auto",
-        "colorMode": "value",
+        "colorMode": "background",
         "graphMode": "none",
         "justifyMode": "auto"
       }
@@ -444,7 +458,9 @@
           "custom": {
             "thresholdsStyle": {
               "mode": "dashed"
-            }
+            },
+            "axisSoftMin": 0,
+            "axisSoftMax": 220
           }
         },
         "overrides": []
@@ -510,7 +526,9 @@
           "custom": {
             "thresholdsStyle": {
               "mode": "dashed"
-            }
+            },
+            "axisSoftMin": 0,
+            "axisSoftMax": 220
           }
         },
         "overrides": []
@@ -538,8 +556,8 @@
       "gridPos": {
         "x": 0,
         "y": 18,
-        "w": 12,
-        "h": 8
+        "w": 24,
+        "h": 10
       },
       "description": "Latest drift run of the active model per segment and feature: drift status (feature_drift_status) and the absolute mean and variance delta from the training baseline. Deltas are in each feature's own units, so compare a feature with itself over time, not features with each other.",
       "targets": [
@@ -598,6 +616,18 @@
           {
             "matcher": {
               "id": "byName",
+              "options": "segment"
+            },
+            "properties": [
+              {
+                "id": "custom.width",
+                "value": 130
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
               "options": "status"
             },
             "properties": [
@@ -631,6 +661,42 @@
                 "value": {
                   "type": "color-background"
                 }
+              },
+              {
+                "id": "custom.width",
+                "value": 110
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "mean delta"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 4
+              },
+              {
+                "id": "custom.width",
+                "value": 170
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "variance delta"
+            },
+            "properties": [
+              {
+                "id": "decimals",
+                "value": 4
+              },
+              {
+                "id": "custom.width",
+                "value": 170
               }
             ]
           }
@@ -685,6 +751,30 @@
             "fields": {},
             "sort": [
               {
+                "field": "feature",
+                "desc": false
+              }
+            ]
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": {},
+            "sort": [
+              {
+                "field": "segment",
+                "desc": false
+              }
+            ]
+          }
+        },
+        {
+          "id": "sortBy",
+          "options": {
+            "fields": {},
+            "sort": [
+              {
                 "field": "status",
                 "desc": true
               }
@@ -702,10 +792,10 @@
         "uid": "${DS_PROMETHEUS}"
       },
       "gridPos": {
-        "x": 12,
-        "y": 18,
-        "w": 12,
-        "h": 8
+        "x": 0,
+        "y": 28,
+        "w": 24,
+        "h": 6
       },
       "description": "Count of features at warning or critical in the latest drift run, per segment. 0 = all normal.",
       "targets": [
@@ -776,7 +866,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 26,
+        "y": 34,
         "w": 6,
         "h": 4
       },
@@ -824,7 +914,7 @@
         },
         "orientation": "auto",
         "textMode": "auto",
-        "colorMode": "value",
+        "colorMode": "background",
         "graphMode": "none",
         "justifyMode": "auto"
       }
@@ -839,7 +929,7 @@
       },
       "gridPos": {
         "x": 6,
-        "y": 26,
+        "y": 34,
         "w": 6,
         "h": 4
       },
@@ -887,7 +977,7 @@
         },
         "orientation": "auto",
         "textMode": "auto",
-        "colorMode": "value",
+        "colorMode": "background",
         "graphMode": "none",
         "justifyMode": "auto"
       }
@@ -902,7 +992,7 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 26,
+        "y": 34,
         "w": 6,
         "h": 4
       },
@@ -950,7 +1040,7 @@
         },
         "orientation": "auto",
         "textMode": "auto",
-        "colorMode": "value",
+        "colorMode": "background",
         "graphMode": "none",
         "justifyMode": "auto"
       }
@@ -965,7 +1055,7 @@
       },
       "gridPos": {
         "x": 18,
-        "y": 26,
+        "y": 34,
         "w": 6,
         "h": 4
       },
@@ -1013,7 +1103,7 @@
         },
         "orientation": "auto",
         "textMode": "auto",
-        "colorMode": "value",
+        "colorMode": "background",
         "graphMode": "none",
         "justifyMode": "auto"
       }
@@ -1028,7 +1118,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 30,
+        "y": 38,
         "w": 12,
         "h": 7
       },
@@ -1121,18 +1211,18 @@
       },
       "gridPos": {
         "x": 12,
-        "y": 30,
+        "y": 38,
         "w": 12,
         "h": 7
       },
-      "description": "Rollbacks per hour by status (a flat 0 when there were none).",
+      "description": "Rollbacks per hour by status.",
       "targets": [
         {
           "datasource": {
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum by (status) (increase(model_rollback_total[1h])) or vector(0)",
+          "expr": "sum by (status) (increase(model_rollback_total[1h]))",
           "legendFormat": "{{status}}",
           "refId": "A"
         }
@@ -1149,7 +1239,8 @@
                 "value": null
               }
             ]
-          }
+          },
+          "noValue": "No rollbacks in range"
         },
         "overrides": []
       },
