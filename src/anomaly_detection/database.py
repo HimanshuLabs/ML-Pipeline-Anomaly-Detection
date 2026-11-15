@@ -863,6 +863,23 @@ def sync_from_files(
     return summary
 
 
+RESTRICT_CONNECT_FILE = "restrict_project4_ml_connect.sql"
+
+
+def restrict_connect(engine: Engine) -> list[tuple[str, bool, bool]]:
+    """Run sql/restrict_project4_ml_connect.sql (plain SQL) on the connected database.
+
+    Grants CONNECT to project5_reader, revokes CONNECT and TEMPORARY from PUBLIC, and
+    returns its final table: (login role, superuser, can connect). Re-runnable.
+    """
+
+    with engine.begin() as connection:
+        result = connection.exec_driver_sql(
+            (SQL_DIR / RESTRICT_CONNECT_FILE).read_text(encoding="utf-8")
+        )
+        return [(str(role), bool(superuser), bool(can)) for role, superuser, can in result]
+
+
 # --- CLI -------------------------------------------------------------------------
 
 
@@ -871,7 +888,15 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     configure_logging()
     parser = argparse.ArgumentParser(description="Project 4 PostgreSQL schema tools.")
-    parser.add_argument("command", choices=["apply-schema", "check", "sync-from-files"])
+    parser.add_argument(
+        "command", choices=["apply-schema", "check", "sync-from-files", "restrict-connect"]
+    )
+    parser.add_argument(
+        "--if-empty",
+        action="store_true",
+        help="sync-from-files only: seed only when the model has no active pointer yet; "
+        "a populated database is never overwritten (the seed job always passes it).",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -895,8 +920,27 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
 
         if args.command == "sync-from-files":
+            if args.if_empty:
+                from anomaly_detection.registry import default_model_name
+
+                model_name = default_model_name()
+                with engine.connect() as connection:
+                    pointer = read_active_pointer(connection, model_name)
+                if pointer is not None:
+                    print(
+                        f"skipped: the database already has an active pointer for {model_name} "
+                        f"({pointer['model_version']}, pointer_version "
+                        f"{pointer['pointer_version']}); nothing was overwritten"
+                    )
+                    return 0
             for key, value in sync_from_files(engine).items():
                 print(f"{key} {value}")
+            return 0
+
+        if args.command == "restrict-connect":
+            print(f"{'role':<24}{'superuser':<11}can_connect")
+            for role, superuser, can_connect in restrict_connect(engine):
+                print(f"{role:<24}{str(superuser).lower():<11}{str(can_connect).lower()}")
             return 0
 
         report = check(engine)

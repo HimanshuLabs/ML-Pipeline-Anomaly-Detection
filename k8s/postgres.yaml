@@ -1,0 +1,129 @@
+# Project 4's database inside the cluster (Kubernetes only; compose keeps its own
+# anomaly-postgres on 127.0.0.1:5435, which nothing in the cluster can reach).
+# Same image and tag as compose's anomaly-postgres. The owner role comes from the secret
+# project4-postgres-owner (created outside git; see secret.example.yaml); the API and the
+# drift job connect as the least-privilege role project4_app instead. The schema, roles
+# and data are created by the one-off seed job (seed-job.yaml).
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: project4-postgres
+  namespace: project4-ml
+  labels:
+    app.kubernetes.io/name: project4-postgres
+    app.kubernetes.io/part-of: project4-ml-platform
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: project4-postgres
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: project4-postgres
+  namespace: project4-ml
+  labels:
+    app.kubernetes.io/name: project4-postgres
+    app.kubernetes.io/part-of: project4-ml-platform
+spec:
+  replicas: 1
+  serviceName: project4-postgres
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: project4-postgres
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: project4-postgres
+        app.kubernetes.io/part-of: project4-ml-platform
+    spec:
+      automountServiceAccountToken: false
+      # uid/gid 999 is the official image's postgres user, so the entrypoint runs
+      # initdb and the server directly (it only switches users when started as root).
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: postgres
+          image: postgres:16.14
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: postgres
+              containerPort: 5432
+              protocol: TCP
+          envFrom:
+            - secretRef:
+                name: project4-postgres-owner
+          env:
+            # A subdirectory of the volume: initdb needs an empty directory it owns, and
+            # the volume root may hold lost+found or the provisioner's own permissions.
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+          readinessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - pg_isready -h 127.0.0.1 -p 5432 -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            exec:
+              command:
+                - sh
+                - -c
+                - pg_isready -h 127.0.0.1 -p 5432 -U "$POSTGRES_USER" -d "$POSTGRES_DB"
+            initialDelaySeconds: 30
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "1"
+              memory: "512Mi"
+          # Writable paths: the data volume, the server's socket directory, /tmp.
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+            - name: run
+              mountPath: /var/run/postgresql
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: run
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app.kubernetes.io/name: project4-postgres
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        # kind's default StorageClass (rancher.io/local-path provisioner).
+        storageClassName: standard
+        resources:
+          requests:
+            storage: 1Gi

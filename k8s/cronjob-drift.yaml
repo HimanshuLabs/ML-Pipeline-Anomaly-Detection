@@ -46,6 +46,9 @@ spec:
                 - batch-predictions
                 - --hours
                 - "24"
+              env:
+                - name: HOME
+                  value: /tmp
               envFrom:
                 - configMapRef:
                     name: project4-anomaly-api-config

@@ -43,6 +43,8 @@ spec:
             - secretRef:
                 name: project4-app-db
           env:
+            - name: HOME
+              value: /tmp
             # Without the secret the pod still starts; /admin/* then returns 503.
             - name: ADMIN_TOKEN
               valueFrom:
