@@ -150,11 +150,12 @@ integration views are unchanged.
 
 ### Tracking server (Postgres backend)
 
-The compose service `mlflow` runs the MLflow server from the API image. Runs are stored
+The compose service `mlflow` runs the MLflow server from the tools image. Runs are stored
 in the dedicated database `project4_mlflow`, owned by the dedicated role
 `project4_mlflow` (no superuser, no database creation, no access for `PUBLIC`), inside
 the `anomaly-postgres` instance. It never uses `project4_ml`. Artifacts are served by the
-server from the `mlflow_artifacts` volume.
+server from the `mlflow_artifacts` volume, mounted at `/var/lib/mlflow` (artifacts in
+`/var/lib/mlflow/mlflow-artifacts`, owned by the image's non-root `app` user).
 
 ### One-time setup
 
@@ -564,7 +565,8 @@ All three install against `constraints.txt` (frozen from the dev image).
 
 The API container runs FastAPI internally on port `8004`.
 
-Docker Compose publishes the API on host port `8014` by default to avoid collision with local `uvicorn` runs on port `8004`.
+Docker Compose publishes the API on `127.0.0.1:8014` by default (host-only, like every
+Project 4 service) to avoid collision with local `uvicorn` runs on port `8004`.
 
 Build the images:
 

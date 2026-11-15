@@ -71,9 +71,12 @@ COPY src /app/src
 COPY configs /app/configs
 COPY artifacts/models /app/artifacts/models
 
+# /var/lib/mlflow: mount point of the mlflow_artifacts volume for the compose MLflow server,
+# owned by app (uid/gid 999) like the volume's existing contents.
 RUN mkdir -p /app/data/features/batch_scoring /app/logs/predictions /app/logs/alerts \
+        /var/lib/mlflow \
     && python -m anomaly_detection.bundle_check --active-model configs/active_model.yaml \
-    && chown -R app:app /app
+    && chown -R app:app /app /var/lib/mlflow
 
 USER app
 
