@@ -28,9 +28,12 @@ groups:
 
       - alert: Project4LatencyBudgetBreach
         expr: >
-          histogram_quantile(0.95, sum(rate(prediction_latency_ms_bucket[5m])) by (le)) > 200
+          histogram_quantile(0.95, sum(rate(prediction_latency_ms_bucket{endpoint="/predict"}[5m])) by (le)) > 200
         for: 10m
         labels:
           severity: warning
         annotations:
-          summary: "Project 4 p95 prediction latency is above the 200 ms budget."
+          summary: "Project 4 p95 /predict latency is above the 200 ms budget."
+          description: >-
+            The 200 ms SLA is per single prediction (/predict). /predict/batch latency
+            grows with batch size; it is shown on the dashboard but not alerted on.

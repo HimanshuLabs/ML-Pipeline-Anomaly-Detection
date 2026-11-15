@@ -38,6 +38,7 @@ from anomaly_detection.metrics import (
     record_prediction_error,
     record_prediction_persist_failure,
     record_prediction_request,
+    record_predictions_scored,
     render_prometheus_metrics,
     replace_active_model_version,
 )
@@ -539,6 +540,11 @@ def predict(request: PredictRequest, background_tasks: BackgroundTasks) -> Predi
             model_version=prediction.model_version,
             status="success",
         )
+        record_predictions_scored(
+            endpoint="/predict",
+            model_version=prediction.model_version,
+            count=1,
+        )
 
         observe_prediction_latency_ms(
             endpoint="/predict",
@@ -595,6 +601,11 @@ def predict_batch(
             endpoint="/predict/batch",
             model_version=model_version,
             status="success",
+        )
+        record_predictions_scored(
+            endpoint="/predict/batch",
+            model_version=model_version,
+            count=len(predictions),
         )
 
         observe_prediction_latency_ms(
