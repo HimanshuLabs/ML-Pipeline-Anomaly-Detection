@@ -38,6 +38,7 @@ from anomaly_detection.registry import (
     RegistryError,
     ensure_database_initialized,
     load_registry_state,
+    read_bundle_paths,
     register_model_from_artifacts,
 )
 from anomaly_detection.segmented_model import SegmentedIsolationForest, score_distribution
@@ -195,7 +196,7 @@ def build_evaluation_report(
         snapshot_frame,
         snapshot_metadata=snapshot_metadata,
     )
-    model = load_trained_model(artifact.model_path)
+    model = load_trained_model(read_bundle_paths(artifact.metadata_path)["model_path"])
     entity_types = snapshot_frame["entity_type"].astype(str).to_numpy()
     # A segmented model routes each row by entity_type to its own segment.
     scoring_input = (
@@ -312,14 +313,15 @@ def retrain(
             snapshot_frame=read_training_snapshot(features_path),
             snapshot_metadata=snapshot_metadata,
         )
-        report_path = Path(artifact.artifact_dir) / EVALUATION_REPORT_NAME
+        bundle_paths = read_bundle_paths(artifact.metadata_path)
+        report_path = bundle_paths["artifact_dir"] / EVALUATION_REPORT_NAME
         with report_path.open("w", encoding="utf-8") as file:
             json.dump(report, file, indent=2, sort_keys=True)
             file.write("\n")
         run.log_evaluation(report=report, report_path=report_path)
 
         entry = register_model_from_artifacts(
-            metadata_path=artifact.metadata_path,
+            metadata_path=bundle_paths["metadata_path"],
             registry_path=registry_path,
             status="candidate",
             approved_for_prod=False,

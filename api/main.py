@@ -57,6 +57,7 @@ from anomaly_detection.registry import (
     database_enabled,
     materialize_active_pointer,
     read_shared_pointer_version,
+    resolve_project_path,
 )
 from anomaly_detection.rollback import (
     RollbackError,
@@ -719,7 +720,12 @@ def rollback_model(request: RollbackRequest | None = None) -> dict[str, Any]:
                 "validation_status": rollback_event.validation_status,
                 "dry_run": rollback_event.dry_run,
                 "active_model_version": active_model_version,
-                "rollback_event_path": rollback_event.rollback_event_path,
+                # Stored repo-relative since 14c; the response keeps the absolute path.
+                "rollback_event_path": (
+                    str(resolve_project_path(rollback_event.rollback_event_path))
+                    if rollback_event.rollback_event_path
+                    else None
+                ),
             }
 
         except (RollbackError, RegistryError) as exc:
