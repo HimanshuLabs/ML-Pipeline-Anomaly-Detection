@@ -32,7 +32,7 @@
     {
       "algorithm": "IsolationForest",
       "approved_for_prod": true,
-      "archived_at_utc": null,
+      "archived_at_utc": "2026-11-15T02:47:07.956862+00:00",
       "artifact_dir": "artifacts/models/isolation_forest/model_version=v002",
       "artifact_path": "artifacts/models/isolation_forest/model_version=v002/model.joblib",
       "baseline_anomaly_rate": 0.05002985074626866,
@@ -52,7 +52,7 @@
       "notes": "Promoted v002 as production after real-source extraction and training from Project 1 + Project 2/3 local PostgreSQL sources.",
       "promoted_at_utc": "2026-06-10T07:01:28.971798+00:00",
       "snapshot_id": "real_source_20260610T060738Z",
-      "status": "production",
+      "status": "archived",
       "threshold_used": null,
       "training_dataset_id": null,
       "training_finished_at_utc": "2026-06-10T06:42:29.755088+00:00",
@@ -89,7 +89,7 @@
     },
     {
       "algorithm": "IsolationForest",
-      "approved_for_prod": false,
+      "approved_for_prod": true,
       "archived_at_utc": null,
       "artifact_dir": "artifacts/models/isolation_forest/model_version=v004",
       "artifact_path": "artifacts/models/isolation_forest/model_version=v004/model.joblib",
@@ -107,10 +107,10 @@
       "model_id": "819e1307-b032-5b99-9af9-18fca2b3fd87",
       "model_name": "isolation_forest",
       "model_version": "v004",
-      "notes": "Candidate retrained from real_source_20261115T010701Z; see evaluation_report.json. Not promoted.",
-      "promoted_at_utc": null,
+      "notes": "Promoted segmented v004 (D5: one IsolationForest per entity type)",
+      "promoted_at_utc": "2026-11-15T02:47:07.956862+00:00",
       "snapshot_id": "real_source_20261115T010701Z",
-      "status": "candidate",
+      "status": "production",
       "threshold_used": null,
       "training_dataset_id": null,
       "training_finished_at_utc": "2026-11-15T02:06:45.795166+00:00",
@@ -118,5 +118,5 @@
     }
   ],
   "registry_backend": "local_json",
-  "updated_at_utc": "2026-11-15T02:06:46.736226+00:00"
+  "updated_at_utc": "2026-11-15T02:47:08.232629+00:00"
 }
