@@ -43,6 +43,7 @@ from anomaly_detection.registry import (
 from anomaly_detection.segmented_model import SegmentedIsolationForest, score_distribution
 from anomaly_detection.source_extract import SEGMENT_FEATURE_COLUMNS
 from anomaly_detection.source_extract import load_config as load_source_extract_config
+from anomaly_detection.tracking import TrackingError, training_run
 from anomaly_detection.training import (
     DEFAULT_MODEL_CONFIG_PATH,
     PROJECT_ROOT,
@@ -292,36 +293,42 @@ def retrain(
         )
 
     features_path = snapshot_dir / "features.parquet"
-    artifact = train_isolation_forest_from_snapshot(
-        features_path=features_path,
-        snapshot_metadata_path=metadata_path,
-        model_version=model_version,
-        config_path=config_path,
-        artifact_root_override=artifact_root,
-        registry_path=registry_path,
-    )
+    # Strict tracking (PROJECT4_MLFLOW_REQUIRED) refuses here, before any file is written.
+    with training_run(
+        entrypoint="retrain", model_version=model_version, model_name=config.model_name
+    ) as run:
+        artifact = train_isolation_forest_from_snapshot(
+            features_path=features_path,
+            snapshot_metadata_path=metadata_path,
+            model_version=model_version,
+            config_path=config_path,
+            artifact_root_override=artifact_root,
+            registry_path=registry_path,
+            training_run=run,
+        )
 
-    report = build_evaluation_report(
-        artifact=artifact,
-        snapshot_frame=read_training_snapshot(features_path),
-        snapshot_metadata=snapshot_metadata,
-    )
-    report_path = Path(artifact.artifact_dir) / EVALUATION_REPORT_NAME
-    with report_path.open("w", encoding="utf-8") as file:
-        json.dump(report, file, indent=2, sort_keys=True)
-        file.write("\n")
+        report = build_evaluation_report(
+            artifact=artifact,
+            snapshot_frame=read_training_snapshot(features_path),
+            snapshot_metadata=snapshot_metadata,
+        )
+        report_path = Path(artifact.artifact_dir) / EVALUATION_REPORT_NAME
+        with report_path.open("w", encoding="utf-8") as file:
+            json.dump(report, file, indent=2, sort_keys=True)
+            file.write("\n")
+        run.log_evaluation(report=report, report_path=report_path)
 
-    entry = register_model_from_artifacts(
-        metadata_path=artifact.metadata_path,
-        registry_path=registry_path,
-        status="candidate",
-        approved_for_prod=False,
-        notes=(
-            f"Candidate retrained from {snapshot_metadata.get('snapshot_id')}; "
-            f"see {EVALUATION_REPORT_NAME}. Not promoted."
-        ),
-        replace_existing=False,
-    )
+        entry = register_model_from_artifacts(
+            metadata_path=artifact.metadata_path,
+            registry_path=registry_path,
+            status="candidate",
+            approved_for_prod=False,
+            notes=(
+                f"Candidate retrained from {snapshot_metadata.get('snapshot_id')}; "
+                f"see {EVALUATION_REPORT_NAME}. Not promoted."
+            ),
+            replace_existing=False,
+        )
 
     after = load_registry_state(registry_path=registry_path, model_name=config.model_name)
 
@@ -382,6 +389,7 @@ def print_summary(result: RetrainResult) -> None:
     )
     print(f"artifact_dir={result.artifact.artifact_dir}")
     print(f"evaluation_report={result.evaluation_report_path}")
+    print(f"mlflow_run_id={result.artifact.mlflow_run_id}")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -415,7 +423,7 @@ def main(argv: list[str] | None = None) -> int:
             config_path=args.config,
             artifact_root=args.artifact_root,
         )
-    except (RetrainError, TrainingError, RegistryError) as exc:
+    except (RetrainError, TrainingError, RegistryError, TrackingError) as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)
         return 1
 

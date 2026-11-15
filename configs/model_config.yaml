@@ -32,7 +32,6 @@ training:
   snapshot_root: data/features/training
   artifact_root: artifacts/models
   model_registry_backend: local
-  mlflow_tracking_uri: file:./mlruns
   approval_required: true
   # Segmented training refuses an entity type with fewer rows than this.
   min_rows_per_segment: 30

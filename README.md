@@ -126,6 +126,92 @@ feature_schema.json
 baseline_stats.json
 ```
 
+## Experiment tracking (MLflow)
+
+**MLflow is not the source of truth.** The Postgres model registry and the active-model
+pointer decide promotion, rollback and serving. MLflow keeps a record of how each model
+version was trained, and its model registry is not used.
+
+What is recorded per run (experiment `project4-isolation-forest`, run name
+`<model_version>-<entrypoint>`):
+
+- params: model parameters, `segments`, `snapshot_id`, `feature_set_fingerprint`,
+  `feature_schema_version`, runtime library versions
+- metrics: `train.*`, `segment.<entity_type>.*` (rows, anomaly rate, score p5/p50/p95),
+  and for retrain `eval.overall.*` / `eval.<entity_type>.*` from `evaluation_report.json`
+- artifacts under `bundle/`: `metadata.json`, `feature_schema.json`, `baseline_stats.json`,
+  `evaluation_report.json`, `model.joblib`
+- tags: `p4.model_name`, `p4.model_version`, `p4.snapshot_id`, `p4.feature_set_fingerprint`,
+  `p4.entrypoint`, `p4.registry_status_at_training=candidate`, `p4.model_sha256`
+
+New model versions record `mlflow_run_id` and `mlflow_experiment_id` in `metadata.json`
+(null when tracking was off or unavailable). The registry, database tables and
+integration views are unchanged.
+
+### Tracking server (Postgres backend)
+
+The compose service `mlflow` runs the MLflow server from the API image. Runs are stored
+in the dedicated database `project4_mlflow`, owned by the dedicated role
+`project4_mlflow` (no superuser, no database creation, no access for `PUBLIC`), inside
+the `anomaly-postgres` instance. It never uses `project4_ml`. Artifacts are served by the
+server from the `mlflow_artifacts` volume.
+
+### One-time setup
+
+1. Generate the role's password into `.env`. Nobody types or sees it, and nothing
+   happens when `.env` already has a value:
+
+   ```bash
+   grep -q '^PROJECT4_MLFLOW_DB_PASSWORD=.' .env || {
+     sed -i '/^PROJECT4_MLFLOW_DB_PASSWORD=/d' .env
+     printf 'PROJECT4_MLFLOW_DB_PASSWORD=%s\n' "$(openssl rand -hex 24)" >> .env
+   }
+   ```
+
+2. Create the role and the database (re-running is safe and re-applies the password from
+   `.env`):
+
+   ```bash
+   docker compose up -d anomaly-postgres
+   PROJECT4_MLFLOW_DB_PASSWORD="$(grep '^PROJECT4_MLFLOW_DB_PASSWORD=' .env | cut -d= -f2-)" \
+     docker compose exec -T -e PROJECT4_MLFLOW_DB_PASSWORD anomaly-postgres \
+     psql -v ON_ERROR_STOP=1 -U manshu -d postgres < sql/create_mlflow_database.sql
+   ```
+
+   The script refuses when `PROJECT4_MLFLOW_DB_PASSWORD` is empty.
+
+### Start the tracking server
+
+```bash
+docker compose up -d mlflow
+curl -s http://127.0.0.1:5004/health      # OK
+```
+
+The UI is at <http://127.0.0.1:5004> (bound to 127.0.0.1 only). Without
+`PROJECT4_MLFLOW_DB_PASSWORD` in `.env` the `mlflow` container refuses to start; other
+services are unaffected.
+
+### Tracking settings
+
+| Variable | Meaning |
+|---|---|
+| `MLFLOW_TRACKING_URI` | `http://127.0.0.1:5004` from the host (`--network host` containers too). Unset or empty: tracking is off and mlflow is never imported. |
+| `PROJECT4_MLFLOW_REQUIRED` | `false` (default): an unreachable server logs a warning and training goes on with `mlflow_run_id` null. `true`: training and retrain refuse before writing any file. If logging fails after the bundle is written (strict mode), the bundle folder stays on disk unregistered and that version number is used; delete it by hand or train the next version. |
+| `MLFLOW_DISABLE_TELEMETRY`, `GIT_PYTHON_REFRESH` | Set to `true` / `quiet` by the tracking code itself before mlflow is imported. |
+
+### Backfill existing versions
+
+Records v002 and v004 from their existing bundle files as runs tagged
+`p4.backfilled=true`. The bundles are only read, and re-running skips versions that
+already have a backfilled run:
+
+```bash
+docker run --rm --network host --user "$(id -u):$(id -g)" -e HOME=/tmp \
+  -e MLFLOW_TRACKING_URI=http://127.0.0.1:5004 -v "$PWD":/app:ro -w /app \
+  --entrypoint "" project4-anomaly-api:local \
+  python -m anomaly_detection.tracking backfill --model-version v002 --model-version v004
+```
+
 ## Feature contract
 
 Project 4 does not train directly on raw upstream tables.

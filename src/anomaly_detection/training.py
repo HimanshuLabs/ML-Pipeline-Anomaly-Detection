@@ -3,8 +3,9 @@
 The training pipeline reads a frozen feature snapshot, validates the feature
 contract, trains an Isolation Forest model, and writes versioned local artifacts.
 
-This is intentionally local-first. The model registry/MLflow/S3 layer comes
-later; this checkpoint proves the first reproducible training artifact.
+Artifacts are local and versioned; the model registry decides what is served.
+The training CLI records each run in MLflow when MLFLOW_TRACKING_URI is set
+(see anomaly_detection.tracking); MLflow is a record, not the source of truth.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import logging
 import platform
 import re
 import shutil
+import sys
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -46,6 +48,7 @@ from anomaly_detection.segmented_model import (
     score_distribution,
     segment_spec_fingerprint,
 )
+from anomaly_detection.tracking import TrackingError, TrainingRun, training_run
 from anomaly_detection.training_snapshot import (
     load_training_snapshot_metadata,
     read_training_snapshot,
@@ -102,6 +105,9 @@ class ModelArtifactMetadata:
     model_kind: str = SINGLE_MODEL_KIND
     # Segmented models: {entity_type: {feature_names, row_count, feature_set_fingerprint}}.
     segments: dict[str, Any] | None = None
+    # MLflow run that recorded this training (null when tracking was off or unavailable).
+    mlflow_run_id: str | None = None
+    mlflow_experiment_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return JSON-safe metadata."""
@@ -523,6 +529,7 @@ def train_isolation_forest_from_snapshot(
     overwrite: bool = False,
     training_started_at_utc: datetime | None = None,
     registry_path: str | Path = DEFAULT_REGISTRY_PATH,
+    training_run: TrainingRun | None = None,
 ) -> ModelArtifactMetadata:
     """Train Isolation Forest from a frozen training snapshot.
 
@@ -536,6 +543,8 @@ def train_isolation_forest_from_snapshot(
         training_started_at_utc: Optional fixed timestamp for deterministic tests.
         registry_path: Registry checked so a feature_schema_version label is never
             reused for a different ordered feature list.
+        training_run: MLflow run started by the caller (training CLI, retrain); its
+            ids go into metadata.json and the written bundle is logged to it.
 
     Returns:
         ModelArtifactMetadata describing written artifacts.
@@ -708,6 +717,8 @@ def train_isolation_forest_from_snapshot(
         feature_set_fingerprint=fingerprint,
         model_kind=SEGMENTED_MODEL_KIND if segments_metadata is not None else SINGLE_MODEL_KIND,
         segments=segments_metadata,
+        mlflow_run_id=training_run.run_id if training_run else None,
+        mlflow_experiment_id=training_run.experiment_id if training_run else None,
     )
 
     _write_json(feature_schema_path, feature_schema_payload)
@@ -715,6 +726,14 @@ def train_isolation_forest_from_snapshot(
     _write_json(metadata_path, artifact_metadata.to_dict())
 
     LOGGER.info("Wrote trained model artifacts to %s", artifact_dir)
+
+    if training_run is not None:
+        training_run.log_bundle(
+            metadata=artifact_metadata.to_dict(),
+            artifact_dir=artifact_dir,
+            baseline_stats=baseline_stats,
+            extra_params={"model.min_rows_per_segment": config.min_rows_per_segment},
+        )
 
     return artifact_metadata
 
@@ -841,15 +860,28 @@ def main() -> None:
         args.snapshot,
         training_root=args.training_root,
     )
-
-    artifact_metadata = train_isolation_forest_from_snapshot(
-        features_path=features_path,
-        snapshot_metadata_path=metadata_path,
-        model_version=args.model_version,
-        config_path=args.config,
-        artifact_root_override=args.artifact_root,
-        overwrite=args.overwrite,
+    # The version is fixed up front so the MLflow run can be named after it.
+    config = load_training_config(args.config, artifact_root_override=args.artifact_root)
+    model_version = args.model_version or resolve_next_model_version(
+        config.artifact_root / config.model_name
     )
+
+    try:
+        with training_run(
+            entrypoint="train", model_version=model_version, model_name=config.model_name
+        ) as run:
+            artifact_metadata = train_isolation_forest_from_snapshot(
+                features_path=features_path,
+                snapshot_metadata_path=metadata_path,
+                model_version=model_version,
+                config_path=args.config,
+                artifact_root_override=args.artifact_root,
+                overwrite=args.overwrite,
+                training_run=run,
+            )
+    except TrackingError as exc:
+        print(f"REFUSED: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
 
     dataset_snapshot_id = artifact_metadata.training_snapshot_metadata.get(
         "snapshot_id",
@@ -873,6 +905,7 @@ def main() -> None:
     print(f"metadata_path={artifact_metadata.metadata_path}")
     print(f"feature_schema_path={artifact_metadata.feature_schema_path}")
     print(f"baseline_stats_path={artifact_metadata.baseline_stats_path}")
+    print(f"mlflow_run_id={artifact_metadata.mlflow_run_id}")
 
 
 if __name__ == "__main__":

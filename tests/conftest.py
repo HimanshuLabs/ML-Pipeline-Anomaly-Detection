@@ -156,6 +156,9 @@ def isolate_repo_state(
         "PROJECT4_POSTGRES_USER",
         "PROJECT4_POSTGRES_PASSWORD",
         "PROJECT4_POINTER_POLL_SECONDS",
+        # MLflow tracking stays off unless a test opts in through mlflow_tracking.
+        "MLFLOW_TRACKING_URI",
+        "PROJECT4_MLFLOW_REQUIRED",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -242,6 +245,17 @@ def trained_metadata_paths(tmp_path_factory: pytest.TempPathFactory) -> dict[str
         metadata_paths[version] = Path(artifact.metadata_path)
 
     return metadata_paths
+
+
+@pytest.fixture()
+def mlflow_tracking(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
+    """Opt-in MLflow tracking to a sqlite store with artifacts under tmp_path (no server)."""
+
+    store = tmp_path / "mlflow"
+    store.mkdir()
+    uri = f"sqlite:///{store / 'mlflow.db'}"
+    monkeypatch.setenv("MLFLOW_TRACKING_URI", uri)
+    return uri
 
 
 TEST_ADMIN_TOKEN = "pytest-admin-token-0123456789abcdef"
