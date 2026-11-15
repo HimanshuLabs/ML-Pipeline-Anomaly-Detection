@@ -29,10 +29,7 @@ features:
     - page_load_p95_ms
 
 training:
-  snapshot_root: data/features/training
   artifact_root: artifacts/models
-  model_registry_backend: local
-  approval_required: true
   # Segmented training refuses an entity type with fewer rows than this.
   min_rows_per_segment: 30
 
