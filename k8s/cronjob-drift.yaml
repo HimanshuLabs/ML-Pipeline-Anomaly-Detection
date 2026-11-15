@@ -1,0 +1,59 @@
+# Hourly drift job: the active model's drift over the last 24h of batch predictions.
+# Not listed in kustomization.yaml yet (stage 13 validates and adds it).
+# Needs the secret project4-postgres (keys PROJECT4_POSTGRES_HOST, _PORT, _DB, _USER,
+# _PASSWORD), created outside git like project4-admin (see secret.example.yaml).
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: project4-drift-job
+  namespace: project4-ml
+  labels:
+    app.kubernetes.io/name: project4-drift-job
+    app.kubernetes.io/part-of: project4-ml-platform
+spec:
+  schedule: "15 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 1
+      activeDeadlineSeconds: 900
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: project4-drift-job
+            app.kubernetes.io/part-of: project4-ml-platform
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: drift-job
+              image: project4-anomaly-api:local
+              imagePullPolicy: IfNotPresent
+              command:
+                - python
+                - -m
+                - anomaly_detection.drift_job
+                - --source
+                - batch-predictions
+                - --hours
+                - "24"
+              env:
+                - name: LOG_LEVEL
+                  value: INFO
+              envFrom:
+                - secretRef:
+                    name: project4-postgres
+              resources:
+                requests:
+                  cpu: "100m"
+                  memory: "256Mi"
+                limits:
+                  cpu: "500m"
+                  memory: "512Mi"
+              volumeMounts:
+                - name: runtime-logs
+                  mountPath: /app/logs
+          volumes:
+            - name: runtime-logs
+              emptyDir: {}

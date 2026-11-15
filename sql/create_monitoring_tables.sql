@@ -11,6 +11,8 @@ CREATE TABLE IF NOT EXISTS monitoring.drift_events (
     feature_schema_version TEXT NOT NULL,
     feature_name TEXT NOT NULL,
     feature_dtype TEXT NOT NULL,
+    -- Segment of a segmented model (its entity type); NULL for a single model.
+    entity_type TEXT,
 
     baseline_id UUID REFERENCES ml.feature_baselines(baseline_id) ON DELETE SET NULL,
     current_stat_id UUID REFERENCES ml.feature_current_stats(current_stat_id) ON DELETE SET NULL,
@@ -161,6 +163,12 @@ CREATE TABLE IF NOT EXISTS audit.rollback_events (
     CONSTRAINT rollback_events_versions_different_chk
         CHECK (from_model_version <> to_model_version)
 );
+
+-- Databases created before entity_type existed get the column here (re-runnable).
+ALTER TABLE monitoring.drift_events ADD COLUMN IF NOT EXISTS entity_type TEXT;
+
+CREATE INDEX IF NOT EXISTS idx_drift_events_latest_run
+    ON monitoring.drift_events(model_name, model_version, entity_type, detected_at);
 
 CREATE INDEX IF NOT EXISTS idx_drift_events_model_version
     ON monitoring.drift_events(model_name, model_version);

@@ -744,6 +744,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    from anomaly_detection.logging_config import configure_logging
+
+    configure_logging()
     parser = _build_parser()
     args = parser.parse_args()
 

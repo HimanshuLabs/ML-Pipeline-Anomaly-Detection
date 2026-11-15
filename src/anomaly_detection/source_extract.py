@@ -104,10 +104,9 @@ class SourceExtractionError(RuntimeError):
 def configure_logging() -> None:
     """Configure module logging for CLI usage."""
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s - %(message)s",
-    )
+    from anomaly_detection.logging_config import configure_logging as configure_project_logging
+
+    configure_project_logging()
 
 
 def load_config(config_path: str | Path) -> dict[str, Any]:

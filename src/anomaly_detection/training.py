@@ -832,10 +832,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     """CLI entrypoint for local model training."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s - %(message)s",
-    )
+    from anomaly_detection.logging_config import configure_logging
+
+    configure_logging()
 
     args = parse_args()
     features_path, metadata_path = resolve_snapshot_paths(

@@ -116,7 +116,9 @@ SELECT
     d.mean_critical_threshold AS threshold_value,
     NULL::text AS from_model_version,
     NULL::text AS to_model_version,
-    NULL::text AS triggered_by
+    NULL::text AS triggered_by,
+    -- Appended last: CREATE OR REPLACE VIEW can only add columns at the end.
+    d.entity_type AS entity_type
 FROM monitoring.drift_events AS d
 UNION ALL
 SELECT
@@ -140,7 +142,8 @@ SELECT
     a.threshold_value,
     NULL::text,
     NULL::text,
-    a.alert_source
+    a.alert_source,
+    NULL::text
 FROM monitoring.alert_events AS a
 UNION ALL
 SELECT
@@ -164,7 +167,8 @@ SELECT
     NULL::numeric,
     rb.from_model_version,
     rb.to_model_version,
-    rb.triggered_by
+    rb.triggered_by,
+    NULL::text
 FROM audit.rollback_events AS rb;
 
 COMMENT ON VIEW integration.model_metadata IS

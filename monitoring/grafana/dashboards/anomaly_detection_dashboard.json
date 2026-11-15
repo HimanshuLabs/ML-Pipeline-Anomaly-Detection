@@ -538,7 +538,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "expr": "feature_mean_delta",
-          "legendFormat": "{{feature_name}}",
+          "legendFormat": "{{model_version}} {{segment}} {{feature_name}}",
           "refId": "A"
         }
       ],
@@ -601,7 +601,7 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "expr": "feature_variance_delta",
-          "legendFormat": "{{feature_name}}",
+          "legendFormat": "{{model_version}} {{segment}} {{feature_name}}",
           "refId": "A"
         }
       ],

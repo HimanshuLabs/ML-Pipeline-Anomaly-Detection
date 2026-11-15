@@ -73,22 +73,32 @@ PREDICTION_LATENCY_MS = Histogram(
     ),
 )
 
+# Segment label of a single (unsegmented) model's drift.
+ALL_SEGMENTS = "all"
+DRIFT_STATUS_VALUES = {"normal": 0, "warning": 1, "critical": 2}
+
 DRIFT_DETECTED_TOTAL = Counter(
     "drift_detected_total",
-    "Total number of drift events detected by feature and status.",
-    ["model_version", "feature_name", "drift_status"],
+    "Warning/critical features in newly loaded drift runs, by segment, feature and status.",
+    ["model_version", "segment", "feature_name", "drift_status"],
 )
 
 FEATURE_MEAN_DELTA = Gauge(
     "feature_mean_delta",
-    "Absolute mean delta between current feature stats and baseline.",
-    ["model_version", "feature_name"],
+    "Absolute mean delta between current feature stats and baseline (latest drift run).",
+    ["model_version", "segment", "feature_name"],
 )
 
 FEATURE_VARIANCE_DELTA = Gauge(
     "feature_variance_delta",
-    "Absolute variance delta between current feature stats and baseline.",
-    ["model_version", "feature_name"],
+    "Absolute variance delta between current feature stats and baseline (latest drift run).",
+    ["model_version", "segment", "feature_name"],
+)
+
+FEATURE_DRIFT_STATUS = Gauge(
+    "feature_drift_status",
+    "Drift status of a feature in the latest drift run: 0 normal, 1 warning, 2 critical.",
+    ["model_version", "segment", "feature_name"],
 )
 
 ACTIVE_MODEL_VERSION = Gauge(
@@ -100,7 +110,7 @@ ACTIVE_MODEL_VERSION = Gauge(
 MODEL_ROLLBACK_TOTAL = Counter(
     "model_rollback_total",
     "Total number of model rollback attempts.",
-    ["from_model_version", "to_model_version", "status"],
+    ["model_name", "from_model_version", "to_model_version", "triggered_by", "status"],
 )
 
 
@@ -258,6 +268,17 @@ def set_active_model_version(
     ).set(1)
 
 
+def replace_active_model_version(*, model_name: str, model_version: str | None) -> None:
+    """Make model_version the only active_model_version series (stale ones are removed)."""
+
+    ACTIVE_MODEL_VERSION.clear()
+    set_active_model_version(model_name=model_name, model_version=model_version)
+
+
+def _segment_label(segment: str | None) -> str:
+    return _clean_label(segment) if segment else ALL_SEGMENTS
+
+
 def record_drift_event(
     *,
     model_version: str | None,
@@ -265,29 +286,54 @@ def record_drift_event(
     drift_status: str,
     mean_delta: float,
     variance_delta: float,
+    segment: str | None = None,
+    count_detection: bool = True,
 ) -> None:
-    """Publish drift counters and feature delta gauges for one drift event."""
+    """Publish feature drift gauges (and count warning/critical) for one drift event."""
 
-    cleaned_model_version = _clean_label(model_version)
-    cleaned_feature_name = _clean_label(feature_name)
+    labels = {
+        "model_version": _clean_label(model_version),
+        "segment": _segment_label(segment),
+        "feature_name": _clean_label(feature_name),
+    }
     cleaned_status = _clean_label(drift_status)
 
-    FEATURE_MEAN_DELTA.labels(
-        model_version=cleaned_model_version,
-        feature_name=cleaned_feature_name,
-    ).set(float(mean_delta))
+    FEATURE_MEAN_DELTA.labels(**labels).set(float(mean_delta))
+    FEATURE_VARIANCE_DELTA.labels(**labels).set(float(variance_delta))
+    if cleaned_status in DRIFT_STATUS_VALUES:
+        FEATURE_DRIFT_STATUS.labels(**labels).set(DRIFT_STATUS_VALUES[cleaned_status])
 
-    FEATURE_VARIANCE_DELTA.labels(
-        model_version=cleaned_model_version,
-        feature_name=cleaned_feature_name,
-    ).set(float(variance_delta))
+    if count_detection and cleaned_status in {"warning", "critical"}:
+        DRIFT_DETECTED_TOTAL.labels(**labels, drift_status=cleaned_status).inc()
 
-    if cleaned_status in {"warning", "critical"}:
-        DRIFT_DETECTED_TOTAL.labels(
-            model_version=cleaned_model_version,
-            feature_name=cleaned_feature_name,
-            drift_status=cleaned_status,
-        ).inc()
+
+def publish_latest_drift(
+    *,
+    model_version: str,
+    summaries: dict[str | None, Any],
+    new_runs: set[str | None],
+) -> None:
+    """Expose the cached latest drift run per segment as gauges.
+
+    The gauges show only the given model version's latest runs (stale series are
+    removed). drift_detected_total counts the warning/critical features of the
+    runs in new_runs once, when they are first loaded.
+    """
+
+    for gauge in (FEATURE_MEAN_DELTA, FEATURE_VARIANCE_DELTA, FEATURE_DRIFT_STATUS):
+        gauge.clear()
+
+    for segment, summary in summaries.items():
+        for feature in summary.features:
+            record_drift_event(
+                model_version=model_version,
+                feature_name=feature.feature_name,
+                drift_status=feature.drift_status,
+                mean_delta=feature.mean_delta,
+                variance_delta=feature.variance_delta,
+                segment=segment,
+                count_detection=segment in new_runs,
+            )
 
 
 def publish_drift_evaluation_metrics(drift_result: Any) -> None:
@@ -299,6 +345,7 @@ def publish_drift_evaluation_metrics(drift_result: Any) -> None:
 
     result = _to_mapping(drift_result)
     model_version = result.get("model_version")
+    segment = result.get("entity_type")
     drift_events = result.get("drift_events", [])
 
     for event in drift_events:
@@ -310,6 +357,7 @@ def publish_drift_evaluation_metrics(drift_result: Any) -> None:
             drift_status=str(event_mapping.get("drift_status", "unknown")),
             mean_delta=float(event_mapping.get("mean_delta", 0.0)),
             variance_delta=float(event_mapping.get("variance_delta", 0.0)),
+            segment=segment,
         )
 
 
@@ -321,58 +369,19 @@ def record_model_rollback(
     model_name: str = "isolation_forest",
     triggered_by: str = "unknown",
 ) -> None:
-    """Record a model rollback metric.
-
-    Supports both the original metrics-test call shape:
-
-        record_model_rollback(from_model_version=..., to_model_version=..., status=...)
-
-    and the newer API call shape:
-
-        record_model_rollback(
-            model_name=...,
-            from_model_version=...,
-            to_model_version=...,
-            triggered_by=...,
-        )
+    """Count a model rollback, labelled with every value the caller passes.
 
     Detailed rollback evidence lives in logs/alerts/rollback_events.jsonl and
     the audit.rollback_events table contract.
     """
 
-    label_attempts = [
-        {
-            "model_name": model_name,
-            "from_model_version": from_model_version,
-            "to_model_version": to_model_version,
-            "triggered_by": triggered_by,
-            "status": status,
-        },
-        {
-            "model_name": model_name,
-            "from_model_version": from_model_version,
-            "to_model_version": to_model_version,
-            "triggered_by": triggered_by,
-        },
-        {
-            "from_model_version": from_model_version,
-            "to_model_version": to_model_version,
-            "status": status,
-        },
-        {
-            "from_model_version": from_model_version,
-            "to_model_version": to_model_version,
-        },
-    ]
-
-    for labels in label_attempts:
-        try:
-            MODEL_ROLLBACK_TOTAL.labels(**labels).inc()
-            return
-        except ValueError:
-            continue
-
-    MODEL_ROLLBACK_TOTAL.inc()
+    MODEL_ROLLBACK_TOTAL.labels(
+        model_name=_clean_label(model_name),
+        from_model_version=_clean_label(from_model_version),
+        to_model_version=_clean_label(to_model_version),
+        triggered_by=_clean_label(triggered_by),
+        status=_clean_label(status),
+    ).inc()
 
 
 def render_prometheus_metrics() -> bytes:

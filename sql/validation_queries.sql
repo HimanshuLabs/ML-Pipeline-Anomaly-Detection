@@ -192,6 +192,7 @@ WITH expected_columns(table_schema, table_name, column_name) AS (
         ('monitoring', 'drift_events', 'mean_delta'),
         ('monitoring', 'drift_events', 'variance_delta'),
         ('monitoring', 'drift_events', 'drift_status'),
+        ('monitoring', 'drift_events', 'entity_type'),
         ('monitoring', 'alert_events', 'alert_event_id'),
         ('monitoring', 'alert_events', 'alert_type'),
         ('monitoring', 'alert_events', 'severity'),

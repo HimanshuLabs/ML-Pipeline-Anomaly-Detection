@@ -1480,6 +1480,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     import argparse
     import sys
 
+    from anomaly_detection.logging_config import configure_logging
+
+    configure_logging()
+
     parser = argparse.ArgumentParser(description="Project 4 model registry tools.")
     commands = parser.add_subparsers(dest="command", required=True)
     retire = commands.add_parser(
