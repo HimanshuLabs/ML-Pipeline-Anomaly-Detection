@@ -111,6 +111,63 @@ def load_batch_prediction_features(
     )
 
 
+def last_batch_prediction(*, model_name: str) -> tuple[datetime, str] | None:
+    """(when, version) of the model name's last batch prediction, any version; None if never."""
+
+    from anomaly_detection import database
+
+    return database.read_last_batch_prediction(model_name=model_name)
+
+
+def _log_nothing_to_evaluate(
+    *, model_name: str, model_version: str, source: str, hours: float, since: datetime
+) -> None:
+    """No rows for the active version in the window: stalled batch scoring, or just quiet.
+
+    Never batch-scored: INFO. Last batch run before the window: WARNING (stalled?).
+    Last batch run inside the window under another version (e.g. right after a
+    promote): INFO naming that version.
+    """
+
+    last = None
+    if source == SOURCE_BATCH_PREDICTIONS:
+        last = last_batch_prediction(model_name=model_name)
+    if last is not None:
+        last_at, last_version = last
+        if last_at < since:
+            LOGGER.warning(
+                "No current rows for %s %s from %s; batch scoring stalled? "
+                "last batch prediction at %s (model %s), none in the last %gh; drift %s",
+                model_name,
+                model_version,
+                source,
+                last_at.astimezone(UTC).isoformat(),
+                last_version,
+                hours,
+                drift.NOT_EVALUATED,
+            )
+            return
+        LOGGER.info(
+            "No current rows for %s %s from %s: no rows for %s yet; last batch run used %s "
+            "at %s; drift %s",
+            model_name,
+            model_version,
+            source,
+            model_version,
+            last_version,
+            last_at.astimezone(UTC).isoformat(),
+            drift.NOT_EVALUATED,
+        )
+        return
+    LOGGER.info(
+        "No current rows for %s %s from %s; drift %s",
+        model_name,
+        model_version,
+        source,
+        drift.NOT_EVALUATED,
+    )
+
+
 def load_input_features(input_path: Path) -> pd.DataFrame:
     from anomaly_detection.batch_inference import BatchInferenceError, load_feature_batch
 
@@ -284,12 +341,12 @@ def run_drift_job(
         # nothing is written, so the last real drift run stays the latest.
         segments = baseline.get("segments") or {}
         skipped = {t: "no rows" for t in sorted(segments)} if segments else {"all": "no rows"}
-        LOGGER.info(
-            "No current rows for %s %s from %s; drift %s",
-            model_name,
-            model_version,
-            source,
-            drift.NOT_EVALUATED,
+        _log_nothing_to_evaluate(
+            model_name=model_name,
+            model_version=model_version,
+            source=source,
+            hours=hours,
+            since=start,
         )
         return DriftJobResult(
             model_name=model_name,
