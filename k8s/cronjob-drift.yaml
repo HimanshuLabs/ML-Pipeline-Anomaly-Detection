@@ -28,7 +28,7 @@ spec:
           restartPolicy: Never
           containers:
             - name: drift-job
-              image: project4-anomaly-api:local
+              image: project4-anomaly-tools:local
               imagePullPolicy: IfNotPresent
               command:
                 - python

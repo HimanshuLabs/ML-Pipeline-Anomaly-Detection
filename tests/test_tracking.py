@@ -367,7 +367,7 @@ def test_compose_mlflow_service_uses_its_own_postgres_database_and_stays_local()
     command = " ".join(service["entrypoint"])
     environment = service["environment"]
 
-    assert service["image"] == "project4-anomaly-api:local"
+    assert service["image"] == "project4-anomaly-tools:local"  # runtime image has no mlflow
     assert "build" not in service and "restart" not in service
     assert service["ports"] == ["127.0.0.1:5004:5000"]
     assert service["depends_on"] == {"anomaly-postgres": {"condition": "service_healthy"}}

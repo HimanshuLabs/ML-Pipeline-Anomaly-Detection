@@ -2,7 +2,7 @@
 
     python -m anomaly_detection.bundle_check --active-model configs/active_model.yaml
 
-docker/Dockerfile.api and docker/Dockerfile.batch run this at build time. It
+The runtime and tools targets of docker/Dockerfile run this at build time. It
 reads the pointer that is being baked into the image (never a hardcoded
 version), lists every missing bundle file, and then loads the bundle with the
 serving loader so a bundle that cannot serve also fails the build.

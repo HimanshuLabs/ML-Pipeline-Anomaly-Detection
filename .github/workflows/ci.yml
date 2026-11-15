@@ -272,10 +272,14 @@ jobs:
           path: reports/pytest-results.xml
           if-no-files-found: warn
 
-      - name: Build API Docker image
+      - name: Build runtime (API) Docker image
         run: |
-          docker build -f docker/Dockerfile.api -t project4-anomaly-api:ci .
+          docker build -f docker/Dockerfile --target runtime -t project4-anomaly-api:ci .
 
-      - name: Build batch Docker image
+      - name: Build tools Docker image
         run: |
-          docker build -f docker/Dockerfile.batch -t project4-anomaly-batch:ci .
+          docker build -f docker/Dockerfile --target tools -t project4-anomaly-tools:ci .
+
+      - name: Build dev Docker image
+        run: |
+          docker build -f docker/Dockerfile --target dev -t project4-anomaly-dev:ci .
