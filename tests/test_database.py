@@ -452,11 +452,12 @@ def test_apply_schema_runs_files_in_order_in_one_transaction(
             transactions.append(1)
             yield _FakeConnection()
 
-    applied = database.apply_schema(_FakeEngine(), reader_password="")
+    applied = database.apply_schema(_FakeEngine(), reader_password="", app_password="")
 
     assert applied[: len(database.SCHEMA_FILES)] == list(database.SCHEMA_FILES)
     assert applied[len(database.SCHEMA_FILES):] == [
-        "role project5_reader: NOLOGIN (PROJECT4_P5_READER_PASSWORD is not set)"
+        "role project4_app: NOLOGIN (PROJECT4_APP_PASSWORD is not set)",
+        "role project5_reader: NOLOGIN (PROJECT4_P5_READER_PASSWORD is not set)",
     ]
     assert len(transactions) == 1
     assert executed[: len(database.SCHEMA_FILES)] == [
@@ -1567,3 +1568,224 @@ def test_apply_schema_after_the_revoke_gives_project5_reader_connect_again(
     database.apply_schema(connect_roles, reader_password=CONNECT_READER_PASSWORD)
 
     assert _connect_as(database.PROJECT5_READER_ROLE, CONNECT_READER_PASSWORD) == [(1,)]
+
+
+# --- stage 13e1: the non-superuser application role project4_app -----------------------
+
+APP_ROLE = "project4_app"
+APP_PASSWORD = "project4-app-role-test-password"
+# What the API (lifespan, pointer poller, /predict, /admin/rollback), the registry
+# CLI (register/promote/retire) and the drift job read and write; nothing else.
+EXPECTED_APP_TABLE_PRIVILEGES = {
+    "ml.model_registry": {"SELECT", "INSERT", "UPDATE"},
+    "ml.active_model_pointer": {"SELECT", "INSERT", "UPDATE"},
+    "ml.feature_snapshots": {"INSERT"},
+    "ml.training_datasets": {"INSERT"},
+    "ml.online_predictions": {"INSERT"},
+    "ml.batch_predictions": {"SELECT"},
+    "monitoring.drift_events": {"SELECT", "INSERT"},
+    "monitoring.alert_events": {"INSERT"},
+    "audit.rollback_events": {"SELECT", "INSERT", "UPDATE"},
+}
+
+
+def test_app_role_setup_never_sends_the_password_and_grants_exactly_its_tables() -> None:
+    statements: list[tuple[str, object]] = []
+
+    class _FakeConnection:
+        def exec_driver_sql(self, sql_text: str, parameters=None) -> None:
+            statements.append((sql_text, parameters))
+
+    status = database.configure_project4_app(_FakeConnection(), SECRET_PASSWORD)
+
+    assert SECRET_PASSWORD not in status and "LOGIN" in status
+    for sql_text, parameters in statements:
+        assert SECRET_PASSWORD not in sql_text and SECRET_PASSWORD not in repr(parameters)
+    texts = [sql_text for sql_text, _ in statements]
+    assert any("GRANT CONNECT ON DATABASE" in t and "current_database()" in t
+               and APP_ROLE in t for t in texts)
+    for schema in ("ml", "monitoring", "audit"):
+        assert f"GRANT USAGE ON SCHEMA {schema} TO {APP_ROLE}" in texts
+    table_grants = {
+        t.split(" ON ")[1].split(" TO ")[0]: set(t[len("GRANT "):].split(" ON ")[0].split(", "))
+        for t in texts
+        if t.startswith("GRANT ") and " ON SCHEMA " not in t and "DATABASE" not in t
+    }
+    assert table_grants == EXPECTED_APP_TABLE_PRIVILEGES
+    assert not any(t.startswith("GRANT") and "integration" in t for t in texts)
+
+
+@pytest.fixture()
+def app_mode(initialized_database, monkeypatch: pytest.MonkeyPatch):
+    """The seeded test database, with the code connecting as project4_app (not the owner)."""
+
+    database.apply_schema(initialized_database, app_password=APP_PASSWORD)
+    monkeypatch.setenv(database.ENV_USER, APP_ROLE)
+    monkeypatch.setenv(database.ENV_PASSWORD, APP_PASSWORD)
+    yield initialized_database
+    database.apply_schema(initialized_database, app_password="")
+
+
+def _as_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    from sqlalchemy.engine import make_url
+
+    url = make_url(os.environ["PROJECT4_TEST_DATABASE_URL"])
+    monkeypatch.setenv(database.ENV_USER, url.username or "")
+    monkeypatch.setenv(database.ENV_PASSWORD, url.password or "")
+
+
+@pytest.mark.postgres
+def test_project4_app_serves_predicts_promotes_and_rolls_back(
+    app_mode,
+    trained_metadata_paths: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fastapi.testclient import TestClient
+    from sqlalchemy import text
+
+    from anomaly_detection.registry import promote_model_version, read_shared_pointer_version
+    from anomaly_detection.rollback import rollback_active_model
+    from api.main import app, state
+
+    with database.get_shared_engine().connect() as connection:
+        assert connection.execute(text("SELECT current_user")).scalar_one() == APP_ROLE
+
+    _register_trained(trained_metadata_paths, ["v101", "v102"])
+    promote_model_version(model_name="isolation_forest", model_version="v101")
+    promote_model_version(model_name="isolation_forest", model_version="v102")
+    event = rollback_active_model(rollback_reason="pytest", triggered_by="pytest")
+
+    pointer = _database_pointer(app_mode)
+    assert pointer["model_version"] == "v101"
+    assert read_shared_pointer_version("isolation_forest") == pointer["pointer_version"]
+    assert _count(
+        app_mode,
+        "SELECT COUNT(*) FROM audit.rollback_events WHERE rollback_id = :id "
+        "AND validation_status = 'applied'",
+        {"id": event.rollback_id},
+    ) == 1
+
+    metadata = json.loads(trained_metadata_paths["v101"].read_text(encoding="utf-8"))
+    payload = {name: 1.0 for name in metadata["feature_names"]}
+    monkeypatch.setattr(state, "inference_service", None)
+    with TestClient(app) as client:
+        health = client.get("/health").json()
+        response = client.post("/predict", json={"feature_payload": payload})
+
+    assert (health["pointer_source"], health["active_model_version"]) == ("postgres", "v101")
+    assert response.status_code == 200
+    assert _count(
+        app_mode,
+        "SELECT COUNT(*) FROM ml.online_predictions WHERE prediction_id = :id",
+        {"id": response.json()["prediction_id"]},
+    ) == 1
+
+
+@pytest.mark.postgres
+def test_project4_app_runs_the_drift_job(
+    app_mode,
+    tmp_path: Path,
+    segmented_metadata_paths: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture,
+) -> None:
+    from anomaly_detection.batch_inference import run_batch_inference
+    from anomaly_detection.drift_job import main as drift_job_main
+    from anomaly_detection.drift_job import run_drift_job
+    from anomaly_detection.registry import promote_model_version, register_model_from_artifacts
+    from tests.test_drift_job import SHIFTED_TYPE, _current_frame
+
+    register_model_from_artifacts(metadata_path=segmented_metadata_paths["v202"])
+    promote_model_version(model_name="isolation_forest", model_version="v202")
+
+    # Nothing scored yet: nothing to evaluate is not an error.
+    assert drift_job_main(["--source", "batch-predictions", "--hours", "24"]) == 0
+    assert "not_evaluated" in capsys.readouterr().out
+
+    _as_owner(monkeypatch)  # batch scoring is a tools job run as the owner
+    artifact_dir = segmented_metadata_paths["v202"].parent
+    run_batch_inference(_current_frame(artifact_dir), output_path=tmp_path / "batch.jsonl")
+    monkeypatch.setenv(database.ENV_USER, APP_ROLE)
+    monkeypatch.setenv(database.ENV_PASSWORD, APP_PASSWORD)
+
+    result = run_drift_job(source="batch-predictions", hours=24, min_rows=30)
+
+    assert result.segments[SHIFTED_TYPE].status == "critical"
+    assert _count(
+        app_mode, "SELECT COUNT(*) FROM monitoring.drift_events WHERE model_version = 'v202'"
+    ) == result.drift_event_count > 0
+    assert _count(
+        app_mode, "SELECT COUNT(*) FROM monitoring.alert_events WHERE model_version = 'v202'"
+    ) == result.alert_count > 0
+
+
+@pytest.mark.postgres
+def test_project4_app_cannot_change_the_schema_or_read_beyond_its_tables(app_mode) -> None:
+    from sqlalchemy.exc import ProgrammingError
+
+    for statement, message in (
+        ("CREATE TABLE ml.app_ddl_probe (id integer)", "permission denied for schema ml"),
+        ("CREATE TABLE public.app_ddl_probe (id integer)", "permission denied for schema public"),
+        ("ALTER TABLE ml.model_registry ADD COLUMN probe integer", "must be owner"),
+        ("DROP TABLE ml.online_predictions", "must be owner"),
+        ("SELECT * FROM integration.model_metadata", "permission denied for schema integration"),
+        ("SELECT * FROM ml.model_metrics", "permission denied for table model_metrics"),
+        ("DELETE FROM ml.model_registry", "permission denied for table model_registry"),
+    ):
+        with pytest.raises(ProgrammingError, match=message):
+            _connect_as(APP_ROLE, APP_PASSWORD, statement)
+
+
+@pytest.mark.postgres
+def test_apply_schema_twice_keeps_project4_app_grants_exact(database_mode) -> None:
+    try:
+        for _ in range(2):
+            applied = database.apply_schema(database_mode, app_password=APP_PASSWORD)
+            assert f"role {APP_ROLE}: LOGIN (password from PROJECT4_APP_PASSWORD)" in applied
+
+        with database_mode.connect() as connection:
+            from sqlalchemy import text
+
+            rows = connection.execute(text(
+                "SELECT table_schema || '.' || table_name, privilege_type "
+                "FROM information_schema.role_table_grants WHERE grantee = :role"
+            ), {"role": APP_ROLE}).fetchall()
+            role = connection.execute(text(
+                "SELECT rolsuper, rolcreatedb, rolcreaterole, rolcanlogin "
+                "FROM pg_roles WHERE rolname = :role"
+            ), {"role": APP_ROLE}).one()
+            schemas = {
+                schema: connection.execute(text(
+                    "SELECT has_schema_privilege(:role, :schema, 'USAGE'), "
+                    "has_schema_privilege(:role, :schema, 'CREATE')"
+                ), {"role": APP_ROLE, "schema": schema}).one()
+                for schema in ("ml", "monitoring", "audit", "integration", "public")
+            }
+            can_connect = connection.execute(text(
+                "SELECT has_database_privilege(:role, current_database(), 'CONNECT')"
+            ), {"role": APP_ROLE}).scalar_one()
+
+        granted: dict[str, set[str]] = {}
+        for table, privilege in rows:
+            granted.setdefault(table, set()).add(privilege)
+        assert granted == EXPECTED_APP_TABLE_PRIVILEGES
+        assert tuple(role) == (False, False, False, True)
+        assert {s: tuple(v) for s, v in schemas.items()} == {
+            "ml": (True, False), "monitoring": (True, False), "audit": (True, False),
+            "integration": (False, False), "public": (True, False),
+        }
+        assert can_connect is True
+    finally:
+        database.apply_schema(database_mode, app_password="")
+
+
+@pytest.mark.postgres
+def test_restrict_connect_leaves_project4_app_connecting(connect_roles) -> None:
+    database.apply_schema(
+        connect_roles, reader_password=CONNECT_READER_PASSWORD, app_password=APP_PASSWORD
+    )
+
+    rows = _run_restrict_connect_script(connect_roles)
+
+    assert (APP_ROLE, False, True) in rows
+    assert _connect_as(APP_ROLE, APP_PASSWORD) == [(1,)]

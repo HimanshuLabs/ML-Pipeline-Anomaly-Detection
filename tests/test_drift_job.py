@@ -139,6 +139,41 @@ def test_cli_prints_a_per_segment_summary_and_exits_zero_on_drift(
     assert main(["--input", str(tmp_path / "missing.parquet")]) == 1
 
 
+def test_no_current_rows_is_not_evaluated_exits_zero_and_records_nothing(
+    tmp_path: Path,
+    segmented_metadata_paths: dict[str, Path],
+    trained_metadata_paths: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from anomaly_detection import drift_job
+
+    artifact_dir = _serve_segmented(tmp_path, segmented_metadata_paths)
+    segments = _segments(artifact_dir / "metadata.json")
+    # An empty batch-predictions result is a frame with no columns at all.
+    monkeypatch.setattr(drift_job, "load_batch_prediction_features", lambda **_: pd.DataFrame())
+
+    result = drift_job.run_drift_job(source="batch-predictions", hours=24)
+
+    assert result.status == drift.NOT_EVALUATED
+    assert result.segments == {} and result.drift_event_count == result.alert_count == 0
+    assert result.skipped == {entity_type: "no rows" for entity_type in sorted(segments)}
+
+    # The CLI, with an input file that has the columns but no rows.
+    empty_input = tmp_path / "empty.parquet"
+    _current_frame(artifact_dir).head(0).to_parquet(empty_input, index=False)
+    assert drift_job.main(["--input", str(empty_input)]) == 0
+    out = capsys.readouterr().out
+    assert "not_evaluated" in out and "model=isolation_forest v202" in out
+    assert not drift.DEFAULT_DRIFT_EVENTS_PATH.exists()  # nothing recorded
+
+    # A single (unsegmented) model with no rows is not evaluated either.
+    _register_copy(tmp_path, trained_metadata_paths["v101"], "v101")
+    _promote("v101")
+    single = drift_job.run_drift_job(source="batch-predictions", hours=24)
+    assert single.status == drift.NOT_EVALUATED and single.skipped == {"all": "no rows"}
+
+
 def test_batch_predictions_source_needs_the_database(
     tmp_path: Path,
     segmented_metadata_paths: dict[str, Path],

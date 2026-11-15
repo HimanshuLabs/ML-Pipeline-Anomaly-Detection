@@ -72,6 +72,8 @@ class DriftJobResult:
     drift_event_count: int = 0
     alert_count: int = 0
     persisted: dict[str, Any] = field(default_factory=dict)
+    # "evaluated", or drift.NOT_EVALUATED when there were no current rows at all.
+    status: str = "evaluated"
 
 
 def _min_rows(threshold_config: dict[str, Any], override: int | None) -> int:
@@ -277,6 +279,27 @@ def run_drift_job(
     else:
         raise DriftJobError(f"unknown source {source!r}")
 
+    if frame.empty:
+        # Nothing scored in the window (or an empty input): not an error, and
+        # nothing is written, so the last real drift run stays the latest.
+        segments = baseline.get("segments") or {}
+        skipped = {t: "no rows" for t in sorted(segments)} if segments else {"all": "no rows"}
+        LOGGER.info(
+            "No current rows for %s %s from %s; drift %s",
+            model_name,
+            model_version,
+            source,
+            drift.NOT_EVALUATED,
+        )
+        return DriftJobResult(
+            model_name=model_name,
+            model_version=model_version,
+            source=source,
+            segments={},
+            skipped=skipped,
+            status=drift.NOT_EVALUATED,
+        )
+
     LOGGER.info(
         "Evaluating drift of %s %s on %s current rows from %s",
         model_name,
@@ -330,6 +353,14 @@ def run_drift_job(
 
 
 def print_summary(result: DriftJobResult) -> None:
+    if result.status == drift.NOT_EVALUATED:
+        print(
+            f"OK: nothing to evaluate for model={result.model_name} {result.model_version}: "
+            f"{drift.NOT_EVALUATED} (no current rows from {result.source}; nothing recorded)"
+        )
+        for entity_type, reason in result.skipped.items():
+            print(f"{entity_type:<14}  skipped: {reason}")
+        return
     print(f"OK: drift evaluated for model={result.model_name} {result.model_version}")
     print(f"source={result.source} drift_events={result.drift_event_count} "
           f"alerts={result.alert_count} "

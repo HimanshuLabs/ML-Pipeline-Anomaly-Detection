@@ -54,6 +54,30 @@ INTEGRATION_VIEWS = (
 )
 PROJECT5_READER_ROLE = "project5_reader"
 ENV_P5_READER_PASSWORD = "PROJECT4_P5_READER_PASSWORD"
+# Non-superuser role for the API (lifespan, pointer poller, /predict, /admin/rollback),
+# the registry CLI (register/promote/retire) and the drift job: exactly the tables they
+# read and write, no DDL. Schema changes and batch scoring stay with the owner role.
+PROJECT4_APP_ROLE = "project4_app"
+ENV_APP_PASSWORD = "PROJECT4_APP_PASSWORD"
+APP_TABLE_PRIVILEGES: dict[str, tuple[str, ...]] = {
+    # registry reads; upserts on register/promote/retire/rollback and their undo
+    "ml.model_registry": ("SELECT", "INSERT", "UPDATE"),
+    # pointer reads, poller version reads, SELECT ... FOR UPDATE lock, upsert
+    "ml.active_model_pointer": ("SELECT", "INSERT", "UPDATE"),
+    # snapshot rows a registered entry needs (INSERT ... ON CONFLICT DO NOTHING)
+    "ml.feature_snapshots": ("INSERT",),
+    "ml.training_datasets": ("INSERT",),
+    # /predict and /predict/batch evidence
+    "ml.online_predictions": ("INSERT",),
+    # drift job input (batch scoring itself runs as the owner)
+    "ml.batch_predictions": ("SELECT",),
+    # drift job writes; the API reads the latest run per segment
+    "monitoring.drift_events": ("SELECT", "INSERT"),
+    # drift job critical alerts
+    "monitoring.alert_events": ("INSERT",),
+    # rollback events, and marking one failed when a committed rollback is undone
+    "audit.rollback_events": ("SELECT", "INSERT", "UPDATE"),
+}
 SCRAM_ITERATIONS = 4096
 VALIDATION_QUERIES_FILE = "validation_queries.sql"
 PROJECT4_SCHEMAS = ("ml", "monitoring", "audit")
@@ -312,14 +336,64 @@ def configure_project5_reader(connection: Connection, password: str | None) -> s
     return status
 
 
-def apply_schema(engine: Engine, *, reader_password: str | None = None) -> list[str]:
-    """Run every DDL file in order and configure project5_reader, in one transaction.
+def configure_project4_app(connection: Connection, password: str | None) -> str:
+    """Create/update the application role: exactly APP_TABLE_PRIVILEGES, no DDL.
 
-    Safe to run repeatedly. reader_password defaults to PROJECT4_P5_READER_PASSWORD.
+    Not a superuser, cannot create databases or roles. With a password the role can
+    log in (stored as a SCRAM verifier); without one it is NOLOGIN. Every privilege
+    is revoked and granted again, so the result is exact on every run. Returns a
+    short status line that never contains the password.
+    """
+
+    role = PROJECT4_APP_ROLE
+    connection.exec_driver_sql(
+        "DO $$ BEGIN "
+        f"IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '{role}') THEN "
+        f"CREATE ROLE {role} NOLOGIN; END IF; END $$"
+    )
+    connection.exec_driver_sql(f"ALTER ROLE {role} WITH NOSUPERUSER NOCREATEDB NOCREATEROLE")
+    if password:
+        connection.exec_driver_sql(
+            f"ALTER ROLE {role} WITH LOGIN PASSWORD %(verifier)s",
+            {"verifier": scram_sha256_verifier(password)},
+        )
+        status = f"role {role}: LOGIN (password from {ENV_APP_PASSWORD})"
+    else:
+        connection.exec_driver_sql(f"ALTER ROLE {role} WITH NOLOGIN")
+        status = f"role {role}: NOLOGIN ({ENV_APP_PASSWORD} is not set)"
+
+    # Explicit CONNECT: still connects after PUBLIC's CONNECT is revoked.
+    connection.exec_driver_sql(
+        "DO $$ BEGIN EXECUTE 'GRANT CONNECT ON DATABASE ' "
+        f"|| quote_ident(current_database()) || ' TO {role}'; END $$"
+    )
+    for schema in (*PROJECT4_SCHEMAS, INTEGRATION_SCHEMA):
+        connection.exec_driver_sql(f"REVOKE ALL ON ALL TABLES IN SCHEMA {schema} FROM {role}")
+        connection.exec_driver_sql(f"REVOKE ALL ON SCHEMA {schema} FROM {role}")
+    for schema in PROJECT4_SCHEMAS:
+        connection.exec_driver_sql(f"GRANT USAGE ON SCHEMA {schema} TO {role}")
+    for table, privileges in APP_TABLE_PRIVILEGES.items():
+        connection.exec_driver_sql(f"GRANT {', '.join(privileges)} ON {table} TO {role}")
+    return status
+
+
+def apply_schema(
+    engine: Engine,
+    *,
+    reader_password: str | None = None,
+    app_password: str | None = None,
+) -> list[str]:
+    """Run every DDL file in order and configure project4_app and project5_reader,
+    in one transaction.
+
+    Safe to run repeatedly. reader_password defaults to PROJECT4_P5_READER_PASSWORD,
+    app_password to PROJECT4_APP_PASSWORD.
     """
 
     if reader_password is None:
         reader_password = os.environ.get(ENV_P5_READER_PASSWORD) or None
+    if app_password is None:
+        app_password = os.environ.get(ENV_APP_PASSWORD) or None
 
     applied: list[str] = []
     with engine.begin() as connection:
@@ -327,6 +401,7 @@ def apply_schema(engine: Engine, *, reader_password: str | None = None) -> list[
             connection.exec_driver_sql(path.read_text(encoding="utf-8"))
             applied.append(path.name)
             LOGGER.info("Applied %s", path.name)
+        applied.append(configure_project4_app(connection, app_password))
         applied.append(configure_project5_reader(connection, reader_password))
     return applied
 

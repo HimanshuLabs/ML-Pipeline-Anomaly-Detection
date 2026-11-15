@@ -205,6 +205,24 @@ def test_no_reference_to_the_old_image_name_or_dockerfiles_remains() -> None:
     assert not offenders
 
 
+def _stage(name: str) -> str:
+    text = DOCKERFILE.read_text(encoding="utf-8")
+    return re.split(rf"^FROM \S+ AS {name}$", text, flags=re.MULTILINE)[1].split("\nFROM ", 1)[0]
+
+
+def test_sql_is_in_the_tools_image_only() -> None:
+    ignored = [
+        line.strip()
+        for line in (REPO_ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
+    ]
+
+    assert "sql" not in ignored and "sql/" not in ignored  # in the build context
+    assert "COPY sql /app/sql" in _stage("tools")  # apply-schema / sync-from-files seed job
+    for stage in ("runtime", "dev"):
+        assert "COPY sql" not in _stage(stage), stage
+    assert "COPY sql" not in DOCKERFILE.read_text(encoding="utf-8").split("AS runtime-deps")[0]
+
+
 def test_tools_image_owns_the_mlflow_volume_path() -> None:
     text = DOCKERFILE.read_text(encoding="utf-8")
     tools = re.split(r"^FROM \S+ AS tools$", text, flags=re.MULTILINE)[1].split("\nFROM ", 1)[0]

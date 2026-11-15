@@ -70,6 +70,9 @@ FROM tools-deps AS tools
 COPY src /app/src
 COPY configs /app/configs
 COPY artifacts/models /app/artifacts/models
+# DDL for `python -m anomaly_detection.database apply-schema` (database seed job);
+# tools image only, the runtime image never changes the schema.
+COPY sql /app/sql
 
 # /var/lib/mlflow: mount point of the mlflow_artifacts volume for the compose MLflow server,
 # owned by app (uid/gid 999) like the volume's existing contents.
