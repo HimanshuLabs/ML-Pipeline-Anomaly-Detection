@@ -1,15 +1,16 @@
 """Retrain the anomaly model from a real-source snapshot and register it as a candidate.
 
-    python -m anomaly_detection.retrain --snapshot <path|snapshot_id|latest> --model-version v003
+    python -m anomaly_detection.retrain --snapshot <path|snapshot_id|latest> --model-version v004
 
 1. The snapshot must be a real-source extract with data_quality_status "passed",
-   trainable, a features.parquet, and the configured real-source
-   feature_schema_version; otherwise it is refused with every reason.
-2. Training reuses training.train_isolation_forest_from_snapshot (model.joblib,
-   metadata.json, feature_schema.json, baseline_stats.json).
+   trainable, a features.parquet, and the extract label configured in
+   source_extract.yaml; otherwise it is refused with every reason.
+2. Training reuses training.train_isolation_forest_from_snapshot, which trains
+   the segmented model (one IsolationForest per entity type) for real-source
+   snapshots (model.joblib, metadata.json, feature_schema.json, baseline_stats.json).
 3. evaluation_report.json is written next to the artifact: row counts, the
-   configured contamination, and the anomaly rate and decision_function score
-   distribution overall and per entity type.
+   configured contamination, the features of each segment, and the anomaly rate
+   and decision_function score distribution overall and per entity type.
 4. The version is registered as "candidate" (Postgres when PROJECT4_POSTGRES_* is
    configured, with the JSON file mirror; else the JSON registry).
 
@@ -39,6 +40,9 @@ from anomaly_detection.registry import (
     load_registry_state,
     register_model_from_artifacts,
 )
+from anomaly_detection.segmented_model import SegmentedIsolationForest, score_distribution
+from anomaly_detection.source_extract import SEGMENT_FEATURE_COLUMNS
+from anomaly_detection.source_extract import load_config as load_source_extract_config
 from anomaly_detection.training import (
     DEFAULT_MODEL_CONFIG_PATH,
     PROJECT_ROOT,
@@ -55,20 +59,15 @@ from anomaly_detection.training_snapshot import read_training_snapshot
 LOGGER = logging.getLogger(__name__)
 
 DEFAULT_TRAINING_ROOT = PROJECT_ROOT / "data" / "features" / "training"
+DEFAULT_SOURCE_EXTRACT_CONFIG_PATH = PROJECT_ROOT / "configs" / "source_extract.yaml"
 REAL_SOURCE_SNAPSHOT_TYPE = "real_source_extract"
 EVALUATION_REPORT_NAME = "evaluation_report.json"
 # Entity types source_extract produces; each is reported even when absent.
-EXPECTED_ENTITY_TYPES = (
-    "user",
-    "customer",
-    "campaign",
-    "funnel_day",
-    "product",
-    "web_customer",
-)
+EXPECTED_ENTITY_TYPES = tuple(SEGMENT_FEATURE_COLUMNS)
 SCORE_DEFINITION = (
-    "IsolationForest.decision_function on the training rows; lower is more "
-    "anomalous; a row is an anomaly when predict() == -1."
+    "IsolationForest.decision_function on the training rows (segmented models: "
+    "each row's own entity-type model); lower is more anomalous; a row is an "
+    "anomaly when predict() == -1."
 )
 
 
@@ -163,9 +162,9 @@ def snapshot_refusal_reasons(
     label = metadata.get("feature_schema_version")
     if label != expected_feature_schema_version:
         reasons.append(
-            f"feature_schema_version {label!r} is not the configured real-source label "
-            f"{expected_feature_schema_version!r} (model_config.yaml "
-            "features.real_source_schema_version)"
+            f"feature_schema_version {label!r} is not the configured extract label "
+            f"{expected_feature_schema_version!r} (source_extract.yaml "
+            "source_extract.feature_schema_version)"
         )
 
     feature_columns = metadata.get("feature_columns")
@@ -178,30 +177,6 @@ def snapshot_refusal_reasons(
         reasons.append("feature_set_fingerprint does not match feature_columns")
 
     return reasons
-
-
-def _score_stats(scores: np.ndarray, is_anomaly: np.ndarray) -> dict[str, Any]:
-    row_count = int(len(scores))
-    if row_count == 0:
-        return {
-            "row_count": 0,
-            "anomaly_count": 0,
-            "anomaly_rate": None,
-            "score_p5": None,
-            "score_p50": None,
-            "score_p95": None,
-        }
-
-    p5, p50, p95 = np.percentile(scores, [5, 50, 95])
-    anomaly_count = int(is_anomaly.sum())
-    return {
-        "row_count": row_count,
-        "anomaly_count": anomaly_count,
-        "anomaly_rate": anomaly_count / row_count,
-        "score_p5": float(p5),
-        "score_p50": float(p50),
-        "score_p95": float(p95),
-    }
 
 
 def build_evaluation_report(
@@ -220,14 +195,20 @@ def build_evaluation_report(
         snapshot_metadata=snapshot_metadata,
     )
     model = load_trained_model(artifact.model_path)
-    scores = np.asarray(model.decision_function(feature_matrix), dtype=float)
-    is_anomaly = np.asarray(model.predict(feature_matrix)) == -1
     entity_types = snapshot_frame["entity_type"].astype(str).to_numpy()
+    # A segmented model routes each row by entity_type to its own segment.
+    scoring_input = (
+        feature_matrix.assign(entity_type=entity_types)
+        if isinstance(model, SegmentedIsolationForest)
+        else feature_matrix
+    )
+    scores = np.asarray(model.decision_function(scoring_input), dtype=float)
+    is_anomaly = np.asarray(model.predict(scoring_input)) == -1
 
     present = sorted(set(entity_types))
     unexpected = [t for t in present if t not in EXPECTED_ENTITY_TYPES]
     per_entity_type = {
-        entity_type: _score_stats(
+        entity_type: score_distribution(
             scores[entity_types == entity_type],
             is_anomaly[entity_types == entity_type],
         )
@@ -251,8 +232,16 @@ def build_evaluation_report(
             },
         },
         "contamination": artifact.model_parameters["contamination"],
+        "model_kind": artifact.model_kind,
+        "segments": {
+            entity_type: {
+                "feature_names": segment["feature_names"],
+                "feature_count": len(segment["feature_names"]),
+            }
+            for entity_type, segment in (artifact.segments or {}).items()
+        },
         "score_definition": SCORE_DEFINITION,
-        "overall": _score_stats(scores, is_anomaly),
+        "overall": score_distribution(scores, is_anomaly),
         "entity_types": per_entity_type,
         "missing_entity_types": [t for t in EXPECTED_ENTITY_TYPES if t not in present],
     }
@@ -266,6 +255,7 @@ def retrain(
     config_path: str | Path = DEFAULT_MODEL_CONFIG_PATH,
     artifact_root: str | Path | None = None,
     registry_path: str | Path = DEFAULT_REGISTRY_PATH,
+    source_extract_config_path: str | Path = DEFAULT_SOURCE_EXTRACT_CONFIG_PATH,
 ) -> RetrainResult:
     """Train a candidate from a real-source snapshot, evaluate it, and register it."""
 
@@ -280,7 +270,10 @@ def retrain(
     reasons = snapshot_refusal_reasons(
         snapshot_dir,
         snapshot_metadata,
-        expected_feature_schema_version=config.real_source_feature_schema_version,
+        # The snapshot label describes the extracted columns, not the model's spec.
+        expected_feature_schema_version=str(
+            load_source_extract_config(source_extract_config_path)["feature_schema_version"]
+        ),
     )
     if reasons:
         raise RetrainError(f"Snapshot {snapshot_dir} is not trainable: " + "; ".join(reasons))
@@ -369,10 +362,15 @@ def print_summary(result: RetrainResult) -> None:
         f"contamination={report['contamination']} "
         f"overall_anomaly_rate={_format(overall['anomaly_rate'], '.4f')}"
     )
-    print(f"{'entity_type':<14}{'rows':>8}{'anom_rate':>11}{'p5':>10}{'p50':>10}{'p95':>10}")
+    print(f"model_kind={report['model_kind']}")
+    print(
+        f"{'entity_type':<14}{'feats':>6}{'rows':>8}{'anom_rate':>11}{'p5':>10}{'p50':>10}{'p95':>10}"
+    )
     for entity_type, stats in report["entity_types"].items():
         print(
-            f"{entity_type:<14}{stats['row_count']:>8}"
+            f"{entity_type:<14}"
+            f"{report['segments'].get(entity_type, {}).get('feature_count', '-'):>6}"
+            f"{stats['row_count']:>8}"
             f"{_format(stats['anomaly_rate'], '.4f'):>11}"
             f"{_format(stats['score_p5'], '.4f'):>10}"
             f"{_format(stats['score_p50'], '.4f'):>10}"

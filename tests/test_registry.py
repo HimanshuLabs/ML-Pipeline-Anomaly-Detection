@@ -748,3 +748,157 @@ def test_real_registry_loads_and_saves_losslessly(tmp_path: Path) -> None:
 
     assert [entry.to_dict() for entry in entries] == raw_models
     assert saved_models == raw_models
+
+
+# --- stage 10c: retire v003 through the code path -------------------------------------
+
+V003_NOTE = "Superseded: single model learned entity type; see evaluation_report.json"
+V003_FILES = (
+    "model.joblib",
+    "metadata.json",
+    "feature_schema.json",
+    "baseline_stats.json",
+    "evaluation_report.json",
+)
+
+
+def _v003_file_hashes() -> dict[str, str]:
+    import hashlib
+
+    from anomaly_detection.registry import PROJECT_ROOT
+
+    artifact_dir = PROJECT_ROOT / "artifacts" / "models" / "isolation_forest" / "model_version=v003"
+    return {
+        name: hashlib.sha256((artifact_dir / name).read_bytes()).hexdigest()
+        for name in V003_FILES
+    }
+
+
+def _only_v003_status_and_notes_changed(before, after) -> None:
+    assert [entry.model_version for entry in after] == [entry.model_version for entry in before]
+    for old, new in zip(before, after, strict=True):
+        if old.model_version != "v003":
+            assert new == old
+            continue
+        changed = {key for key, value in new.to_dict().items() if old.to_dict()[key] != value}
+        assert changed == {"status", "notes"}
+        assert new.status == "retired"
+        assert new.notes == V003_NOTE
+
+
+@pytest.fixture()
+def real_v003_registered() -> None:
+    from anomaly_detection import registry
+
+    entries = load_model_registry(registry.DEFAULT_REGISTRY_PATH)
+    if not any(entry.model_version == "v003" for entry in entries):
+        pytest.skip("v003 is not in the real registry")
+
+
+def test_retire_v003_in_file_mode_changes_only_its_status_and_note_and_keeps_files(
+    real_v003_registered: None,
+) -> None:
+    from anomaly_detection import registry
+    from anomaly_detection.registry import retire_model_version
+
+    registry_path = registry.DEFAULT_REGISTRY_PATH  # per-test mirror of the real registry
+    pointer_before = registry.DEFAULT_ACTIVE_MODEL_PATH.read_bytes()
+    entries_before = load_model_registry(registry_path)
+    files_before = _v003_file_hashes()
+
+    entry = retire_model_version(
+        model_name="isolation_forest",
+        model_version="v003",
+        notes=V003_NOTE,
+    )
+
+    assert entry.status == "retired"
+    _only_v003_status_and_notes_changed(entries_before, load_model_registry(registry_path))
+    assert _v003_file_hashes() == files_before
+    assert registry.DEFAULT_ACTIVE_MODEL_PATH.read_bytes() == pointer_before
+
+
+def test_retire_refuses_the_active_version() -> None:
+    from anomaly_detection.registry import retire_model_version
+
+    with pytest.raises(RegistryError, match="active model version"):
+        retire_model_version(model_name="isolation_forest", model_version="v002", notes="no")
+
+
+def test_retire_v003_in_database_mode_writes_only_its_row_and_never_the_pointer(
+    real_v003_registered: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    from anomaly_detection import database, registry
+    from anomaly_detection.registry import RegistryState, retire_model_version
+
+    registry_path = registry.DEFAULT_REGISTRY_PATH
+    entries_before = load_model_registry(registry_path)
+    pointer_before = registry.DEFAULT_ACTIVE_MODEL_PATH.read_bytes()
+    state = RegistryState(
+        entries=entries_before,
+        model_name="isolation_forest",
+        active_model_version="v002",
+        pointer_version=5,
+        source=registry.POINTER_SOURCE_POSTGRES,
+    )
+    upserted: list[dict] = []
+
+    class _Engine:
+        @contextmanager
+        def begin(self):
+            yield object()
+
+        def dispose(self) -> None:
+            return None
+
+    def _never(*_args, **_kwargs):
+        raise AssertionError("retirement must not write the active pointer or extra rows")
+
+    fake_database = SimpleNamespace(
+        get_engine=_Engine,
+        lock_active_pointer=lambda _connection, _name: 5,
+        read_active_pointer=lambda _connection, _name: {
+            "model_version": "v002",
+            "artifact_path": "artifacts/models/isolation_forest/model_version=v002/model.joblib",
+            "notes": None,
+        },
+        insert_row_if_absent=lambda _connection, _table, _row: False,
+        upsert_model_registry_row=lambda _connection, row: upserted.append(dict(row)),
+        model_registry_row=database.model_registry_row,
+        snapshot_rows_for_training_metadata=database.snapshot_rows_for_training_metadata,
+        set_active_pointer=_never,
+        insert_row=_never,
+    )
+    monkeypatch.setattr(registry, "database_enabled", lambda: True)
+    monkeypatch.setattr(registry, "load_registry_state", lambda **_kwargs: state)
+    monkeypatch.setattr(registry, "_database", lambda: fake_database)
+
+    retire_model_version(model_name="isolation_forest", model_version="v003", notes=V003_NOTE)
+
+    assert [(row["model_version"], row["status"], row["notes"]) for row in upserted] == [
+        ("v003", "retired", V003_NOTE)
+    ]
+    # The file mirror follows the database; the pointer file is not written.
+    _only_v003_status_and_notes_changed(entries_before, load_model_registry(registry_path))
+    assert registry.DEFAULT_ACTIVE_MODEL_PATH.read_bytes() == pointer_before
+
+
+def test_registry_cli_retires_a_version(
+    real_v003_registered: None,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from anomaly_detection import registry
+
+    entries_before = load_model_registry(registry.DEFAULT_REGISTRY_PATH)
+
+    exit_code = registry.main(["retire", "--model-version", "v003", "--notes", V003_NOTE])
+
+    assert exit_code == 0
+    assert "status=retired" in capsys.readouterr().out
+    _only_v003_status_and_notes_changed(
+        entries_before, load_model_registry(registry.DEFAULT_REGISTRY_PATH)
+    )

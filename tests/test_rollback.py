@@ -428,3 +428,175 @@ def test_written_rollback_event_is_valid_jsonl(tmp_path: Path) -> None:
     assert payload["rollback_reason"] == "latency budget breach"
     assert payload["model_name"] == MODEL_NAME
     assert payload["rollback_id"].startswith("rollback_")
+
+
+# --- segmented models: compatibility is the segment spec ------------------------------
+
+SEGMENT_SPEC = {"alpha": ["feature_a", "feature_b"], "beta": ["feature_b", "feature_c"]}
+
+
+def _segmented_artifact(root: Path, version: str, segments: dict[str, list[str]]) -> Path:
+    """A fitted SegmentedIsolationForest artifact with segmented metadata.json."""
+
+    import numpy as np
+    import pandas as pd
+    from sklearn.ensemble import IsolationForest
+
+    from anomaly_detection.segmented_model import (
+        SEGMENTED_MODEL_KIND,
+        fit_segmented_isolation_forest,
+    )
+
+    columns = sorted({name for names in segments.values() for name in names})
+    rng = np.random.default_rng(1)
+    frame = pd.DataFrame(rng.normal(size=(40 * len(segments), len(columns))), columns=columns)
+    frame.insert(0, "entity_type", [t for t in segments for _ in range(40)])
+    model = fit_segmented_isolation_forest(
+        frame,
+        segment_features=segments,
+        build_model=lambda: IsolationForest(n_estimators=10, random_state=0),
+        min_rows_per_segment=30,
+    )
+
+    artifact_dir = root / "artifacts" / f"model_version={version}"
+    artifact_dir.mkdir(parents=True)
+    artifact_path = artifact_dir / "model.joblib"
+    joblib.dump(model, artifact_path)
+    (artifact_dir / "metadata.json").write_text(
+        json.dumps(
+            {
+                "model_name": MODEL_NAME,
+                "model_version": version,
+                "model_kind": SEGMENTED_MODEL_KIND,
+                "feature_names": columns,
+                "segments": {
+                    t: {"feature_names": names, "row_count": 40} for t, names in segments.items()
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return artifact_path
+
+
+def _mixed_registry(tmp_path: Path, versions: list[tuple[str, Path]]) -> tuple[Path, Path]:
+    registry_path = tmp_path / "registry" / "model_registry.json"
+    active_model_path = tmp_path / "configs" / "active_model.yaml"
+    for version, artifact_path in versions:
+        register_model(
+            model_name=MODEL_NAME,
+            model_version=version,
+            artifact_path=str(artifact_path),
+            dataset_snapshot_id=f"snapshot_{version}",
+            feature_schema_version="feature_schema_v003",
+            training_timestamp="2026-11-15T10:00:00+00:00",
+            registry_path=registry_path,
+        )
+    for version, _artifact_path in versions:
+        promote_model_version(
+            model_name=MODEL_NAME,
+            model_version=version,
+            registry_path=registry_path,
+            active_model_path=active_model_path,
+        )
+    return registry_path, active_model_path
+
+
+def test_segmented_rollback_target_with_the_same_spec_is_selected(tmp_path: Path) -> None:
+    registry_path, _ = _mixed_registry(
+        tmp_path,
+        [
+            ("v001", _segmented_artifact(tmp_path, "v001", SEGMENT_SPEC)),
+            ("v002", _segmented_artifact(tmp_path, "v002", SEGMENT_SPEC)),
+        ],
+    )
+
+    target = select_previous_stable_model(
+        load_model_registry(registry_path),
+        current_model_version="v002",
+        model_name=MODEL_NAME,
+    )
+
+    assert target.model_version == "v001"
+
+
+@pytest.mark.parametrize(
+    ("previous", "expected_reason"),
+    [
+        pytest.param(
+            lambda root: _segmented_artifact(
+                root, "v001", {**SEGMENT_SPEC, "beta": ["feature_c", "feature_b"]}
+            ),
+            "segment spec differs",
+            id="segmented_different_order",
+        ),
+        pytest.param(
+            lambda root: _segmented_artifact(root, "v001", {"alpha": SEGMENT_SPEC["alpha"]}),
+            "segment spec differs",
+            id="segmented_different_types",
+        ),
+        pytest.param(
+            lambda root: _fake_artifact(root, "v001", FEATURES),
+            "never compatible",
+            id="single_with_same_union",
+        ),
+    ],
+)
+def test_incompatible_segment_spec_is_not_a_rollback_target(
+    tmp_path: Path,
+    previous,
+    expected_reason: str,
+) -> None:
+    registry_path, _ = _mixed_registry(
+        tmp_path,
+        [
+            ("v001", previous(tmp_path)),
+            ("v002", _segmented_artifact(tmp_path, "v002", SEGMENT_SPEC)),
+        ],
+    )
+
+    with pytest.raises(RollbackError, match=f"v001: .*{expected_reason}"):
+        select_previous_stable_model(
+            load_model_registry(registry_path),
+            current_model_version="v002",
+            model_name=MODEL_NAME,
+        )
+
+
+def test_single_active_model_never_rolls_back_to_a_segmented_one(tmp_path: Path) -> None:
+    registry_path, _ = _mixed_registry(
+        tmp_path,
+        [
+            ("v001", _segmented_artifact(tmp_path, "v001", SEGMENT_SPEC)),
+            ("v002", _fake_artifact(tmp_path, "v002", FEATURES)),
+        ],
+    )
+
+    with pytest.raises(RollbackError, match="v001: .*never compatible"):
+        select_previous_stable_model(
+            load_model_registry(registry_path),
+            current_model_version="v002",
+            model_name=MODEL_NAME,
+        )
+
+
+def test_segmented_metadata_with_a_non_segmented_artifact_is_not_verified(
+    tmp_path: Path,
+) -> None:
+    from anomaly_detection.registry import RegistryError, load_verified_feature_names
+
+    artifact_path = _segmented_artifact(tmp_path, "v001", SEGMENT_SPEC)
+    joblib.dump({"fake_model": "v001"}, artifact_path)  # metadata still says segmented
+    registry_path = tmp_path / "registry" / "model_registry.json"
+    entry = register_model(
+        model_name=MODEL_NAME,
+        model_version="v001",
+        artifact_path=str(artifact_path),
+        dataset_snapshot_id="snapshot_v001",
+        feature_schema_version="feature_schema_v003",
+        training_timestamp="2026-11-15T10:00:00+00:00",
+        registry_path=registry_path,
+    )
+
+    with pytest.raises(RegistryError, match="model_kind"):
+        load_verified_feature_names(entry)
