@@ -935,3 +935,236 @@ def test_registry_cli_retires_a_version(
     _only_v003_status_and_notes_changed(
         entries_before, load_model_registry(registry.DEFAULT_REGISTRY_PATH)
     )
+
+
+# --- hardening H1: a retired version changes status only with an explicit override ---------
+
+
+def _v101_active_v102_retired(
+    trained_metadata_paths: dict[str, Path], tmp_path: Path
+) -> tuple[Path, Path]:
+    """Own registry and pointer: v101 production, v102 retired."""
+    from anomaly_detection.registry import retire_model_version
+
+    registry_path = tmp_path / "registry" / "model_registry.json"
+    pointer_path = tmp_path / "configs" / "active_model.yaml"
+    paths = {"registry_path": registry_path, "active_model_path": pointer_path}
+    for version in ("v101", "v102"):
+        register_model_from_artifacts(
+            metadata_path=trained_metadata_paths[version], registry_path=registry_path
+        )
+    promote_model_version(model_name="isolation_forest", model_version="v101", **paths)
+    retire_model_version(
+        model_name="isolation_forest", model_version="v102", notes="pytest retired", **paths
+    )
+    return registry_path, pointer_path
+
+
+def _bytes(*paths: Path) -> tuple[bytes, ...]:
+    return tuple(path.read_bytes() for path in paths)
+
+
+def test_promote_refuses_a_retired_version_and_changes_nothing(
+    trained_metadata_paths: dict[str, Path], tmp_path: Path
+) -> None:
+    registry_path, pointer_path = _v101_active_v102_retired(trained_metadata_paths, tmp_path)
+    before = _bytes(registry_path, pointer_path)
+
+    with pytest.raises(RegistryError, match=r"v102 is retired.*--allow-retired"):
+        promote_model_version(
+            model_name="isolation_forest",
+            model_version="v102",
+            registry_path=registry_path,
+            active_model_path=pointer_path,
+        )
+
+    assert _bytes(registry_path, pointer_path) == before
+
+
+def test_promote_with_allow_retired_makes_a_retired_version_production(
+    trained_metadata_paths: dict[str, Path], tmp_path: Path
+) -> None:
+    registry_path, pointer_path = _v101_active_v102_retired(trained_metadata_paths, tmp_path)
+
+    entry = promote_model_version(
+        model_name="isolation_forest",
+        model_version="v102",
+        registry_path=registry_path,
+        active_model_path=pointer_path,
+        allow_retired=True,
+    )
+
+    assert entry.status == "production"
+    assert read_active_model_pointer(pointer_path).active_model_version == "v102"
+
+
+def test_a_rolled_back_version_is_promoted_without_any_override(
+    trained_metadata_paths: dict[str, Path], tmp_path: Path
+) -> None:
+    # Stage 15e promoted the rolled_back v005 again; that must keep working.
+    from anomaly_detection.registry import promote_model
+
+    registry_path = tmp_path / "registry" / "model_registry.json"
+    pointer_path = tmp_path / "configs" / "active_model.yaml"
+    for version in ("v101", "v102"):
+        register_model_from_artifacts(
+            metadata_path=trained_metadata_paths[version], registry_path=registry_path
+        )
+    promote_model_version(
+        model_name="isolation_forest",
+        model_version="v101",
+        registry_path=registry_path,
+        active_model_path=pointer_path,
+    )
+    promote_model(
+        model_name="isolation_forest",
+        model_version="v102",
+        target_status="rolled_back",
+        registry_path=registry_path,
+        active_model_config_path=pointer_path,
+    )
+
+    entry = promote_model_version(
+        model_name="isolation_forest",
+        model_version="v102",
+        registry_path=registry_path,
+        active_model_path=pointer_path,
+    )
+
+    assert entry.status == "production"
+    assert read_active_model_pointer(pointer_path).active_model_version == "v102"
+
+
+@pytest.mark.parametrize("target_status", ["candidate", "staging", "archived", "production"])
+def test_promote_model_moves_a_retired_version_only_with_allow_retired(
+    trained_metadata_paths: dict[str, Path], tmp_path: Path, target_status: str
+) -> None:
+    # archived would make a retired, once-approved version a rollback target again.
+    from anomaly_detection.registry import promote_model
+
+    registry_path, pointer_path = _v101_active_v102_retired(trained_metadata_paths, tmp_path)
+    paths = {"registry_path": registry_path, "active_model_config_path": pointer_path}
+    before = _bytes(registry_path, pointer_path)
+
+    with pytest.raises(RegistryError, match=r"v102 is retired.*--allow-retired"):
+        promote_model(
+            model_name="isolation_forest",
+            model_version="v102",
+            target_status=target_status,
+            **paths,
+        )
+    assert _bytes(registry_path, pointer_path) == before
+
+    moved = promote_model(
+        model_name="isolation_forest",
+        model_version="v102",
+        target_status=target_status,
+        allow_retired=True,
+        **paths,
+    )
+    assert moved["status"] == target_status
+
+
+def test_retiring_a_retired_version_again_replaces_its_note(
+    trained_metadata_paths: dict[str, Path], tmp_path: Path
+) -> None:
+    from anomaly_detection.registry import retire_model_version
+
+    registry_path, pointer_path = _v101_active_v102_retired(trained_metadata_paths, tmp_path)
+
+    entry = retire_model_version(
+        model_name="isolation_forest",
+        model_version="v102",
+        notes="pytest: a better reason",
+        registry_path=registry_path,
+        active_model_path=pointer_path,
+    )
+
+    assert (entry.status, entry.notes) == ("retired", "pytest: a better reason")
+
+
+def _mirror_v101_active_v102_retired(trained_metadata_paths: dict[str, Path]) -> None:
+    """The same state in the per-test mirror (conftest), which the CLI uses."""
+    from anomaly_detection.registry import retire_model_version
+
+    for version in ("v101", "v102"):
+        register_model_from_artifacts(metadata_path=trained_metadata_paths[version])
+    promote_model_version(model_name="isolation_forest", model_version="v101")
+    retire_model_version(model_name="isolation_forest", model_version="v102", notes="pytest")
+
+
+def test_cli_refuses_a_retired_version_before_the_serving_check(
+    trained_metadata_paths: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from anomaly_detection import registry
+
+    _mirror_v101_active_v102_retired(trained_metadata_paths)
+    files = (registry.DEFAULT_REGISTRY_PATH, registry.DEFAULT_ACTIVE_MODEL_PATH)
+    before = _bytes(*files)
+
+    def _no_serving_check(_entry) -> None:
+        raise AssertionError("a retired version must be refused before the serving check")
+
+    monkeypatch.setattr(registry, "verify_servable", _no_serving_check)
+
+    exit_code = registry.main(["promote", "--model-version", "v102", "--notes", "pytest"])
+
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert "REFUSED" in err and "v102 is retired" in err and "--allow-retired" in err
+    assert _bytes(*files) == before
+
+
+def test_cli_allow_retired_needs_notes(
+    trained_metadata_paths: dict[str, Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from anomaly_detection import registry
+
+    _mirror_v101_active_v102_retired(trained_metadata_paths)
+    files = (registry.DEFAULT_REGISTRY_PATH, registry.DEFAULT_ACTIVE_MODEL_PATH)
+    before = _bytes(*files)
+
+    for notes in ([], ["--notes", "  "]):
+        exit_code = registry.main(["promote", "--model-version", "v102", "--allow-retired", *notes])
+
+        assert exit_code == 1
+        err = capsys.readouterr().err
+        assert "REFUSED" in err and "--allow-retired needs --notes" in err
+    assert _bytes(*files) == before
+
+
+def test_cli_promotes_a_retired_version_with_allow_retired_and_notes(
+    trained_metadata_paths: dict[str, Path],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from anomaly_detection import registry
+
+    _mirror_v101_active_v102_retired(trained_metadata_paths)
+
+    exit_code = registry.main(
+        ["promote", "--model-version", "v102", "--allow-retired", "--notes", "pytest: why"]
+    )
+
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "v102 status=production" in out and "notes=pytest: why" in out
+    pointer = read_active_model_pointer(registry.DEFAULT_ACTIVE_MODEL_PATH)
+    assert pointer.active_model_version == "v102"
+
+
+def test_registering_an_existing_version_again_is_refused_by_default(
+    trained_metadata_paths: dict[str, Path], tmp_path: Path
+) -> None:
+    registry_path, pointer_path = _v101_active_v102_retired(trained_metadata_paths, tmp_path)
+    before = _bytes(registry_path, pointer_path)
+
+    for version in ("v101", "v102"):  # production and retired: neither becomes a candidate
+        with pytest.raises(RegistryError, match="already registered"):
+            register_model_from_artifacts(
+                metadata_path=trained_metadata_paths[version], registry_path=registry_path
+            )
+
+    assert _bytes(registry_path, pointer_path) == before

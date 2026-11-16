@@ -139,12 +139,15 @@ the registry.
 Lifecycle: training and retraining register a version as `candidate`; `promote` makes it
 `production` after a serving check and archives the previous production version; `retire`
 takes a non-active version out of use (its files are kept); a rollback marks the version
-it leaves `rolled_back`.
+it leaves `rolled_back`. `promote` accepts a `rolled_back` version as any other, but
+refuses a `retired` one before the serving check unless `--allow-retired` is given, which
+needs `--notes` saying why.
 
 ```bash
 # tools() runs the tools image (see "Local runbook"); retrain never promotes
 tools python -m anomaly_detection.retrain --snapshot latest --model-version v005 --compare-with v004
 tools python -m anomaly_detection.registry promote --model-version v005 --notes "why"
+tools python -m anomaly_detection.registry promote --model-version v003 --allow-retired --notes "why"
 tools python -m anomaly_detection.registry retire --model-version v003 --notes "why"
 tools python -m anomaly_detection.registry register --metadata-path artifacts/models/isolation_forest/model_version=v005/metadata.json
 tools python -m anomaly_detection.registry mirror

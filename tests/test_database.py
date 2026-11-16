@@ -910,6 +910,41 @@ def test_forced_database_failure_changes_neither_database_nor_files(
 
 
 @pytest.mark.postgres
+def test_promote_refuses_a_retired_version_in_the_database_and_changes_nothing(
+    initialized_database,
+    isolate_repo_state: Path,
+    trained_metadata_paths: dict[str, Path],
+) -> None:
+    from anomaly_detection.registry import (
+        RegistryError,
+        promote_model_version,
+        retire_model_version,
+    )
+
+    _register_trained(trained_metadata_paths, ["v101", "v102"])
+    promote_model_version(model_name="isolation_forest", model_version="v101")
+    retire_model_version(model_name="isolation_forest", model_version="v102", notes="pytest")
+    mirror_registry = isolate_repo_state / REAL_REGISTRY_PATH.relative_to(REPO_ROOT)
+    mirror_pointer = isolate_repo_state / "configs" / "active_model.yaml"
+    files_before = (mirror_registry.read_bytes(), mirror_pointer.read_bytes())
+    entries_before = {
+        version: entry.to_dict()
+        for version, entry in _database_entries(initialized_database).items()
+    }
+    pointer_before = _database_pointer(initialized_database)
+
+    with pytest.raises(RegistryError, match=r"v102 is retired.*--allow-retired"):
+        promote_model_version(model_name="isolation_forest", model_version="v102")
+
+    assert {
+        version: entry.to_dict()
+        for version, entry in _database_entries(initialized_database).items()
+    } == entries_before
+    assert _database_pointer(initialized_database) == pointer_before
+    assert (mirror_registry.read_bytes(), mirror_pointer.read_bytes()) == files_before
+
+
+@pytest.mark.postgres
 def test_two_serving_processes_converge_on_a_new_pointer_version(
     initialized_database,
     trained_metadata_paths: dict[str, Path],
