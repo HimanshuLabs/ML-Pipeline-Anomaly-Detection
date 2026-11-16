@@ -6,9 +6,12 @@ previous stable approved model that can serve the same feature contract,
 updates the registry and the active pointer through the registry's single
 writers, and writes durable rollback audit evidence.
 
-Database support is planned through audit.rollback_events. The current
-implementation is local-first and writes JSONL rollback evidence so the behavior
-can be tested without requiring a live PostgreSQL dependency.
+With PROJECT4_POSTGRES_* configured, the registry rows, the shared pointer
+(ml.active_model_pointer) and the audit.rollback_events row are committed in one
+transaction; if the committed pointer then fails to load, they are restored and
+the event is marked 'failed'. Without a database the JSON registry and
+configs/active_model.yaml are the store. Either way the event is also appended to
+the rollback JSONL log.
 """
 
 from __future__ import annotations

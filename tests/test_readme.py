@@ -165,3 +165,109 @@ def test_kubernetes_section_follows_docker_and_lists_every_manifest() -> None:
     assert after_docker.startswith("Kubernetes runtime manifests\n")
     assert listed == {f"k8s/{path.name}" for path in (REPO_ROOT / "k8s").glob("*.yaml")}
     assert "docs/kubernetes_runtime_validation.md" in _section("Kubernetes runtime manifests")
+
+
+# --- docs/ (stage 14c-7) ----------------------------------------------------------
+
+DOCS = REPO_ROOT / "docs"
+# Exact stale strings replaced in 14c-7, per file (history sections keep other old text).
+DOCS_STALE_PHRASES = {
+    "rollback_runbook.md": (
+        "restart Uvicorn",
+        "Authentication/authorization for `/admin/rollback`.",
+        "no Kubernetes context is configured",
+        "Previous stable rollback target: `isolation_forest v001`",
+        "Direct PostgreSQL insert into `audit.rollback_events`.",
+        "Applied rollback updates `configs/active_model.yaml`.",
+    ),
+    "latency_budget.md": (
+        "no Kubernetes context is configured",
+        "- Production model version: `v002`",
+    ),
+    "model_lifecycle.md": (
+        "The registry is generated runtime metadata and is intentionally ignored by Git.",
+        "| Database metadata write | Planned |",
+        "The future online inference service will read this pointer",
+    ),
+    "drift_monitoring.md": (
+        "Loads the active v002 baseline statistics",
+        "It does not persist directly to PostgreSQL yet.",
+        "currently `v002`",
+        "Direct PostgreSQL insert wiring is planned",
+    ),
+    "inference_design.md": (
+        "| Direct PostgreSQL insert from Python | Planned |",
+        "project4_prediction_latency_seconds",
+        "Direct PostgreSQL inserts remain planned hardening",
+        "| Authentication | Not implemented locally.",
+        "Direct PostgreSQL insert wiring is planned",
+    ),
+    "source_integration.md": (
+        "export PROJECT1_POSTGRES_PASSWORD=",
+        "export PROJECT23_POSTGRES_PASSWORD=",
+        "## v002 production model",
+    ),
+    "data_contract.md": ("The current Project 4 feature schema version is:",),
+    "feature_engineering.md": ("The current feature schema version is:",),
+    "false_positive_false_negative_analysis.md": (
+        "Current production model state:",
+        "| Active version        | `v002`",
+        "| Feature count         | `51`",
+        "The current baseline tells us that the model flagged approximately 5.0%",
+        "The current active model baseline anomaly rate is:",
+        "That is approximately 5.0%.",
+        "* The active model is versioned as `v002`.",
+    ),
+}
+
+
+def test_docs_have_none_of_the_replaced_stale_phrases() -> None:
+    for name, phrases in DOCS_STALE_PHRASES.items():
+        text = (DOCS / name).read_text(encoding="utf-8")
+        for phrase in phrases:
+            assert phrase not in text, f"{name}: {phrase}"
+
+
+def test_every_admin_curl_in_the_docs_sends_the_admin_token() -> None:
+    admin_curls = [
+        f"{path.name}: {command}"
+        for path in sorted(DOCS.glob("*.md"))
+        for command in _commands(path.read_text(encoding="utf-8"))
+        if "curl" in command and "/admin/" in command
+    ]
+
+    assert len(admin_curls) >= 3  # rollback runbook (dry run, applied) and the k8s runbook
+    for command in admin_curls:
+        assert '-H "X-Admin-Token: $ADMIN_TOKEN"' in command, command
+
+
+def test_readme_has_no_home_directory_paths() -> None:
+    assert "~/Desktop" not in _text()
+
+
+def test_local_runbook_shows_the_disposable_test_database_recipe() -> None:
+    runbook = _section("Local runbook")
+
+    assert "--name project4_pg_test -p 127.0.0.1:5547:5432" in runbook
+    assert "postgres:16.14" in runbook
+    assert "dev_db() { docker run --rm --network host" in runbook
+    assert (
+        "-e PROJECT4_TEST_DATABASE_URL=postgresql+psycopg2://manshu:test_only@127.0.0.1:5547/"
+        "project4_ml -e PROJECT4_REQUIRE_TEST_DATABASE=1" in runbook
+    )
+    assert "dev_db env -u PYTHONPATH python -m pytest" in runbook
+    assert "docker stop project4_pg_test" in runbook
+    assert "`--network none`, so it cannot reach any database" in runbook
+
+
+def test_latency_docs_say_the_two_methods_are_not_comparable() -> None:
+    assert "not directly comparable" in _section("Latency budget")
+    assert "not directly comparable" in (DOCS / "latency_budget.md").read_text(encoding="utf-8")
+
+
+def test_rollback_module_docstring_describes_the_database_path() -> None:
+    source = (REPO_ROOT / "src" / "anomaly_detection" / "rollback.py").read_text(encoding="utf-8")
+    docstring = source.split('"""', 2)[1]
+
+    assert "Database support is planned" not in docstring
+    assert "audit.rollback_events row are committed in one" in docstring

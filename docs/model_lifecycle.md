@@ -23,12 +23,12 @@ This makes the system reproducible, auditable, and recoverable.
 | Area | Status | Notes |
 |---|---|---|
 | Feature validation | Implemented | Feature frames are validated before training, batch scoring, or online inference. |
-| Training snapshot generation | Implemented locally | Parquet snapshot and JSON metadata are written under data/features/training/. |
-| Database metadata write | Planned | Metadata maps to ml.feature_snapshots and ml.training_datasets, but DB writes are not wired yet. |
-| Isolation Forest training | Implemented locally | Training consumes frozen snapshot files and writes versioned local artifacts under artifacts/models/. |
-| Model registry | Implemented locally | Local JSON registry links model versions to artifact paths, snapshot_id, training_dataset_id, status, and approval state. |
-| Baseline metrics | Implemented locally | Training writes baseline_stats.json with feature baselines, anomaly rate, score summary, latency placeholders, and label-availability notes. |
-| Promotion and rollback | Implemented locally | Production promotion, active_model.yaml pointer updates, rollback target selection, dry-run rollback, applied rollback, and rollback evidence logging are implemented locally. |
+| Training snapshot generation | Implemented | Parquet snapshot and JSON metadata are written under data/features/training/. |
+| Database metadata write | Implemented | In database mode, a registry change also inserts the version's snapshot into ml.feature_snapshots (and ml.training_datasets for demo snapshots), if absent, in the same transaction. |
+| Isolation Forest training | Implemented | Training consumes frozen snapshot files and writes versioned artifacts under artifacts/models/; real-source snapshots train one model per entity type (segmented). |
+| Model registry | Implemented | ml.model_registry and ml.active_model_pointer in Postgres, with the JSON registry and configs/active_model.yaml as file mirror (the store when no database is configured). |
+| Baseline metrics | Implemented | Training writes baseline_stats.json with feature baselines, anomaly rate, score summary, latency placeholders, and label-availability notes; per segment for segmented models. |
+| Promotion and rollback | Implemented | `registry promote` / `retire` CLIs, `POST /admin/rollback` (X-Admin-Token) with dry run, compatibility-checked targets, and rollback evidence in JSONL and audit.rollback_events. |
 
 ---
 
@@ -108,24 +108,17 @@ This keeps bad training data out of the model lifecycle.
 
 ---
 
-## Local metadata fallback
+## Snapshot metadata in files and in the database
 
-At this checkpoint, snapshot metadata is written locally to JSON.
+Snapshot metadata is always written to JSON next to the snapshot. Snapshot generation
+itself never needs a database.
 
-This is intentional.
-
-The SQL metadata layer already defines the target tables:
-
-- ml.feature_snapshots
-- ml.training_datasets
-
-The snapshot module exposes database-shaped metadata records through:
-
-    metadata_to_database_records()
-
-Direct database writes will be added only after the database interface is confirmed and needed by the model registry flow.
-
-This avoids coupling snapshot generation to a database connection too early.
+In database mode, whenever the registry records a version (register, promote, retire,
+rollback, `sync-from-files`), the version's snapshot is inserted into
+`ml.feature_snapshots` (and, for demo snapshots, `ml.training_datasets`) if it is not there yet, in the same
+transaction as the registry change. The rows come from the snapshot metadata described
+by the bundle's `metadata.json` (`metadata_to_database_records()` for demo snapshots,
+`real_source_snapshot_row()` for real-source extracts).
 
 ---
 
@@ -185,17 +178,21 @@ If that answer is missing, the model is not production-grade.
 
 ---
 
-## Local model registry implementation
+## Model registry
 
-Checkpoint 7 implements a local JSON model registry.
-
-Registry path:
+With `PROJECT4_POSTGRES_*` configured, the registry is `ml.model_registry` and the
+active pointer is `ml.active_model_pointer` (with a `pointer_version` that increases on
+every change). The JSON file
 
     artifacts/models/_registry/model_registry.json
 
-The registry is generated runtime metadata and is intentionally ignored by Git.
+and `configs/active_model.yaml` are a mirror of the database, written after each change
+unless `PROJECT4_REGISTRY_FILE_MIRROR=false` (as in Kubernetes). Without a database they
+are the registry. Both files are tracked in Git (`.gitignore` excepts them), so a fresh
+database can be seeded from them with `python -m anomaly_detection.database
+sync-from-files`.
 
-Each local registry entry records:
+Each registry entry records:
 
 | Field group | Purpose |
 |---|---|
@@ -205,50 +202,70 @@ Each local registry entry records:
 | Schema lineage | feature_schema_version |
 | Training metadata | training_started_at_utc, training_finished_at_utc |
 | Baseline metrics | baseline_anomaly_rate, latency placeholders, future precision/recall proxy fields |
-| Lifecycle state | candidate, staging, production, archived, rolled_back, failed_validation |
+| Lifecycle state | candidate, staging, production, archived, rolled_back, retired |
 | Approval state | approved_for_prod, promoted_at_utc, archived_at_utc |
 
-This local registry mirrors the PostgreSQL target tables without forcing a database dependency into the first model lifecycle checkpoint.
+Lifecycle: training and retraining register a version as `candidate`; `registry promote`
+makes it `production` after a serving check and archives the previous production
+version; `registry retire` takes a non-active version out of use (files are kept); a
+rollback marks the version it leaves `rolled_back`.
+
+New versions (stage 14c-4 onwards) store their bundle paths in `metadata.json` relative
+to the repository root. v001–v004 keep the absolute paths they were written with
+(`/home/...` for v001/v002, `/app/...` for v003/v004); registration resolves them to the
+files next to the `metadata.json` being read, wherever the bundle is.
 
 ---
 
 ## Active model pointer
 
-The active production model is tracked in:
+The API, batch scoring, and the drift job serve the version named by the shared pointer:
+`ml.active_model_pointer` in database mode (`/health` reports `pointer_source:
+postgres`), else `configs/active_model.yaml` (`pointer_source: file`). The API polls the
+database pointer every `PROJECT4_POINTER_POLL_SECONDS` (default 30) and swaps the model
+in-process, so every replica follows a promote or rollback without a restart.
 
-    configs/active_model.yaml
-
-Current local pointer shape:
+Current pointer (`configs/active_model.yaml`, mirroring the database):
 
     model_name: isolation_forest
-    active_model_version: v001
-    artifact_path: artifacts/models/isolation_forest/model_version=v001/model.joblib
-    feature_schema_version: feature_schema_v001
+    active_model_version: v004
+    artifact_path: artifacts/models/isolation_forest/model_version=v004/model.joblib
+    feature_schema_version: feature_schema_v003
     status: production
 
-The artifact path is stored repo-relative. Absolute local paths are avoided because they make the repository machine-specific.
-
-The future online inference service will read this pointer to load the active production model.
+The artifact path is stored repo-relative.
 
 ---
 
-## Current local model state
+## Current model state (2026-11-15)
 
-The first promoted model is:
+| Version | Status | Kind | Feature schema | Notes |
+|---|---|---|---|---|
+| `v001` | retired | single | `feature_schema_v001` | Demo snapshot; proved training, artifacts, registry, and promotion. |
+| `v002` | archived | single | `feature_schema_v001` | First real-source model (51 features); production until v004. |
+| `v003` | retired | single | `feature_schema_v002` | Superseded: the single model learned the entity type rather than anomalies. |
+| `v004` | production | segmented | `feature_schema_v003` | One Isolation Forest per entity type (6 segments, 52 features); baseline anomaly rate 0.0507. |
 
-| Field | Value |
-|---|---|
-| model_name | isolation_forest |
-| model_version | v001 |
-| status | production |
-| approved_for_prod | true |
-| training mode | validated local demo snapshot |
-| baseline anomaly rate | 0.05 |
-| label availability | unlabeled_proxy_metrics |
+No version is a compatible rollback target for v004 until v005 is trained and promoted
+(v002 is single, v004 segmented). The live state is in `ml.model_registry` and
+`ml.active_model_pointer`, and `GET /model/active` reports the served version.
 
-Important limitation:
+---
 
-The `v001` model was trained from a validated demo snapshot generated inside Project 4. It proved the lifecycle mechanics, artifact layout, baseline metrics, registry, and promotion flow. It is now archived and rollback-eligible after promotion of the real-source `v002` model.
+## Fingerprints and content hashes
+
+- `feature_set_fingerprint` at the top of `metadata.json` uses two algorithms depending on
+  the model kind. Single models: sha256 of the ordered feature names joined with
+  newlines (`training.feature_set_fingerprint`). Segmented models: sha256 of the segment
+  spec as sorted-key JSON (`segmented_model.segment_spec_fingerprint`); each segment's
+  own `feature_set_fingerprint` uses the newline form. Nothing compares fingerprints
+  across model kinds: rollback compatibility compares the feature spec itself, and
+  retraining compares fingerprints computed by the same function. Changing either
+  algorithm would change stored metadata of existing bundles, so both stay as they are.
+- The demo snapshot `content_hash` (and the snapshot and dataset ids derived from it) is
+  the sha256 of `DataFrame.to_csv(...)`, so its float formatting depends on the pandas
+  version: the same frame could hash differently after a pandas upgrade. Real-source
+  snapshots use timestamp ids (`real_source_<UTC timestamp>`) and are not affected.
 
 ---
 
@@ -263,7 +280,7 @@ The implemented local training flow is:
         -> model trains on ordered feature columns
         -> baseline metrics are calculated
         -> artifact is saved under artifacts/models/
-        -> local model registry record links model_version to snapshot_id
+        -> registry record links model_version to snapshot_id
 
 Training should not read from a loose CSV, random dataframe, or mutable source table directly.
 
@@ -278,15 +295,18 @@ Training should not read from a loose CSV, random dataframe, or mutable source t
 | Invalid timestamps | Source range cannot be trusted. | Reject snapshot. |
 | Non-deterministic row ordering | Same data produces different IDs. | Normalize and sort before hashing. |
 | Missing metadata | Model version cannot be traced. | Always write metadata.json. |
-| Database unavailable | Snapshot process blocked if DB is hard dependency. | Use local JSON fallback. |
+| Database unavailable | Registry changes cannot be recorded. | Snapshots never need the database; a registry change refuses and changes nothing; the API keeps its model (or starts from the file pointer). |
 | Mutable training source | Model cannot be reproduced later. | Train only from snapshot path. |
 
 ---
 
+## History
 
----
+The sections below record earlier checkpoints as they were written (local JSON
+registry, v001 and then v002 in production). They are kept for history; the sections
+above describe the current state.
 
-## Checkpoint 7 lifecycle API update
+### Checkpoint 7 lifecycle API update
 
 The local registry now exposes an explicit lifecycle API:
 
@@ -325,10 +345,10 @@ The key rule is simple: the production pointer must identify not only which arti
 This avoids a common MLOps failure mode where the serving layer knows the model file path but loses dataset lineage.
 
 <!-- BEGIN REAL_SOURCE_MODEL_LIFECYCLE -->
-## Real-source model lifecycle
+### Real-source model lifecycle
 
 
-### Active production model
+#### Active production model
 
 The active production anomaly detection model is now `isolation_forest` version `v002`.
 
@@ -345,14 +365,14 @@ The active production anomaly detection model is now `isolation_forest` version 
 | Baseline anomaly rate | `0.05002985074626866` |
 | Source projects | `project_1`, `project_2_3` |
 
-### Version history
+#### Version history
 
 | Version | Status | Source | Rows | Features | Notes |
 |---|---|---|---:|---:|---|
 | `v001` | `archived` | Project 4 generated demo snapshot | `240` | `11` | First local Isolation Forest baseline used to prove training, baseline metrics, and registry mechanics. |
 | `v002` | `production` | Real Project 1 and Project 2/3 local PostgreSQL extracts | `16,750` | `51` | First production model trained from actual upstream project outputs. |
 
-### Metric interpretation
+#### Metric interpretation
 
 The model is an unsupervised Isolation Forest anomaly detector.
 
@@ -376,7 +396,7 @@ Those require delayed labels, backtesting labels, or a verified simulated-label 
 <!-- END REAL_SOURCE_MODEL_LIFECYCLE -->
 
 <!-- BASELINE_METRICS_CLOSURE_START -->
-## Baseline metrics closure for v002
+### Baseline metrics closure for v002
 
 The active production model is `isolation_forest` version `v002`.
 

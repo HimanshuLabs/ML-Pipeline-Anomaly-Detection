@@ -646,6 +646,10 @@ api_p95_latency_ms=19.994
 pass_latency_budget=true
 ```
 
+The two measurements use different methods: the v002 benchmark timed requests client-side
+(`scripts/benchmark_latency.py`), the v004 figures come from the server-side histogram,
+so they are not directly comparable.
+
 These measure local single-client scoring latency. They do not claim cloud latency,
 production network latency, or external feature-store latency.
 
@@ -868,10 +872,9 @@ holds the report itself. Postgres-marked tests are required in CI, so the summar
 ## Local runbook
 
 The images run the same dependency sets as CI. Two shell functions wrap them, with the
-repository mounted at `/app`:
+repository mounted at `/app`; run everything from the repository root:
 
 ```bash
-cd ~/Desktop/Project-4-ML-Pipeline-Anomaly-Detection
 # Tests and lint: dev image, no network.
 dev() { docker run --rm --network none --user "$(id -u):$(id -g)" -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 -v "$PWD":/app -w /app --entrypoint "" project4-anomaly-dev:local "$@"; }
 # Training, retraining, registry, batch, and drift: tools image on the host network;
@@ -887,6 +890,21 @@ tools python -m anomaly_detection.registry promote --model-version v005 --notes 
 
 Postgres-marked tests skip unless `PROJECT4_TEST_DATABASE_URL` points at a disposable
 database; with `PROJECT4_REQUIRE_TEST_DATABASE=1` they fail instead of skipping (as in CI).
+`dev()` runs with `--network none`, so it cannot reach any database. For the full suite,
+start a throwaway Postgres on 127.0.0.1:5547 and use `dev_db()`, which is `dev()` on the
+host network with the test database set:
+
+```bash
+docker run --rm -d --name project4_pg_test -p 127.0.0.1:5547:5432 \
+  -e POSTGRES_USER=manshu -e POSTGRES_PASSWORD=test_only -e POSTGRES_DB=project4_ml postgres:16.14
+timeout 90 sh -c 'until docker exec project4_pg_test pg_isready -h 127.0.0.1 -p 5432 -U manshu -q; do sleep 1; done'
+dev_db() { docker run --rm --network host --user "$(id -u):$(id -g)" -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 -e PROJECT4_TEST_DATABASE_URL=postgresql+psycopg2://manshu:test_only@127.0.0.1:5547/project4_ml -e PROJECT4_REQUIRE_TEST_DATABASE=1 -v "$PWD":/app -w /app --entrypoint "" project4-anomaly-dev:local "$@"; }
+dev_db env -u PYTHONPATH python -m pytest -p no:cacheprovider -o addopts= -q
+docker stop project4_pg_test   # --rm removes the container (and its data) on stop
+```
+
+The container is disposable: its password exists only for this throwaway database, and
+nothing else ever connects to 5547.
 
 Outside Docker, a Python 3.12 virtual environment works too:
 `python3.12 -m venv .venv && . .venv/bin/activate && pip install -r requirements-dev.txt -c constraints.txt`.

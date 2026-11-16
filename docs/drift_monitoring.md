@@ -8,53 +8,61 @@ The current implementation focuses on lightweight mean and variance drift checks
 
 Are the features being scored now still behaving like the features the model was trained on?
 
-## Current implementation status
+## Current state (2026-11-15)
 
-Implemented locally:
+Implemented:
 
-- Loads the active v002 baseline statistics from baseline_stats.json.
-- Compares current numeric feature mean and variance against training baseline mean and variance.
-- Supports three drift states: normal, warning, critical.
-- Supports default drift thresholds.
-- Supports feature-specific threshold overrides.
-- Produces one drift event per evaluated feature.
-- Produces an overall drift status for the evaluated window.
-- Writes local drift evidence to logs/alerts/drift_events.jsonl.
-- Includes deterministic tests for normal, warning, critical, variance-driven drift, zero-baseline handling, feature overrides, JSONL persistence, and bad-input failure paths.
+- Drift is measured against the ACTIVE model's training baseline (the version named by
+  the shared pointer: `ml.active_model_pointer` in database mode, else
+  `configs/active_model.yaml`), read from its `baseline_stats.json`.
+- A segmented model is evaluated per segment (entity type) against that segment's
+  baseline and features; a single model on its whole feature set.
+- Mean and variance drift per numeric feature; three states: normal, warning, critical;
+  default thresholds plus feature-specific overrides (`configs/drift_thresholds.yaml`);
+  a segment with fewer rows than the minimum is refused instead of producing noise.
+- One drift event per evaluated feature, written to `logs/alerts/drift_events.jsonl` and,
+  in database mode, to `monitoring.drift_events`; critical drift also creates alert
+  events (JSONL and `monitoring.alert_events`).
+- The drift job (`python -m anomaly_detection.drift_job --source batch-predictions
+  --hours 24`, or `--input <file>`) evaluates the last hours of `ml.batch_predictions`
+  for the active version. In Kubernetes it runs hourly (`k8s/cronjob-drift.yaml`).
+- The API reports the latest drift status of the request's segment in each online
+  prediction (`drift_status`), or `not_evaluated` when there is none.
+- Prometheus drift metrics and Grafana panels (see below).
 
-Database-ready but not wired yet:
+Active model baseline (2026-11-15): `isolation_forest` v004, segmented
+(`campaign`, `customer`, `funnel_day`, `product`, `user`, `web_customer`),
+`feature_schema_v003`, snapshot `real_source_20261115T010701Z`:
 
-- monitoring.drift_events exists in sql/create_monitoring_tables.sql.
-- The JSONL drift event shape is aligned with the SQL table columns.
-- Direct PostgreSQL insert wiring is planned for a later hardening pass.
+    artifacts/models/isolation_forest/model_version=v004/baseline_stats.json
 
-Planned later:
+## Nothing to evaluate: a stalled pipeline or a quiet one
 
-- Prometheus drift metrics are implemented.
-- Grafana drift dashboard panels are implemented locally.
-- Alert events from critical drift are implemented locally.
-- Rollback review trigger evidence exists through alert and rollback contracts.
-- Scheduled batch drift evaluation over scored production windows.
+With no batch predictions for the active version in the window, the drift job reports
+`not_evaluated`, records nothing, and exits 0. Its log line (stage 14c-2) separates three
+cases by the model name's last successful batch prediction (any version):
 
-## Active model baseline
+| Last successful batch prediction | Log | Meaning |
+|---|---|---|
+| never | INFO `No current rows for … ; drift not_evaluated` | Nothing was ever batch-scored (e.g. a fresh cluster). |
+| before the window | WARNING `… batch scoring stalled? last batch prediction at <ts> (model <version>), none in the last <h>h` | Batch scoring ran before but not recently: check it. |
+| inside the window, another version | INFO `… no rows for <active> yet; last batch run used <version> at <ts>` | Usually right after a promote: the next batch run scores the new version. |
 
-| Field | Value |
-|---|---|
-| Model name | isolation_forest |
-| Model version | v002 |
-| Feature schema version | feature_schema_v001 |
-| Snapshot type | real_source_extract |
-| Dataset snapshot ID | real_source_20260610T060738Z |
-| Feature count | 51 |
-| Baseline source | Project 1 + Project 2/3 local source extracts |
+To tell a stalled batch pipeline from a quiet one, compare the latest batch score with
+the batch schedule:
 
-Baseline file:
+    SELECT model_version,
+           max(score_timestamp) AS last_scored,
+           count(*) FILTER (WHERE score_timestamp > now() - interval '24 hours') AS rows_24h
+    FROM ml.batch_predictions
+    WHERE model_name = 'isolation_forest' AND prediction_status = 'success'
+    GROUP BY model_version
+    ORDER BY last_scored DESC;
 
-    artifacts/models/isolation_forest/model_version=v002/baseline_stats.json
-
-Active model pointer:
-
-    configs/active_model.yaml
+If `last_scored` is older than the batch schedule, scoring has stalled: check the batch
+job's last run and its logs. If scoring ran on schedule and the window is still empty
+for the active version, there was no traffic for it (or the last run used another
+version).
 
 ## Drift method
 
@@ -167,17 +175,12 @@ Each event includes:
     detected_at
     notes
 
-## Why JSONL first
+## Persistence
 
-JSONL is used as the first persistence layer because it is local, inspectable, testable, and does not require a running database.
-
-This is not the final production storage target. It is the local fallback path.
-
-The production-oriented table already exists:
-
-    monitoring.drift_events
-
-Direct database writes should reuse the same event contract so the API and batch jobs do not need a new drift payload shape later.
+Drift events are always appended to `logs/alerts/drift_events.jsonl` (local, inspectable,
+no database needed) and, in database mode, inserted into `monitoring.drift_events` with
+the same event contract. The API reads the latest run per segment from the database to
+report `drift_status`.
 
 ## Database alignment
 
@@ -217,11 +220,11 @@ Known limitations:
 - It compares only mean and variance.
 - It does not run population stability index.
 - It does not run Kolmogorov-Smirnov tests.
-- It does not persist directly to PostgreSQL yet.
-- It does not trigger alert events yet.
+- It evaluates batch-scored rows only; online requests are not part of the drift window.
 - It does not automatically roll back a model.
 
-These limitations are acceptable at this checkpoint because Project 4 is building the monitoring spine incrementally.
+These limitations are deliberate: drift is an operational signal, not a statistical
+drift platform.
 
 ## Operational interpretation
 
@@ -250,33 +253,13 @@ Failing loudly is correct here. Silent drift failure would make monitoring decor
 
 ## Validation
 
-Run drift tests:
+Run the drift and drift-job tests from the repository root with the dev image (the
+`dev()` function in the README's "Local runbook"):
 
-    cd ~/Desktop/Project-4-ML-Pipeline-Anomaly-Detection
-    source .venv/bin/activate
-    PYTHONPATH=src pytest tests/test_drift.py -q
+    dev env -u PYTHONPATH python -m pytest -p no:cacheprovider -o addopts= -q tests/test_drift.py tests/test_drift_job.py
 
-Expected result:
-
-    15 passed
-
-Run nearby regression tests:
-
-    PYTHONPATH=src pytest tests/test_prediction_logging.py tests/test_batch_inference.py tests/test_api.py -q
-
-Expected result:
-
-    24 passed
-
-Run final Checkpoint 12 validation:
-
-    PYTHONPATH=src pytest tests/test_drift.py tests/test_prediction_logging.py tests/test_batch_inference.py tests/test_api.py -q
-
-    PYTHONPATH=src python -m compileall -q src/anomaly_detection/drift.py tests/test_drift.py
-
-Expected result:
-
-    39 passed
+The database-backed drift-job tests (`-m postgres`) need a disposable test database; see
+the README's "Local runbook".
 
 ## Fit inside Project 4
 
@@ -284,21 +267,21 @@ This checkpoint sits after prediction logging and feeds the Prometheus metrics l
 
 Flow:
 
-    v002 training baseline
+    active model's training baseline (per segment)
         ↓
-    current feature batch/window
+    batch predictions of the last N hours (or a feature file)
         ↓
     mean/variance drift evaluation
         ↓
     normal/warning/critical status
         ↓
-    logs/alerts/drift_events.jsonl
+    logs/alerts/drift_events.jsonl + monitoring.drift_events
         ↓
     Prometheus metrics
         ↓
     Grafana panels
         ↓
-    future alert events
+    alert events (critical drift)
         ↓
     rollback review
 
@@ -364,7 +347,7 @@ http://localhost:3004
 Both dashboards use Prometheus as the datasource and expect Prometheus to scrape the Project 4 FastAPI metrics endpoint:
 
 ~~~text
-http://localhost:8004/metrics
+http://anomaly-api:8004/metrics   (compose network; from the host: http://127.0.0.1:8014/metrics)
 ~~~
 
 ### Dashboard inventory
@@ -438,17 +421,17 @@ Implemented:
 - The operator dashboard is designed for technical debugging.
 - The executive dashboard is designed for demo/storytelling clarity.
 
-Planned in later checkpoints:
+Notes:
 
-- Alert events are implemented locally and written as JSONL evidence.
-- Rollback execution is implemented locally through the `/admin/rollback` endpoint.
+- Alert events are written as JSONL evidence and, in database mode, to `monitoring.alert_events`.
+- Rollback runs through `POST /admin/rollback` (X-Admin-Token required).
 - Alert and rollback panels may show zero values until local traffic, drift evaluation, alerts, or rollback actions are generated.
 
 ### Import flow
 
-1. Confirm the API is running on port `8004`.
-2. Confirm Prometheus is running and scraping `localhost:8004`.
-3. Open Grafana on port `3004`.
+1. Confirm the compose API is running (`curl -s http://127.0.0.1:8014/health`).
+2. Confirm Prometheus (`127.0.0.1:9094`) is up and scraping `anomaly-api:8004` inside the compose network.
+3. Open Grafana on `127.0.0.1:3004`.
 4. Add or confirm a Prometheus datasource.
 5. Import `monitoring/grafana/dashboards/anomaly_detection_dashboard.json`.
 6. Import `monitoring/grafana/dashboards/anomaly_detection_executive_dashboard.json`.
@@ -459,7 +442,7 @@ Planned in later checkpoints:
 
 Healthy behavior:
 
-- `active_model_version` shows the expected production model, currently `v002`.
+- `active_model_version` shows the expected production model (the version `GET /model/active` reports).
 - Request count increases when `/predict` or `/predict/batch` is called.
 - Anomaly count increases only when the model returns anomaly predictions.
 - p95 latency stays below the configured online inference budget.
@@ -487,7 +470,7 @@ Unhealthy behavior:
 
 ## Alert events
 
-Alert events are implemented as a local-first monitoring contract.
+Alert events are a monitoring contract persisted to JSONL and, in database mode, to `monitoring.alert_events`.
 
 Implemented:
 
@@ -498,11 +481,10 @@ Implemented:
 - Manual alert test events are supported for smoke validation.
 - Alert records are persisted to `logs/alerts/anomaly_alerts.jsonl`.
 
-Database readiness:
+Database:
 
-- `sql/create_monitoring_tables.sql` already defines `monitoring.alert_events`.
-- The JSONL alert shape is aligned with the SQL table fields.
-- Direct PostgreSQL insert wiring is planned for a later hardening pass.
+- `sql/create_monitoring_tables.sql` defines `monitoring.alert_events`.
+- The JSONL alert shape matches the table; in database mode every alert is also inserted there.
 
 Alert event fields include:
 
@@ -541,7 +523,7 @@ Alert outputs:
 - `logs/alerts/anomaly_alerts.jsonl`
 - `monitoring.alert_events`
 
-The database table exists, but JSONL is the implemented persistence path in this checkpoint.
+Both are written: JSONL always, the table in database mode.
 
 Failure-mode notes:
 
