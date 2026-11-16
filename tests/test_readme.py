@@ -7,6 +7,7 @@ import re
 import shlex
 import subprocess
 import sys
+from pathlib import Path
 
 import yaml
 
@@ -66,12 +67,35 @@ def test_readme_lists_exactly_the_metric_families_of_metrics_py() -> None:
     assert listed == registered
 
 
-def test_every_admin_curl_in_the_readme_sends_the_admin_token() -> None:
-    admin_curls = [c for c in _commands(_text()) if "curl" in c and "/admin/" in c]
+# printf is a shell builtin, so the token never appears in any process's arguments; curl
+# reads the header line from stdin (-H @-).
+STDIN_TOKEN_CURL = "printf 'X-Admin-Token: %s\\n' \"$ADMIN_TOKEN\" | curl -s -X POST http"
+ADMIN_CURL_HEADERS = " -H @- -H 'Content-Type: application/json' -d '"
 
-    assert admin_curls, "the README shows how to call /admin/rollback"
-    for command in admin_curls:
-        assert '-H "X-Admin-Token: $ADMIN_TOKEN"' in command, command
+
+def _admin_curls(path: Path) -> list[str]:
+    """Admin curl commands, continuations joined and runs of spaces collapsed."""
+    return [
+        f"{path.name}: {' '.join(command.split())}"
+        for command in _commands(path.read_text(encoding="utf-8"))
+        if "curl" in command and "/admin/" in command
+    ]
+
+
+def test_every_admin_curl_reads_the_token_from_stdin() -> None:
+    readme_curls = _admin_curls(README)
+    docs_curls = [command for path in sorted(DOCS.glob("*.md")) for command in _admin_curls(path)]
+
+    assert readme_curls, "the README shows how to call /admin/rollback"
+    # README, rollback runbook (dry run, applied), Kubernetes runbook (dry run, applied).
+    assert len(readme_curls) + len(docs_curls) >= 5
+    for command in readme_curls + docs_curls:
+        assert STDIN_TOKEN_CURL in command and ADMIN_CURL_HEADERS in command, command
+
+
+def test_no_doc_passes_the_admin_token_as_a_header_argument() -> None:
+    for path in (README, *sorted(DOCS.glob("*.md"))):
+        assert '-H "X-Admin-Token' not in path.read_text(encoding="utf-8"), path.name
 
 
 def test_readme_has_none_of_the_stale_phrases() -> None:
@@ -329,19 +353,6 @@ def test_docs_have_none_of_the_replaced_stale_phrases() -> None:
         text = (DOCS / name).read_text(encoding="utf-8")
         for phrase in phrases:
             assert phrase not in text, f"{name}: {phrase}"
-
-
-def test_every_admin_curl_in_the_docs_sends_the_admin_token() -> None:
-    admin_curls = [
-        f"{path.name}: {command}"
-        for path in sorted(DOCS.glob("*.md"))
-        for command in _commands(path.read_text(encoding="utf-8"))
-        if "curl" in command and "/admin/" in command
-    ]
-
-    assert len(admin_curls) >= 3  # rollback runbook (dry run, applied) and the k8s runbook
-    for command in admin_curls:
-        assert '-H "X-Admin-Token: $ADMIN_TOKEN"' in command, command
 
 
 def test_readme_has_no_home_directory_paths() -> None:

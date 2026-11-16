@@ -463,6 +463,50 @@ def _section(text: str, number: int) -> str:
     return text.split(f"\n## {number}. ", 1)[1].split("\n## ", 1)[0]
 
 
+# Each Secret's keys, in the order the runbook writes them.
+SECRET_KEYS = {
+    APP_DB_SECRET: (
+        "PROJECT4_POSTGRES_HOST", "PROJECT4_POSTGRES_PORT", "PROJECT4_POSTGRES_DB",
+        "PROJECT4_POSTGRES_USER", "PROJECT4_POSTGRES_PASSWORD",
+    ),
+    OWNER_SECRET: ("POSTGRES_USER", "POSTGRES_PASSWORD", "POSTGRES_DB"),
+    ADMIN_SECRET: ("admin-token",),
+}
+GENERATED_VALUE = re.compile(r"\$\(openssl rand -hex \d+\)")
+
+
+def test_runbook_creates_every_secret_from_stdin_never_from_arguments() -> None:
+    import shlex
+
+    text = RUNBOOK.read_text(encoding="utf-8")
+    commands = [
+        line.strip()
+        for line in re.sub(r"\\\n\s*", " ", _section(text, 4)).splitlines()
+        if "create secret generic" in line
+    ]
+
+    assert len(commands) == len(SECRET_KEYS)
+    for name, keys in SECRET_KEYS.items():
+        command = next(c for c in commands if f"create secret generic {name} " in c)
+        # printf is a builtin: neither the keys nor the generated values reach a process's
+        # arguments; kubectl reads KEY=value lines from stdin.
+        assert command.startswith("printf ") and " | kubectl " in command, command
+        printf, kubectl = command.split(" | ", 1)
+        assert kubectl.startswith(f"kubectl {KCFG_FLAG} {CONTEXT_FLAG} -n {NAMESPACE} "), command
+        assert kubectl.endswith(f"create secret generic {name} --from-env-file=/dev/stdin")
+        words = shlex.split(printf, posix=False)
+        assert words[:2] == ["printf", "'%s=%s\\n'"], command
+        pairs = dict(zip(words[2::2], words[3::2], strict=True))
+        assert tuple(pairs) == keys, command
+        for key, value in pairs.items():
+            if key in NON_SECRET_VALUES:
+                assert value == NON_SECRET_VALUES[key], (name, key)
+            else:  # passwords and the admin token are generated, never typed
+                assert GENERATED_VALUE.fullmatch(value.strip('"')), (name, key, value)
+    assert "--from-literal" not in _section(text, 4)
+    assert not re.search(r"--from-literal=\S*(PASSWORD|token)", text, re.IGNORECASE)
+
+
 def test_runbook_loads_single_platform_image_archives_not_docker_images() -> None:
     # `kind load docker-image` imports every platform of Docker's multi-platform image
     # index and fails ("ctr: content digest … not found"); archives of one platform work.
