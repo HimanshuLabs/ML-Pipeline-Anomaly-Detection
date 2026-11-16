@@ -1,6 +1,6 @@
 # Rollback Runbook — Project 4 ML Pipeline & Anomaly Detection
 
-## Current state (2026-11-15)
+## Current state (2026-11-16)
 
 - `POST /admin/rollback` runs a dry run or an applied rollback. It requires the header
   `X-Admin-Token`: without a configured token the API answers **503** (admin disabled),
@@ -18,9 +18,13 @@
   (`PROJECT4_POINTER_POLL_SECONDS`, default 30).
 - Every applied rollback appends to `logs/alerts/rollback_events.jsonl` and increments
   `model_rollback_total`.
-- **Today there is no compatible target until v005.** v001 and v003 are retired, and v002
-  (single model) is never compatible with the segmented v004, so a dry run returns
-  HTTP 400 `No compatible rollback target for isolation_forest: …`.
+- The first real rollbacks ran on 2026-11-16: v005 → v004 in compose (stage 15d) and in
+  the kind cluster on both replicas (stage 15e); see "Observed" below.
+- **v004 is active and has no compatible target today.** v005 is `rolled_back`, which is
+  not a target; v001 and v003 are retired; v002 (single model) is never compatible with
+  the segmented v004. A dry run therefore returns HTTP 400
+  `No compatible rollback target for isolation_forest: …`. Promoting a version with
+  v004's segment spec archives v004 and makes it that version's target again.
 
 ## Purpose
 
@@ -121,6 +125,18 @@ mirror is written inside its own container. Bring the repository's
 
     tools python -m anomaly_detection.registry mirror
 
+Observed in compose on 2026-11-16 (stage 15d), after `registry promote --model-version v005`
+(pointer 3; v005 served with its `training_dataset_id`, and an online prediction row
+written):
+
+- the dry run validated v005 → v004;
+- the applied rollback moved the pointer to v004 (pointer 4), wrote one
+  `audit.rollback_events` row and incremented `model_rollback_total` to 1;
+- `registry mirror` brought `configs/active_model.yaml` and `model_registry.json` in line
+  with the database (v004 production, v005 `rolled_back`);
+- Project 5's contract was unchanged: the 71 columns of the three integration views were
+  identical before and after, and `project5_reader` was denied at schema `ml`.
+
 ## Verify the active model
 
     curl -s http://127.0.0.1:8014/model/active    # model_version is the target
@@ -192,9 +208,9 @@ After rollback:
 
 ## Kubernetes
 
-See [kubernetes_runtime_validation.md](kubernetes_runtime_validation.md). On the
-2026-11-15 live run, cross-replica propagation of the shared pointer was proven with
-promotes (v004 → v002 → v004, both replicas following each change), and the rollback dry
-run returned the expected HTTP 400. An applied rollback in the cluster is pending v005,
-when v004 becomes a compatible archived target. Kubernetes rollout rollback (images or
-configuration) is a separate deployment operation, not a model-registry operation.
+See [kubernetes_runtime_validation.md](kubernetes_runtime_validation.md), step 7. On the
+2026-11-16 live run (stage 15e) v005 was promoted through one pod and both replicas
+followed within one poll; the dry run validated v005 → v004, and the applied rollback
+moved both replicas back to v004 within one poll (pointer 1 → 2 → 3, one
+`audit.rollback_events` row). Kubernetes rollout rollback (images or configuration) is a
+separate deployment operation, not a model-registry operation.

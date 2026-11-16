@@ -219,6 +219,73 @@ DOCS_STALE_PHRASES = {
         "* The active model is versioned as `v002`.",
     ),
 }
+# Replaced in 15f, once v005 had been promoted and rolled back (compose and kind).
+DOCS_STALE_PHRASES_15F = {
+    "rollback_runbook.md": (
+        "Today there is no compatible target until v005.",
+        "An applied rollback in the cluster is pending v005",
+        "## Current state (2026-11-15)",
+    ),
+    "model_lifecycle.md": (
+        "No version is a compatible rollback target for v004 until v005",
+        "## Current model state (2026-11-15)",
+    ),
+    "inference_design.md": ("no compatible target exists for v004 until v005",),
+    "kubernetes_runtime_validation.md": (
+        "use-context",
+        "PREVIOUS_CONTEXT",
+        "real `/admin/rollback` run belongs after the v005 retrain",
+        "(expected until v005)",
+        "pkill -f",
+    ),
+}
+README_STALE_PHRASES_15F = (
+    "compatible target until v005",
+    "Registered versions on 2026-11-15:",
+    "restoring the context that was current before",
+)
+NO_LONGER_TRUE_ANYWHERE = re.compile(r"(until|pending) v005|after the v005 retrain")
+
+
+def test_docs_and_readme_drop_the_pre_v005_rollback_claims() -> None:
+    for name, phrases in DOCS_STALE_PHRASES_15F.items():
+        text = (DOCS / name).read_text(encoding="utf-8")
+        for phrase in phrases:
+            assert phrase not in text, f"{name}: {phrase}"
+    for phrase in README_STALE_PHRASES_15F:
+        assert phrase not in _text(), phrase
+    for path in (README, *sorted(DOCS.glob("*.md"))):
+        match = NO_LONGER_TRUE_ANYWHERE.search(path.read_text(encoding="utf-8"))
+        assert match is None, f"{path.name}: {match.group(0) if match else ''}"
+
+
+def test_readme_and_lifecycle_list_v005_as_rolled_back_with_its_lineage() -> None:
+    import json
+
+    v005 = json.loads(
+        (REPO_ROOT / "artifacts/models/isolation_forest/model_version=v005/metadata.json")
+        .read_text(encoding="utf-8")
+    )
+    registry = json.loads(
+        (REPO_ROOT / "artifacts/models/_registry/model_registry.json").read_text(encoding="utf-8")
+    )
+    status = next(m["status"] for m in registry["models"] if m["model_version"] == "v005")
+    lifecycle = (DOCS / "model_lifecycle.md").read_text(encoding="utf-8")
+    for text in (_section("Model lifecycle"), lifecycle):
+        row = next(line for line in text.splitlines() if line.startswith("| `v005` |"))
+        assert f"| {status} | segmented | `{v005['feature_schema_version']}` |" in row
+        assert v005["training_snapshot_metadata"]["training_dataset_id"] in row
+        assert v005["mlflow_run_id"] in row
+
+
+def test_known_limitations_list_that_promote_accepts_retired_versions() -> None:
+    limitations = _section("Known limitations")
+
+    assert "`registry promote` accepts a registered version in any status" in limitations
+    assert "`retired`" in limitations
+    assert "some tests read the committed registry state" in limitations
+    assert "fixture registries" in limitations
+    assert "curl -H @-" in limitations and "process list" in limitations
 
 
 def test_docs_have_none_of_the_replaced_stale_phrases() -> None:

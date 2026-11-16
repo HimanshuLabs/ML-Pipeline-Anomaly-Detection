@@ -44,6 +44,17 @@ The production model v004 was trained from this real-source snapshot:
 
 Each entity type trains its own Isolation Forest (one segment per type).
 
+## Fresh extract for v005 (stage 15b, 2026-11-16)
+
+The first read-only extract (sessions with `default_transaction_read_only=on`, see
+"Reproduction commands") wrote `real_source_20261116T035043Z`: 2,504 rows, `passed`,
+`content_sha256` `ad2c8596da09eae4b77875b3d96c698de948ac1508a42a482bb9e4f44f02f6f1`,
+`training_dataset_id` `64e7a3c0-bd07-5f74-95f5-71cc9e494e1b`. That hash is identical to
+the hash of v004's training snapshot above (recomputed from its directory by
+`retrain --compare-with v004`): the sources had not changed between the two extracts,
+the hash is deterministic across extract runs, and Project 2/3's recreated Postgres
+container still held the same data. v005 was trained on it (stage 15c).
+
 ## Source systems
 
 The row counts below are from the first extract (2026-06-10).
