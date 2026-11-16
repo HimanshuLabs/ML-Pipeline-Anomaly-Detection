@@ -2,13 +2,24 @@ services:
   anomaly-api:
     build:
       context: .
-      dockerfile: docker/Dockerfile.api
+      dockerfile: docker/Dockerfile
+      target: runtime
     image: project4-anomaly-api:local
     ports:
-      - "${PROJECT4_API_HOST_PORT:-8014}:8004"
+      # Host-only, like every P4 service; P5 calls it from the host on 127.0.0.1.
+      - "127.0.0.1:${PROJECT4_API_HOST_PORT:-8014}:8004"
     environment:
       PYTHONPATH: /app/src
       PYTHONUNBUFFERED: "1"
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      ADMIN_TOKEN: ${PROJECT4_ADMIN_TOKEN:-}
+      # Shared registry/pointer in anomaly-postgres; with an empty password the API
+      # stays on the file pointer.
+      PROJECT4_POSTGRES_HOST: anomaly-postgres
+      PROJECT4_POSTGRES_PORT: "5432"
+      PROJECT4_POSTGRES_DB: project4_ml
+      PROJECT4_POSTGRES_USER: manshu
+      PROJECT4_POSTGRES_PASSWORD: ${PROJECT4_POSTGRES_PASSWORD:-}
     volumes:
       - ./logs:/app/logs
 
@@ -17,8 +28,9 @@ services:
       - batch
     build:
       context: .
-      dockerfile: docker/Dockerfile.batch
-    image: project4-anomaly-batch:local
+      dockerfile: docker/Dockerfile
+      target: tools
+    image: project4-anomaly-tools:local
     environment:
       PYTHONPATH: /app/src
       PYTHONUNBUFFERED: "1"
@@ -30,3 +42,114 @@ services:
       - -m
       - anomaly_detection.batch_inference
       - --help
+
+  # Project 4's own metadata database (P5 expects 127.0.0.1:5435 / project4_ml / manshu).
+  # No restart policy: start it manually with `docker compose up -d anomaly-postgres`.
+  # Without PROJECT4_POSTGRES_PASSWORD in .env only this container refuses to start
+  # (the postgres image exits when POSTGRES_PASSWORD is empty); other services are unaffected.
+  anomaly-postgres:
+    image: postgres:16.14
+    container_name: project4_postgres
+    ports:
+      - "127.0.0.1:5435:5432"
+    environment:
+      POSTGRES_DB: project4_ml
+      POSTGRES_USER: manshu
+      POSTGRES_PASSWORD: ${PROJECT4_POSTGRES_PASSWORD:-}
+    volumes:
+      - anomaly_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U manshu -d project4_ml"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  # Monitoring. No restart policy: start with
+  #   docker compose up -d anomaly-api prometheus grafana
+  # Prometheus (127.0.0.1:9094; P5 uses 9095) scrapes anomaly-api:8004 on this network.
+  prometheus:
+    image: prom/prometheus:v3.5.4
+    ports:
+      - "127.0.0.1:9094:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
+    depends_on:
+      - anomaly-api
+
+  # Grafana on 127.0.0.1:3004 (P5 contract). The admin password comes from
+  # PROJECT4_GRAFANA_ADMIN_PASSWORD in .env; without it this container refuses to
+  # start (other services are unaffected) instead of falling back to a default.
+  grafana:
+    image: grafana/grafana-oss:13.0.2
+    ports:
+      - "127.0.0.1:3004:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${PROJECT4_GRAFANA_ADMIN_PASSWORD:-}
+      GF_SERVER_ROOT_URL: ${PROJECT4_GRAFANA_ROOT_URL:-http://127.0.0.1:3004/}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+    entrypoint:
+      - sh
+      - -c
+      - >-
+        if [ -z "$$GF_SECURITY_ADMIN_PASSWORD" ]; then
+        echo "PROJECT4_GRAFANA_ADMIN_PASSWORD is not set in .env; refusing to start" >&2;
+        exit 1; fi; exec /run.sh
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana_data:/var/lib/grafana
+    depends_on:
+      - prometheus
+
+  # MLflow tracking server on 127.0.0.1:5004: a record of training runs, never the
+  # source of truth (the Postgres registry and active-model pointer are). Runs from
+  # the tools image (the API image has no mlflow); no restart policy. Backend store: the dedicated database
+  # project4_mlflow (role project4_mlflow) in anomaly-postgres, created once with
+  # sql/create_mlflow_database.sql; never the project4_ml database. The URI (with the
+  # password) reaches the server only through MLFLOW_BACKEND_STORE_URI. Without
+  # PROJECT4_MLFLOW_DB_PASSWORD in .env only this container refuses to start.
+  # Artifacts are served from the mlflow_artifacts volume, mounted at /var/lib/mlflow (the
+  # tools image creates it for the non-root app user, uid 999); runs recorded while the
+  # volume sat at /app/logs keep resolving, since mlflow-artifacts/ is the same subfolder.
+  mlflow:
+    image: project4-anomaly-tools:local
+    ports:
+      - "127.0.0.1:5004:5000"
+    environment:
+      HOME: /tmp
+      MLFLOW_DISABLE_TELEMETRY: "true"
+      GIT_PYTHON_REFRESH: quiet
+      PROJECT4_MLFLOW_DB_PASSWORD: ${PROJECT4_MLFLOW_DB_PASSWORD:-}
+      MLFLOW_BACKEND_STORE_URI: postgresql+psycopg2://project4_mlflow:${PROJECT4_MLFLOW_DB_PASSWORD:-}@anomaly-postgres:5432/project4_mlflow
+    entrypoint:
+      - sh
+      - -c
+      - >-
+        if [ -z "$$PROJECT4_MLFLOW_DB_PASSWORD" ]; then
+        echo "PROJECT4_MLFLOW_DB_PASSWORD is not set in .env; refusing to start" >&2;
+        exit 1; fi; exec mlflow server --host 0.0.0.0 --port 5000
+        --serve-artifacts --artifacts-destination /var/lib/mlflow/mlflow-artifacts
+    volumes:
+      - mlflow_artifacts:/var/lib/mlflow
+    # The image's own healthcheck probes the API port; check the MLflow server instead.
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health', timeout=3).read()"
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    depends_on:
+      anomaly-postgres:
+        condition: service_healthy
+
+volumes:
+  anomaly_postgres_data:
+  grafana_data:
+  mlflow_artifacts:

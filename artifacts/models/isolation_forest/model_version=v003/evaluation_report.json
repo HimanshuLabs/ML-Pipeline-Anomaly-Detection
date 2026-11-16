@@ -1,0 +1,83 @@
+{
+  "contamination": 0.05,
+  "entity_types": {
+    "campaign": {
+      "anomaly_count": 28,
+      "anomaly_rate": 0.7567567567567568,
+      "row_count": 37,
+      "score_p5": -0.21878901255171831,
+      "score_p50": -0.12976593658087887,
+      "score_p95": 0.1209096561705749
+    },
+    "customer": {
+      "anomaly_count": 22,
+      "anomaly_rate": 0.04426559356136821,
+      "row_count": 497,
+      "score_p5": 0.0013437234289637393,
+      "score_p50": 0.09639537376551144,
+      "score_p95": 0.13778855437776907
+    },
+    "funnel_day": {
+      "anomaly_count": 0,
+      "anomaly_rate": 0.0,
+      "row_count": 926,
+      "score_p5": 0.14968876596825803,
+      "score_p50": 0.1702286548117024,
+      "score_p95": 0.1809069758055301
+    },
+    "product": {
+      "anomaly_count": 76,
+      "anomaly_rate": 0.5170068027210885,
+      "row_count": 147,
+      "score_p5": -0.07591952700767385,
+      "score_p50": -0.0006708934104238118,
+      "score_p95": 0.05754761160440596
+    },
+    "user": {
+      "anomaly_count": 0,
+      "anomaly_rate": 0.0,
+      "row_count": 400,
+      "score_p5": 0.07712767268603325,
+      "score_p50": 0.12598647716060343,
+      "score_p95": 0.1471091504232915
+    },
+    "web_customer": {
+      "anomaly_count": 0,
+      "anomaly_rate": 0.0,
+      "row_count": 497,
+      "score_p5": 0.0707272893477032,
+      "score_p50": 0.11485902874146658,
+      "score_p95": 0.1325588318231113
+    }
+  },
+  "feature_count": 52,
+  "feature_schema_version": "feature_schema_v002",
+  "feature_set_fingerprint": "eadd4b57c6818ff48f3bafff6236d42022b853dca961619fef3348022c30eebe",
+  "generated_at_utc": "2026-11-15T01:08:24.258499+00:00",
+  "missing_entity_types": [],
+  "model_name": "isolation_forest",
+  "model_version": "v003",
+  "overall": {
+    "anomaly_count": 126,
+    "anomaly_rate": 0.050319488817891375,
+    "row_count": 2504,
+    "score_p5": -8.61940727125976e-18,
+    "score_p50": 0.12687028063104255,
+    "score_p95": 0.17863625141776507
+  },
+  "report_type": "retrain_evaluation",
+  "row_counts": {
+    "by_entity_type": {
+      "campaign": 37,
+      "customer": 497,
+      "funnel_day": 926,
+      "product": 147,
+      "user": 400,
+      "web_customer": 497
+    },
+    "snapshot": 2504,
+    "trained": 2504
+  },
+  "score_definition": "IsolationForest.decision_function on the training rows; lower is more anomalous; a row is an anomaly when predict() == -1.",
+  "snapshot_id": "real_source_20261115T010701Z"
+}

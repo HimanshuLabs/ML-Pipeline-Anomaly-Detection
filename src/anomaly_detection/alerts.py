@@ -280,6 +280,8 @@ def create_critical_drift_alerts(drift_result: Any) -> list[AlertEvent]:
             continue
 
         feature_name = str(event.get("feature_name", "unknown_feature"))
+        segment = event.get("entity_type")
+        segment_text = f" (segment {segment})" if segment else ""
         mean_delta_percent = _required_finite_float(
             event.get("mean_delta_percent", 0.0),
             field_name="mean_delta_percent",
@@ -320,10 +322,11 @@ def create_critical_drift_alerts(drift_result: Any) -> list[AlertEvent]:
                 entity_id=feature_name,
                 message=(
                     "Critical drift detected for feature "
-                    f"{feature_name} on model {model_version}."
+                    f"{feature_name}{segment_text} on model {model_version}."
                 ),
                 details={
                     "feature_name": feature_name,
+                    "segment": segment,
                     "feature_dtype": event.get("feature_dtype"),
                     "baseline_mean": event.get("baseline_mean"),
                     "current_mean": event.get("current_mean"),
@@ -539,6 +542,35 @@ def append_alert_events_jsonl(
             )
 
     return output_path
+
+
+def insert_alert_events_database(alert_events: list[AlertEvent]) -> int:
+    """Store alert events in monitoring.alert_events (one transaction).
+
+    The database counterpart of append_alert_events_jsonl.
+    """
+
+    from anomaly_detection import database
+
+    if not alert_events:
+        raise AlertingError("no alert events supplied")
+    for alert_event in alert_events:
+        _validate_alert_event(alert_event)
+    return database.insert_alert_events(alert_events)
+
+
+def persist_alert_events(
+    alert_events: list[AlertEvent],
+    output_path: Path = DEFAULT_ALERT_EVENTS_PATH,
+) -> dict[str, Any]:
+    """JSONL always, plus monitoring.alert_events when the database is configured."""
+
+    from anomaly_detection import database
+
+    written: dict[str, Any] = {"jsonl": append_alert_events_jsonl(alert_events, output_path)}
+    if database.is_configured():
+        written["postgres"] = insert_alert_events_database(alert_events)
+    return written
 
 
 def read_alert_events_jsonl(path: Path) -> list[dict[str, Any]]:

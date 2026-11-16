@@ -20,19 +20,18 @@ This keeps Project 4 aligned with the wider platform:
 
 | Area | Status | Notes |
 |---|---|---|
-| Active production model loading | Implemented | Batch scorer reads `configs/active_model.yaml`. |
-| Production model version | Implemented | Active model version is `v002`. |
-| Batch scoring | Implemented | `src/anomaly_detection/batch_inference.py` scores pandas feature batches. |
+| Active production model loading | Implemented | The version named by the shared pointer: `ml.active_model_pointer` in database mode, else `configs/active_model.yaml`. |
+| Production model version | Implemented | `v004` on 2026-11-15: segmented, one Isolation Forest per entity type, `feature_schema_v003`. |
+| Batch scoring | Implemented | `src/anomaly_detection/batch_inference.py` scores pandas feature batches; segmented models route each row by `entity_type`. |
 | Prediction contract | Implemented | Each record includes model version, entity, score, anomaly flag, threshold, timestamp, feature hash, and feature payload. |
-| Local JSONL persistence | Implemented | Fallback path is `logs/predictions/batch_predictions.jsonl`. |
-| PostgreSQL prediction schema | Implemented | `sql/create_prediction_tables.sql` defines `ml.batch_predictions` and `ml.online_predictions`. |
-| Direct PostgreSQL insert from Python | Planned | Schema exists, but this checkpoint uses JSONL fallback first for deterministic local validation. |
-| Online FastAPI inference | Implemented | FastAPI service loads active `v002` model in memory and supports health, active model, single prediction, batch prediction, metrics, and rollback stub endpoints. |
+| JSONL persistence | Implemented | `logs/predictions/batch_predictions.jsonl` and `logs/predictions/online_predictions.jsonl`. |
+| PostgreSQL persistence | Implemented | In database mode, batch runs insert `ml.batch_predictions` and the API inserts `ml.online_predictions` (after the response). |
+| Online FastAPI inference | Implemented | Serves the pointer's version in memory, swaps it in-process when the pointer changes; `/livez`, `/health`, `/model/active`, `/predict`, `/predict/batch`, `/metrics`, `/admin/rollback`. |
 | Prometheus metrics | Implemented | FastAPI exposes Prometheus-format runtime metrics through `/metrics`. |
-| Drift checks | Implemented | Mean/variance drift checks compare current feature windows against the active `v002` baseline. |
+| Drift checks | Implemented | Mean/variance drift against the active model's baseline, per segment; hourly drift job. |
 | Grafana dashboards | Implemented locally | Operator and executive dashboard JSON files are stored under `monitoring/grafana/dashboards/`. |
-| Alert events | Implemented locally | Alert records are written for critical drift, anomaly-rate spikes, latency breaches, prediction-error breaches, and manual alerts. |
-| Rollback integration | Implemented locally | `/admin/rollback` supports dry-run and applied rollback to the previous stable model. |
+| Alert events | Implemented | JSONL and `monitoring.alert_events` for critical drift, anomaly-rate spikes, latency breaches, prediction-error breaches, and manual alerts. |
+| Rollback integration | Implemented | `POST /admin/rollback` (X-Admin-Token) with dry run; target rules in `docs/rollback_runbook.md`. |
 
 ---
 
@@ -55,23 +54,24 @@ Validated Project 4 feature dataframe
     ↓
 Load active production model pointer
     ↓
-Load v002 model artifact + metadata + schema + baseline stats
+Load the active version's model artifact + metadata + schema + baseline stats
     ↓
-Validate model feature columns and numeric values
+Validate model feature columns and numeric values (per segment for segmented models)
     ↓
 Generate anomaly scores with Isolation Forest
     ↓
 Mark anomalies using model prediction output
     ↓
-Write prediction evidence to JSONL fallback
+Write prediction evidence to JSONL (and ml.batch_predictions in database mode)
 ```
 
-Current active model:
+Current active model (2026-11-15):
 
 ```text
 model_name: isolation_forest
-model_version: v002
-feature_schema_version: feature_schema_v001
+model_version: v004
+model_kind: segmented (campaign, customer, funnel_day, product, user, web_customer)
+feature_schema_version: feature_schema_v003
 snapshot_type: real_source_extract
 source_projects: project_1, project_2_3
 ```
@@ -144,28 +144,37 @@ The scorer also supports a fallback path for model objects exposing only `score_
 
 ## Persistence design
 
-The PostgreSQL table schema already exists:
+Prediction evidence goes to two sinks:
 
 ```text
-ml.batch_predictions
-ml.online_predictions
+logs/predictions/batch_predictions.jsonl    logs/predictions/online_predictions.jsonl   (always)
+ml.batch_predictions                        ml.online_predictions                       (database mode)
 ```
 
-Checkpoint 9 intentionally writes to a local JSONL fallback first:
+A batch run inserts its rows in one transaction. The API writes online evidence as a
+background task after the response, so a persistence failure is counted
+(`prediction_persist_failures_total{sink=...}`) and logged but never fails the request.
+`integration.prediction_outputs` exposes both tables to Project 5.
 
-```text
-logs/predictions/batch_predictions.jsonl
-```
+## feature_payload_hash and the 14c-5 cutover
 
-Reason:
+`feature_payload_hash` is the sha256 of exactly the features the model scored for the
+record (for a segmented model, the segment features of its entity type), with values
+cast to float (NaN and inf as null), in sorted-key compact canonical JSON. Extra request
+keys (`entity_id`, `entity_type`, unknown keys) never enter it. Online and batch scoring
+use one shared function, so the same row hashes identically on both paths.
 
-- deterministic local validation,
-- no dependency on database availability,
-- easy inspection during development,
-- safe replay into PostgreSQL later,
-- stable prediction contract before adding database insert logic.
+This canonical form starts at commit `a57058a` (stage 14c-5). Rows written before it differ:
 
-This is a staged implementation. It does not claim that direct PostgreSQL persistence from Python is complete.
+| Rows | Before `a57058a` | From `a57058a` |
+|---|---|---|
+| Online | sha256 of the whole request payload as sent: every key, ints kept as ints (`4` and `4.0` hashed differently) | Only the scored features, as floats |
+| Batch | Only the scored features, but values as pandas produced them: int columns stayed ints in frames with a text column | Only the scored features, always as floats |
+
+Old rows are not rewritten. The stored `feature_payload` JSON of batch rows is unchanged
+(raw values); only the hash computation changed. Joining or deduplicating on
+`feature_payload_hash` across the cutover can therefore miss matches; from the cutover
+on, online and batch hashes of the same row match.
 
 ---
 
@@ -200,7 +209,7 @@ Weaknesses:
 
 ### Online inference
 
-Online inference is implemented through FastAPI and loads the active `v002` model in memory.
+Online inference is implemented through FastAPI and keeps the active version (the shared pointer's) in memory.
 
 Best use cases:
 
@@ -248,7 +257,12 @@ This is intentional. Silent scoring with broken features would poison prediction
 
 ---
 
-## Validation evidence
+## History: checkpoint 9 (batch scoring with v002)
+
+The two subsections below record checkpoint 9 as it was written. Everything listed under
+"Planned" there is implemented now (see "Current implementation status").
+
+### Validation evidence
 
 Checkpoint 9 validation confirms:
 
@@ -275,9 +289,7 @@ threshold_used = 0.0
 
 That result is expected because the row was built from baseline feature means.
 
----
-
-## Current limitation
+### Checkpoint 9 scope
 
 Implemented:
 
@@ -310,17 +322,22 @@ Checkpoint 9 is complete only when the batch scorer, unit tests, and this docume
 
 ### Implemented status
 
-Online inference is implemented as a local FastAPI service that loads the active production model from `configs/active_model.yaml`.
+Online inference is a FastAPI service that serves the version named by the shared
+pointer: `ml.active_model_pointer` in database mode (`pointer_source: postgres`), else
+`configs/active_model.yaml` (`pointer_source: file`). It polls the database pointer every
+`PROJECT4_POINTER_POLL_SECONDS` (default 30) and swaps the model in-process when the
+pointer changes.
 
-The active model is currently:
+The active model on 2026-11-15:
 
 | Field | Value |
 |---|---|
 | Model name | `isolation_forest` |
-| Active version | `v002` |
-| Artifact path | `artifacts/models/isolation_forest/model_version=v002/model.joblib` |
-| Feature schema version | `feature_schema_v001` |
-| Feature count | `51` |
+| Active version | `v004` |
+| Model kind | segmented (6 entity types; each request is scored by its `entity_type`'s segment) |
+| Artifact path | `artifacts/models/isolation_forest/model_version=v004/model.joblib` |
+| Feature schema version | `feature_schema_v003` |
+| Feature count | `52` in total (each segment scores its own subset) |
 | Snapshot type | `real_source_extract` |
 | Online p95 latency budget | `200 ms` |
 
@@ -330,12 +347,13 @@ The service loads the model once into memory through `OnlineInferenceService`. I
 
 | Endpoint | Status | Purpose |
 |---|---|---|
-| `GET /health` | Implemented | Returns API health and active model load status. |
+| `GET /livez` | Implemented | Liveness: the process is up (never touches the model). |
+| `GET /health` | Implemented | API health, model-load status, and `pointer_source`. |
 | `GET /model/active` | Implemented | Returns active model metadata, feature count, baseline anomaly rate, threshold, and load timestamp. |
-| `POST /predict` | Implemented | Scores one model-ready feature payload with the active in-memory model. |
-| `POST /predict/batch` | Implemented | Scores multiple model-ready payloads through the same in-memory service. |
-| `GET /metrics` | Implemented | Exposes Prometheus-format counters and latency histogram. |
-| `POST /admin/rollback` | Implemented locally | Supports dry-run validation and applied rollback to the previous stable model. |
+| `POST /predict` | Implemented | Scores one feature payload with the active in-memory model; a segmented model needs its `entity_type` (default `user`). |
+| `POST /predict/batch` | Implemented | Scores multiple payloads of one entity type through the same in-memory service. |
+| `GET /metrics` | Implemented | Exposes Prometheus-format counters and the latency histogram. |
+| `POST /admin/rollback` | Implemented | Dry-run and applied rollback; requires `X-Admin-Token` (503 when no token is configured, 401 when it is missing or wrong). |
 
 ### Prediction response contract
 
@@ -346,19 +364,19 @@ The service loads the model once into memory through `OnlineInferenceService`. I
 | `model_version` | Active model version used for scoring. |
 | `dataset_snapshot_id` | Training snapshot lineage for the active model. |
 | `feature_schema_version` | Feature contract version used by the model. |
-| `entity_type` | Scored entity class, currently usually `user`. |
+| `entity_type` | Scored entity class; selects the segment of a segmented model. |
 | `entity_id` | Scored entity identifier. |
 | `prediction_timestamp` | UTC timestamp for the score event. |
 | `anomaly_score` | Isolation Forest decision score. |
 | `is_anomaly` | Boolean anomaly decision. |
 | `threshold_used` | Threshold used for classification. |
-| `drift_status` | Current drift evaluation state. Currently `not_evaluated` in the online path. |
-| `feature_payload_hash` | Stable SHA-256 hash of the feature payload. |
+| `drift_status` | Latest drift-job status of the request's segment (`normal`, `warning`, `critical`), or `not_evaluated` when there is none. |
+| `feature_payload_hash` | SHA-256 of the scored features in canonical form (see "feature_payload_hash and the 14c-5 cutover"). |
 | `latency_ms` | Measured scoring latency inside the inference service. |
 
 ### Threshold behavior
 
-The `v002` baseline artifact does not currently include an explicit threshold field.
+The v004 baseline artifact (like v002 before it) does not include an explicit threshold field.
 
 For online scoring, the service uses `0.0` as the fallback threshold. This matches the standard Isolation Forest decision boundary where negative `decision_function` values are treated as more anomalous.
 
@@ -368,45 +386,41 @@ This is intentionally documented instead of hidden. Later threshold tuning can r
 
 | Metric | Purpose |
 |---|---|
-| `project4_prediction_requests_total` | Counts successful and failed prediction requests by endpoint and model version. |
-| `project4_prediction_errors_total` | Counts prediction errors by endpoint and model version. |
-| `project4_anomalies_detected_total` | Counts online anomaly decisions by endpoint and model version. |
-| `project4_prediction_latency_seconds` | Tracks request latency by endpoint and model version. |
+| `prediction_requests_total` | Counts successful and failed prediction requests by endpoint and model version. |
+| `prediction_errors_total` | Counts prediction errors by endpoint and model version. |
+| `predictions_scored_total` | Counts scored payloads by endpoint and model version. |
+| `anomalies_detected_total` | Counts online anomaly decisions by endpoint and model version. |
+| `prediction_latency_ms` | Histogram of in-handler scoring latency (milliseconds) by endpoint and model version; the evidence writes run after the response and are not included. |
+| `prediction_persist_failures_total` | Counts evidence writes that failed, by sink (`jsonl`, `postgres`). |
+
+The full list of metric families is in the README ("Metrics and monitoring").
 
 ### Current limitations
 
 | Area | Current state |
 |---|---|
-| Drift status | Returned by the online response contract; full per-request online drift evaluation remains planned hardening. Batch/current-window drift checks are implemented separately. |
-| Prediction persistence | Online and batch prediction evidence is persisted locally through JSONL logs. Direct PostgreSQL inserts remain planned hardening. |
-| Rollback | `/admin/rollback` supports dry-run and applied rollback. Applied rollback updates the active model pointer and writes rollback evidence. |
-| Threshold tuning | Uses fallback `0.0` because `v002` has no explicit threshold artifact yet. |
-| Authentication | Not implemented locally. This is acceptable for the local project build, but would be required before real deployment. |
+| Drift status | The response carries the latest drift-job status of the request's segment; there is no per-request drift evaluation. |
+| Prediction persistence | JSONL always and `ml.online_predictions` in database mode, written after the response; failures are counted, never returned to the client. |
+| Rollback | `/admin/rollback` supports dry-run and applied rollback through the shared pointer; applied end to end on 2026-11-16 (v005 → v004 in compose and on both kind replicas). v004 is active and has no compatible target today (v005 is `rolled_back`). |
+| Threshold tuning | Uses fallback `0.0`; no version has an explicit threshold artifact yet. |
+| Authentication | One shared admin token for `/admin/*`; no users or roles. Prediction endpoints are open on the local network. |
 
-### Validation evidence
+### Validation
 
-Local validation currently covers:
+Run the API and inference tests from the repository root with the dev image (the
+`dev()` function in the README's "Local runbook"):
 
-    PYTHONPATH=src pytest tests/test_api.py tests/test_batch_inference.py -q
+    dev env -u PYTHONPATH python -m pytest -p no:cacheprovider -o addopts= -q tests/test_api.py tests/test_batch_inference.py tests/test_payload_hash.py
 
-Expected result:
+Manual API validation against the compose API:
 
-    15 passed
-
-Manual API validation should include:
-
-    uvicorn api.main:app --host 0.0.0.0 --port 8004
-    curl http://localhost:8004/health
-    curl http://localhost:8004/model/active
-    curl http://localhost:8004/metrics
-
-Online inference is considered partially complete when health and active model endpoints work.
-
-It is considered complete for this checkpoint when `/predict` and `/predict/batch` score against the active in-memory `v002` model.
+    curl -s http://127.0.0.1:8014/health
+    curl -s http://127.0.0.1:8014/model/active
+    curl -s http://127.0.0.1:8014/metrics | head -50
 
 ## Prediction evidence logging
 
-Prediction logging is implemented as a shared local-first contract used by both inference paths.
+Prediction logging is one shared contract used by both inference paths (JSONL always, plus the database in database mode).
 
 Implemented:
 
@@ -434,12 +448,11 @@ Prediction evidence includes:
 - latency field from the inference path
 - `logged_at`
 
-Database readiness:
+Database:
 
-- `sql/create_prediction_tables.sql` already defines `ml.batch_predictions`.
-- `sql/create_prediction_tables.sql` already defines `ml.online_predictions`.
-- Direct PostgreSQL insert wiring is planned for a later hardening pass.
-- The JSONL record shape is intentionally aligned with the SQL tables so database persistence can be added without changing the inference response contract.
+- `sql/create_prediction_tables.sql` defines `ml.batch_predictions` and `ml.online_predictions`.
+- In database mode both paths also insert there (batch in one transaction per run, online after the response).
+- The JSONL record shape matches the tables, so both sinks carry the same contract.
 
 Operational reason:
 

@@ -8,7 +8,7 @@ with the currently deployed model version.
 Example:
     python scripts/benchmark_latency.py \
       --url http://localhost:8004/predict \
-      --requests 100
+      --requests 100 [--entity-type campaign]
 """
 
 from __future__ import annotations
@@ -29,7 +29,10 @@ SRC_PATH = PROJECT_ROOT / "src"
 if str(SRC_PATH) not in sys.path:
     sys.path.insert(0, str(SRC_PATH))
 
-from anomaly_detection.online_inference import OnlineInferenceService  # noqa: E402
+from anomaly_detection.online_inference import (  # noqa: E402
+    OnlineInferenceError,
+    OnlineInferenceService,
+)
 
 DEFAULT_LATENCY_BUDGET_MS = 200.0
 
@@ -52,22 +55,60 @@ def percentile(values: list[float], percentile_value: float) -> float:
     return ordered_values[max(rank - 1, 0)]
 
 
+def benchmark_entity_types(
+    service: OnlineInferenceService,
+    requested: str | None,
+) -> list[str]:
+    """Entity types to send: the requested one, else every segment (single model: user)."""
+
+    if requested is not None:
+        try:
+            service.feature_names_for(requested)  # a type the model has no segment for
+        except OnlineInferenceError as exc:
+            raise LatencyBenchmarkError(str(exc)) from exc
+        return [requested]
+
+    if service.segments is not None:
+        return sorted(service.segments)
+
+    return ["user"]
+
+
 def build_model_ready_payload(
     service: OnlineInferenceService,
     *,
     entity_id: str,
+    entity_type: str = "user",
 ) -> dict[str, float | str]:
-    """Build a valid model-ready payload for the active model feature contract."""
+    """Build a valid model-ready payload for the active model and entity type."""
 
-    if not service.feature_names:
+    feature_names = service.feature_names_for(entity_type)
+    if not feature_names:
         raise LatencyBenchmarkError("active model exposes no feature names")
 
     payload: dict[str, float | str] = {
         feature_name: 1.0
-        for feature_name in service.feature_names
+        for feature_name in feature_names
     }
     payload["entity_id"] = entity_id
     return payload
+
+
+def build_request_body(
+    service: OnlineInferenceService,
+    *,
+    entity_id: str,
+    entity_type: str,
+) -> dict[str, Any]:
+    """/predict request body; a segmented model scores it with entity_type's segment."""
+
+    return {
+        "entity_id": entity_id,
+        "entity_type": entity_type,
+        "feature_payload": build_model_ready_payload(
+            service, entity_id=entity_id, entity_type=entity_type
+        ),
+    }
 
 
 def run_warmup_requests(
@@ -76,19 +117,17 @@ def run_warmup_requests(
     url: str,
     service: OnlineInferenceService,
     warmup_requests: int,
+    entity_types: list[str],
 ) -> None:
     """Run warmup requests so startup noise does not dominate the benchmark."""
 
     for index in range(warmup_requests):
         entity_id = f"latency_warmup_{index:04d}"
-        payload = build_model_ready_payload(service, entity_id=entity_id)
+        entity_type = entity_types[index % len(entity_types)]
 
         response = client.post(
             url,
-            json={
-                "entity_id": entity_id,
-                "feature_payload": payload,
-            },
+            json=build_request_body(service, entity_id=entity_id, entity_type=entity_type),
         )
 
         if response.status_code != 200:
@@ -104,6 +143,7 @@ def run_measured_requests(
     url: str,
     service: OnlineInferenceService,
     request_count: int,
+    entity_types: list[str],
 ) -> tuple[list[float], list[float]]:
     """Run measured benchmark requests and return client/API latency lists."""
 
@@ -112,16 +152,11 @@ def run_measured_requests(
 
     for index in range(request_count):
         entity_id = f"latency_user_{index:04d}"
-        payload = build_model_ready_payload(service, entity_id=entity_id)
+        entity_type = entity_types[index % len(entity_types)]
+        body_to_send = build_request_body(service, entity_id=entity_id, entity_type=entity_type)
 
         started_at = time.perf_counter()
-        response = client.post(
-            url,
-            json={
-                "entity_id": entity_id,
-                "feature_payload": payload,
-            },
-        )
+        response = client.post(url, json=body_to_send)
         elapsed_ms = (time.perf_counter() - started_at) * 1000.0
 
         if response.status_code != 200:
@@ -186,6 +221,14 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_LATENCY_BUDGET_MS,
         help="p95 latency budget in milliseconds.",
     )
+    parser.add_argument(
+        "--entity-type",
+        default=None,
+        help=(
+            "Entity type to send. Default: every segment of a segmented model in turn, "
+            "or 'user' for a single model."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -204,6 +247,7 @@ def main() -> int:
         raise LatencyBenchmarkError("--budget-ms must be greater than zero")
 
     service = OnlineInferenceService()
+    entity_types = benchmark_entity_types(service, args.entity_type)
 
     with httpx.Client(timeout=args.timeout_seconds) as client:
         run_warmup_requests(
@@ -211,12 +255,14 @@ def main() -> int:
             url=args.url,
             service=service,
             warmup_requests=args.warmup_requests,
+            entity_types=entity_types,
         )
         client_latencies_ms, api_latencies_ms = run_measured_requests(
             client,
             url=args.url,
             service=service,
             request_count=args.requests,
+            entity_types=entity_types,
         )
 
     p50_latency_ms = percentile(client_latencies_ms, 50)
@@ -231,6 +277,7 @@ def main() -> int:
     print(f"warmup_request_count={args.warmup_requests}")
     print(f"model_version={service.artifacts.model_version}")
     print(f"feature_count={len(service.feature_names)}")
+    print(f"entity_types={','.join(entity_types)}")
     print(f"budget_ms={args.budget_ms:.3f}")
     print(f"p50_latency_ms={p50_latency_ms:.3f}")
     print(f"p95_latency_ms={p95_latency_ms:.3f}")

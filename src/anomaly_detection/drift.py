@@ -12,6 +12,7 @@ shape later.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -23,15 +24,6 @@ import pandas as pd
 import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-
-DEFAULT_BASELINE_STATS_PATH = (
-    PROJECT_ROOT
-    / "artifacts"
-    / "models"
-    / "isolation_forest"
-    / "model_version=v002"
-    / "baseline_stats.json"
-)
 
 DEFAULT_ACTIVE_MODEL_PATH = PROJECT_ROOT / "configs" / "active_model.yaml"
 DEFAULT_DRIFT_THRESHOLDS_PATH = PROJECT_ROOT / "configs" / "drift_thresholds.yaml"
@@ -114,6 +106,8 @@ class FeatureDriftEvent:
     observation_window_end: str
     detected_at: str
     notes: str
+    # Segment (entity type) of a segmented model; None for a single model.
+    entity_type: str | None = None
 
 
 @dataclass(frozen=True)
@@ -131,6 +125,7 @@ class DriftEvaluationResult:
     critical_feature_count: int
     overall_drift_status: str
     drift_events: list[FeatureDriftEvent]
+    entity_type: str | None = None
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -242,12 +237,56 @@ def load_active_model_config(
     return active_model
 
 
-def load_baseline_stats(
-    baseline_stats_path: Path = DEFAULT_BASELINE_STATS_PATH,
-) -> dict[str, Any]:
-    """Load approved training baseline statistics."""
+def resolve_active_baseline_stats_path(
+    active_model_path: Path = DEFAULT_ACTIVE_MODEL_PATH,
+) -> Path:
+    """baseline_stats.json in the active model's artifact directory.
 
-    baseline_stats = _read_json(baseline_stats_path)
+    The active model comes from the shared pointer in Postgres when the
+    database is configured, otherwise from the active_model.yaml pointer.
+    """
+
+    from anomaly_detection import registry
+
+    if registry.database_enabled():
+        try:
+            state = registry.load_registry_state()
+        except registry.RegistryError as exc:
+            raise DriftMonitoringError(f"active model pointer could not be read: {exc}") from exc
+
+        active_entry = next(
+            (
+                entry
+                for entry in state.entries
+                if entry.model_name == state.model_name
+                and entry.model_version == state.active_model_version
+            ),
+            None,
+        )
+        if active_entry is None:
+            raise DriftMonitoringError(
+                f"active model {state.model_name} {state.active_model_version} "
+                "is not in the registry"
+            )
+        artifact_path = active_entry.artifact_path
+    else:
+        artifact_path = load_active_model_config(active_model_path).get("artifact_path")
+
+    if not artifact_path:
+        raise DriftMonitoringError("active model pointer has no artifact_path")
+
+    model_path = Path(artifact_path)
+    if not model_path.is_absolute():
+        model_path = PROJECT_ROOT / model_path
+    return model_path.parent / "baseline_stats.json"
+
+
+def load_baseline_stats(
+    baseline_stats_path: Path | None = None,
+) -> dict[str, Any]:
+    """Load approved training baseline statistics (default: the active model's)."""
+
+    baseline_stats = _read_json(baseline_stats_path or resolve_active_baseline_stats_path())
 
     required_fields = [
         "model_name",
@@ -552,7 +591,7 @@ def evaluate_drift(
 def evaluate_drift_from_paths(
     *,
     current_features: pd.DataFrame,
-    baseline_stats_path: Path = DEFAULT_BASELINE_STATS_PATH,
+    baseline_stats_path: Path | None = None,
     threshold_config_path: Path = DEFAULT_DRIFT_THRESHOLDS_PATH,
     observation_window_start: datetime | None = None,
     observation_window_end: datetime | None = None,
@@ -596,6 +635,33 @@ def append_drift_events_jsonl(
             )
 
     return output_path
+
+
+def insert_drift_events_database(drift_events: list[FeatureDriftEvent]) -> int:
+    """Store drift events in monitoring.drift_events (one transaction).
+
+    The database counterpart of append_drift_events_jsonl.
+    """
+
+    from anomaly_detection import database
+
+    if not drift_events:
+        raise DriftMonitoringError("no drift events supplied")
+    return database.insert_drift_events(drift_events)
+
+
+def persist_drift_events(
+    drift_events: list[FeatureDriftEvent],
+    output_path: Path = DEFAULT_DRIFT_EVENTS_PATH,
+) -> dict[str, Any]:
+    """JSONL always, plus monitoring.drift_events when the database is configured."""
+
+    from anomaly_detection import database
+
+    written: dict[str, Any] = {"jsonl": append_drift_events_jsonl(drift_events, output_path)}
+    if database.is_configured():
+        written["postgres"] = insert_drift_events_database(drift_events)
+    return written
 
 
 def read_drift_events_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -665,3 +731,107 @@ def append_alerts_for_drift_result_jsonl(
         alert_events,
         output_path or DEFAULT_ALERT_EVENTS_PATH,
     )
+
+
+# --- latest drift result per model version and segment ---------------------------------
+#
+# A drift run writes one event per evaluated feature, all with the run's detected_at
+# (the drift job uses one timestamp per segment). The latest run of a segment is the
+# set of its events with the greatest detected_at; its status is the worst feature.
+
+NOT_EVALUATED = "not_evaluated"
+DRIFT_STATUS_RANK = {"normal": 0, "warning": 1, "critical": 2}
+
+
+@dataclass(frozen=True)
+class FeatureDriftSummary:
+    """One feature of a drift run."""
+
+    feature_name: str
+    drift_status: str
+    mean_delta: float
+    variance_delta: float
+
+
+@dataclass(frozen=True)
+class SegmentDriftSummary:
+    """The latest drift run of one segment (None: a single model's whole feature set)."""
+
+    entity_type: str | None
+    detected_at: datetime
+    drift_status: str
+    features: tuple[FeatureDriftSummary, ...]
+
+
+def _as_utc_datetime(value: Any) -> datetime:
+    parsed = value if isinstance(value, datetime) else datetime.fromisoformat(str(value))
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def summarize_latest_drift(
+    records: Iterable[Mapping[str, Any]],
+    *,
+    model_name: str,
+    model_version: str,
+) -> dict[str | None, SegmentDriftSummary]:
+    """Latest drift run per segment for one model version, from drift event records."""
+
+    by_segment: dict[str | None, list[Mapping[str, Any]]] = {}
+    for record in records:
+        if record.get("model_name") != model_name or record.get("model_version") != model_version:
+            continue
+        if record.get("drift_status") not in DRIFT_STATUS_RANK:
+            continue
+        by_segment.setdefault(record.get("entity_type"), []).append(record)
+
+    summaries: dict[str | None, SegmentDriftSummary] = {}
+    for entity_type, segment_records in by_segment.items():
+        latest = max(_as_utc_datetime(record["detected_at"]) for record in segment_records)
+        run = [r for r in segment_records if _as_utc_datetime(r["detected_at"]) == latest]
+        features = tuple(
+            FeatureDriftSummary(
+                feature_name=str(record["feature_name"]),
+                drift_status=str(record["drift_status"]),
+                mean_delta=float(record.get("mean_delta") or 0.0),
+                variance_delta=float(record.get("variance_delta") or 0.0),
+            )
+            for record in sorted(run, key=lambda r: str(r["feature_name"]))
+        )
+        summaries[entity_type] = SegmentDriftSummary(
+            entity_type=entity_type,
+            detected_at=latest,
+            drift_status=max(
+                (feature.drift_status for feature in features),
+                key=DRIFT_STATUS_RANK.__getitem__,
+            ),
+            features=features,
+        )
+    return summaries
+
+
+def read_latest_drift_jsonl(
+    path: Path = DEFAULT_DRIFT_EVENTS_PATH,
+    *,
+    model_name: str,
+    model_version: str,
+) -> dict[str | None, SegmentDriftSummary]:
+    """Latest drift run per segment from the JSONL drift events (none: empty)."""
+
+    if not path.exists():
+        return {}
+    return summarize_latest_drift(
+        read_drift_events_jsonl(path), model_name=model_name, model_version=model_version
+    )
+
+
+def read_latest_drift_database(
+    *,
+    model_name: str,
+    model_version: str,
+) -> dict[str | None, SegmentDriftSummary]:
+    """Latest drift run per segment from monitoring.drift_events (one query)."""
+
+    from anomaly_detection import database
+
+    rows = database.read_latest_drift_rows(model_name=model_name, model_version=model_version)
+    return summarize_latest_drift(rows, model_name=model_name, model_version=model_version)

@@ -8,7 +8,11 @@ CREATE TABLE IF NOT EXISTS ml.model_registry (
     algorithm TEXT NOT NULL,
     artifact_path TEXT NOT NULL,
     artifact_uri TEXT,
-    snapshot_id UUID REFERENCES ml.feature_snapshots(snapshot_id) ON DELETE SET NULL,
+    artifact_dir TEXT,
+    metadata_path TEXT,
+    feature_schema_path TEXT,
+    baseline_stats_path TEXT,
+    snapshot_id TEXT REFERENCES ml.feature_snapshots(snapshot_id) ON DELETE SET NULL,
     training_dataset_id UUID REFERENCES ml.training_datasets(training_dataset_id) ON DELETE SET NULL,
     feature_schema_version TEXT NOT NULL,
     training_started_at TIMESTAMPTZ,
@@ -40,7 +44,7 @@ CREATE TABLE IF NOT EXISTS ml.model_registry (
                 'production',
                 'archived',
                 'rolled_back',
-                'failed_validation'
+                'retired'
             )
         ),
     approved_for_prod BOOLEAN NOT NULL DEFAULT FALSE,
@@ -92,7 +96,7 @@ CREATE TABLE IF NOT EXISTS ml.model_metrics (
             OR comparison_operator IN ('<', '<=', '=', '>=', '>')
         ),
     passed_threshold BOOLEAN,
-    dataset_snapshot_id UUID REFERENCES ml.feature_snapshots(snapshot_id) ON DELETE SET NULL,
+    dataset_snapshot_id TEXT REFERENCES ml.feature_snapshots(snapshot_id) ON DELETE SET NULL,
     training_dataset_id UUID REFERENCES ml.training_datasets(training_dataset_id) ON DELETE SET NULL,
     observation_window_start TIMESTAMPTZ,
     observation_window_end TIMESTAMPTZ,
@@ -110,6 +114,20 @@ CREATE TABLE IF NOT EXISTS ml.model_metrics (
         FOREIGN KEY (model_name, model_version)
         REFERENCES ml.model_registry(model_name, model_version)
         ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS ml.active_model_pointer (
+    model_name TEXT PRIMARY KEY,
+    model_version TEXT NOT NULL,
+    artifact_path TEXT NOT NULL,
+    pointer_version BIGINT NOT NULL CHECK (pointer_version >= 1),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_by TEXT,
+    notes TEXT,
+    CONSTRAINT active_model_pointer_model_version_fk
+        FOREIGN KEY (model_name, model_version)
+        REFERENCES ml.model_registry(model_name, model_version)
+        ON DELETE RESTRICT
 );
 
 CREATE INDEX IF NOT EXISTS idx_model_registry_status
@@ -138,6 +156,9 @@ CREATE INDEX IF NOT EXISTS idx_model_metrics_computed_at
 
 COMMENT ON TABLE ml.model_registry IS
 'Stores versioned anomaly detection model metadata including artifact location, dataset lineage, baseline metrics, production approval, and lifecycle status.';
+
+COMMENT ON TABLE ml.active_model_pointer IS
+'Active production model per model name. pointer_version increases on every change so serving processes can detect it by polling.';
 
 COMMENT ON TABLE ml.model_metrics IS
 'Stores training, validation, baseline, current, drift, latency, and rollback validation metrics for registered model versions.';

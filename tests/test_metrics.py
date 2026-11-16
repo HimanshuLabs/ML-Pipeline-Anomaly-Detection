@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import pytest
+
 from anomaly_detection.metrics import (
     observe_prediction_latency_ms,
     prometheus_content_type,
@@ -167,3 +169,79 @@ def test_model_rollback_metric_is_exposed() -> None:
 
 def test_prometheus_content_type_is_text_plain() -> None:
     assert "text/plain" in prometheus_content_type()
+
+
+def test_latency_buckets_resolve_5ms_up_to_100ms_and_keep_the_200ms_sla_edge() -> None:
+    from prometheus_client import REGISTRY
+
+    observe_prediction_latency_ms(endpoint="/bucket-check", model_version="vmetrics", latency_ms=1)
+    edges = sorted(
+        float(sample.labels["le"])
+        for metric in REGISTRY.collect()
+        if metric.name == "prediction_latency_ms"
+        for sample in metric.samples
+        if sample.name == "prediction_latency_ms_bucket"
+        and sample.labels["endpoint"] == "/bucket-check"
+        and sample.labels["le"] != "+Inf"
+    )
+
+    assert 200.0 in edges
+    assert 5.0 in edges and 100.0 in edges
+    up_to_100 = [edge for edge in edges if 5.0 <= edge <= 100.0]
+    assert max(b - a for a, b in zip(up_to_100, up_to_100[1:], strict=False)) <= 5.0
+    up_to_200 = [edge for edge in edges if 100.0 <= edge <= 200.0]
+    assert max(b - a for a, b in zip(up_to_200, up_to_200[1:], strict=False)) <= 10.0
+
+
+@pytest.fixture()
+def api_client():
+    """The API serving the (mirrored) active model, plus a payload it accepts."""
+
+    from fastapi.testclient import TestClient
+
+    from api.main import app, state
+
+    state.inference_service = None
+    with TestClient(app) as client:
+        service = state.inference_service
+        payload = {name: 1.0 for name in service.feature_names}
+        yield client, service.active_model_info().model_version, payload
+    state.inference_service = None
+
+
+def _scored(endpoint: str, model_version: str) -> float:
+    from prometheus_client import REGISTRY
+
+    labels = {"endpoint": endpoint, "model_version": model_version}
+    return REGISTRY.get_sample_value("predictions_scored_total", labels) or 0.0
+
+
+def test_predictions_scored_counts_one_per_predict_and_n_per_batch_of_n(api_client) -> None:
+    client, version, payload = api_client
+    single_before = _scored("/predict", version)
+    batch_before = _scored("/predict/batch", version)
+
+    single = client.post("/predict", json={"entity_type": "user", "feature_payload": payload})
+    batch = client.post(
+        "/predict/batch", json={"entity_type": "user", "feature_payloads": [payload] * 3}
+    )
+
+    assert single.status_code == 200 and batch.status_code == 200
+    assert _scored("/predict", version) == single_before + 1
+    assert _scored("/predict/batch", version) == batch_before + 3
+
+
+def test_predictions_scored_is_not_incremented_on_error(api_client) -> None:
+    client, version, _ = api_client
+    single_before = _scored("/predict", version)
+    batch_before = _scored("/predict/batch", version)
+
+    bad = {"one_feature_only": 1.0}
+    single = client.post("/predict", json={"entity_type": "user", "feature_payload": bad})
+    batch = client.post(
+        "/predict/batch", json={"entity_type": "user", "feature_payloads": [bad, bad]}
+    )
+
+    assert single.status_code == 422 and batch.status_code == 422
+    assert _scored("/predict", version) == single_before
+    assert _scored("/predict/batch", version) == batch_before

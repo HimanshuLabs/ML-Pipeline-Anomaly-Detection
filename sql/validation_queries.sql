@@ -38,6 +38,7 @@ WITH expected_tables(table_schema, table_name) AS (
         ('ml', 'feature_current_stats'),
         ('ml', 'model_registry'),
         ('ml', 'model_metrics'),
+        ('ml', 'active_model_pointer'),
         ('ml', 'batch_predictions'),
         ('ml', 'online_predictions'),
         ('monitoring', 'drift_events'),
@@ -74,6 +75,7 @@ WITH expected_tables(table_schema, table_name) AS (
         ('ml', 'feature_current_stats'),
         ('ml', 'model_registry'),
         ('ml', 'model_metrics'),
+        ('ml', 'active_model_pointer'),
         ('ml', 'batch_predictions'),
         ('ml', 'online_predictions'),
         ('monitoring', 'drift_events'),
@@ -110,6 +112,7 @@ WITH expected_constraints(table_schema, table_name, constraint_name) AS (
         ('ml', 'model_registry', 'model_registry_training_time_chk'),
         ('ml', 'model_metrics', 'model_metrics_model_version_fk'),
         ('ml', 'model_metrics', 'model_metrics_metric_scope_check'),
+        ('ml', 'active_model_pointer', 'active_model_pointer_model_version_fk'),
         ('ml', 'batch_predictions', 'batch_predictions_model_version_fk'),
         ('ml', 'online_predictions', 'online_predictions_model_version_fk'),
         ('ml', 'online_predictions', 'online_predictions_success_score_chk'),
@@ -170,6 +173,8 @@ WITH expected_columns(table_schema, table_name, column_name) AS (
         ('ml', 'model_metrics', 'metric_scope'),
         ('ml', 'model_metrics', 'metric_name'),
         ('ml', 'model_metrics', 'metric_value'),
+        ('ml', 'active_model_pointer', 'model_version'),
+        ('ml', 'active_model_pointer', 'pointer_version'),
         ('ml', 'batch_predictions', 'prediction_id'),
         ('ml', 'batch_predictions', 'batch_run_id'),
         ('ml', 'batch_predictions', 'model_version'),
@@ -187,6 +192,7 @@ WITH expected_columns(table_schema, table_name, column_name) AS (
         ('monitoring', 'drift_events', 'mean_delta'),
         ('monitoring', 'drift_events', 'variance_delta'),
         ('monitoring', 'drift_events', 'drift_status'),
+        ('monitoring', 'drift_events', 'entity_type'),
         ('monitoring', 'alert_events', 'alert_event_id'),
         ('monitoring', 'alert_events', 'alert_type'),
         ('monitoring', 'alert_events', 'severity'),
@@ -195,7 +201,7 @@ WITH expected_columns(table_schema, table_name, column_name) AS (
         ('audit', 'rollback_events', 'from_model_version'),
         ('audit', 'rollback_events', 'to_model_version'),
         ('audit', 'rollback_events', 'rollback_reason'),
-        ('audit', 'rollback_events', 'rollback_status')
+        ('audit', 'rollback_events', 'validation_status')
 ),
 missing_columns AS (
     SELECT e.table_schema, e.table_name, e.column_name
@@ -232,6 +238,8 @@ UNION ALL
 SELECT 'ml.model_registry' AS table_name, COUNT(*) AS row_count FROM ml.model_registry
 UNION ALL
 SELECT 'ml.model_metrics' AS table_name, COUNT(*) AS row_count FROM ml.model_metrics
+UNION ALL
+SELECT 'ml.active_model_pointer' AS table_name, COUNT(*) AS row_count FROM ml.active_model_pointer
 UNION ALL
 SELECT 'ml.batch_predictions' AS table_name, COUNT(*) AS row_count FROM ml.batch_predictions
 UNION ALL
@@ -271,6 +279,7 @@ WITH validation_checks AS (
                     'feature_current_stats',
                     'model_registry',
                     'model_metrics',
+                    'active_model_pointer',
                     'batch_predictions',
                     'online_predictions'
                 ))
@@ -279,7 +288,7 @@ WITH validation_checks AS (
                     'alert_events'
                 ))
                OR (table_schema = 'audit' AND table_name = 'rollback_events')
-        ) = 11 THEN 1 ELSE 0 END AS passed
+        ) = 12 THEN 1 ELSE 0 END AS passed
 
     UNION ALL
 
@@ -297,6 +306,7 @@ WITH validation_checks AS (
                         'feature_current_stats',
                         'model_registry',
                         'model_metrics',
+                        'active_model_pointer',
                         'batch_predictions',
                         'online_predictions'
                     ))
@@ -306,7 +316,7 @@ WITH validation_checks AS (
                     ))
                  OR (table_schema = 'audit' AND table_name = 'rollback_events')
               )
-        ) = 11 THEN 1 ELSE 0 END AS passed
+        ) = 12 THEN 1 ELSE 0 END AS passed
 
     UNION ALL
 

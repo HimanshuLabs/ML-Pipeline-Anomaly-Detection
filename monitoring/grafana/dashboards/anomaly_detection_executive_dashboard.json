@@ -16,11 +16,11 @@
         "x": 0,
         "y": 0,
         "w": 24,
-        "h": 3
+        "h": 4
       },
       "options": {
         "mode": "markdown",
-        "content": "## ML Anomaly Detection Platform\nProduction-style anomaly monitoring over the active Isolation Forest model. This dashboard summarizes model health, traffic, anomaly behavior, latency, drift, prediction reliability, and rollback evidence."
+        "content": "### ML Anomaly Detection Platform\nHealth of the active Isolation Forest model: traffic, anomalies, latency, drift, errors and rollbacks."
       }
     },
     {
@@ -34,7 +34,7 @@
       "description": "Current production model version loaded by the FastAPI inference service.",
       "gridPos": {
         "x": 0,
-        "y": 3,
+        "y": 4,
         "w": 6,
         "h": 4
       },
@@ -44,24 +44,32 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "max(active_model_version) by (model_version)",
+          "expr": "(active_model_version == 1) or on() label_replace(vector(0), \"model_version\", \"no active model\", \"\", \"\")",
           "legendFormat": "{{model_version}}",
-          "refId": "A"
+          "refId": "A",
+          "instant": true,
+          "range": false
         }
       ],
       "fieldConfig": {
         "defaults": {
           "unit": "short",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "color": "red",
+                  "index": 0
+                },
+                "1": {
+                  "color": "text",
+                  "index": 1
+                }
               }
-            ]
-          },
-          "mappings": []
+            }
+          ],
+          "noValue": "no active model"
         },
         "overrides": []
       },
@@ -74,24 +82,24 @@
           "fields": ""
         },
         "orientation": "auto",
-        "textMode": "auto",
-        "colorMode": "background",
-        "graphMode": "area",
+        "textMode": "name",
+        "colorMode": "value",
+        "graphMode": "none",
         "justifyMode": "center"
       }
     },
     {
       "id": 3,
-      "title": "Requests \u2014 15m",
+      "title": "Requests (calls) \u2014 15m",
       "type": "stat",
       "datasource": {
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Online inference traffic over the last 15 minutes.",
+      "description": "API calls in the last 15 minutes; a /predict/batch call counts once.",
       "gridPos": {
         "x": 6,
-        "y": 3,
+        "y": 4,
         "w": 6,
         "h": 4
       },
@@ -101,32 +109,30 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "round(sum(increase(prediction_requests_total[15m])))",
-          "legendFormat": "requests",
-          "refId": "A"
+          "expr": "round(sum(increase(prediction_requests_total[15m]))) or vector(0)",
+          "legendFormat": "requests (calls)",
+          "refId": "A",
+          "instant": true,
+          "range": false
         }
       ],
       "fieldConfig": {
         "defaults": {
           "unit": "short",
+          "mappings": [],
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
+                "color": "blue",
                 "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 500
-              },
-              {
-                "color": "red",
-                "value": 2000
               }
             ]
-          },
-          "mappings": []
+          }
         },
         "overrides": []
       },
@@ -141,7 +147,7 @@
         "orientation": "auto",
         "textMode": "auto",
         "colorMode": "background",
-        "graphMode": "area",
+        "graphMode": "none",
         "justifyMode": "center"
       }
     },
@@ -153,10 +159,10 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Anomaly percentage over recent traffic.",
+      "description": "Anomalous rows as a percentage of rows scored (predictions_scored_total, so every /predict/batch row counts). Yellow at 7.5% and red at 10% are 1.5x and 2x the model contamination 0.05 in configs/model_config.yaml; update them if contamination changes.",
       "gridPos": {
         "x": 12,
-        "y": 3,
+        "y": 4,
         "w": 6,
         "h": 4
       },
@@ -166,14 +172,17 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "(sum(increase(anomalies_detected_total[15m])) / clamp_min(sum(increase(prediction_requests_total[15m])), 1)) * 100",
+          "expr": "((sum(increase(anomalies_detected_total[15m])) or vector(0)) / clamp_min(sum(increase(predictions_scored_total[15m])), 1)) * 100 and on() (sum(increase(predictions_scored_total[15m])) > 0)",
           "legendFormat": "anomaly_rate",
-          "refId": "A"
+          "refId": "A",
+          "instant": true,
+          "range": false
         }
       ],
       "fieldConfig": {
         "defaults": {
           "unit": "percent",
+          "mappings": [],
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -183,15 +192,15 @@
               },
               {
                 "color": "yellow",
-                "value": 1
+                "value": 7.5
               },
               {
                 "color": "red",
-                "value": 5
+                "value": 10
               }
             ]
           },
-          "mappings": []
+          "noValue": "idle"
         },
         "overrides": []
       },
@@ -206,7 +215,7 @@
         "orientation": "auto",
         "textMode": "auto",
         "colorMode": "background",
-        "graphMode": "area",
+        "graphMode": "none",
         "justifyMode": "center"
       }
     },
@@ -218,10 +227,10 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Recent API prediction failures.",
+      "description": "Failed prediction calls in the last 15 minutes (0 when none).",
       "gridPos": {
         "x": 18,
-        "y": 3,
+        "y": 4,
         "w": 6,
         "h": 4
       },
@@ -231,14 +240,17 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "round(sum(increase(prediction_errors_total[15m])))",
+          "expr": "round(sum(increase(prediction_errors_total[15m]))) or vector(0)",
           "legendFormat": "errors",
-          "refId": "A"
+          "refId": "A",
+          "instant": true,
+          "range": false
         }
       ],
       "fieldConfig": {
         "defaults": {
           "unit": "short",
+          "mappings": [],
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -247,16 +259,11 @@
                 "value": null
               },
               {
-                "color": "yellow",
-                "value": 1
-              },
-              {
                 "color": "red",
-                "value": 5
+                "value": 1
               }
             ]
-          },
-          "mappings": []
+          }
         },
         "overrides": []
       },
@@ -271,7 +278,7 @@
         "orientation": "auto",
         "textMode": "auto",
         "colorMode": "background",
-        "graphMode": "area",
+        "graphMode": "none",
         "justifyMode": "center"
       }
     },
@@ -283,10 +290,10 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Request throughput trend.",
+      "description": "API calls per second and anomalous rows per second.",
       "gridPos": {
         "x": 0,
-        "y": 7,
+        "y": 8,
         "w": 12,
         "h": 7
       },
@@ -297,27 +304,28 @@
             "uid": "${DS_PROMETHEUS}"
           },
           "expr": "sum(rate(prediction_requests_total[5m]))",
-          "legendFormat": "request_rate",
+          "legendFormat": "requests (calls)/s",
           "refId": "A"
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "${DS_PROMETHEUS}"
+          },
+          "expr": "sum(rate(anomalies_detected_total[5m]))",
+          "legendFormat": "anomalies/s",
+          "refId": "B"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "reqps",
+          "unit": "short",
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
                 "color": "green",
                 "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 150
-              },
-              {
-                "color": "red",
-                "value": 200
               }
             ]
           }
@@ -344,10 +352,10 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Trend of anomalies as a percentage of scored requests.",
+      "description": "Anomalous rows as a percentage of rows scored (predictions_scored_total, so every /predict/batch row counts). Yellow at 7.5% and red at 10% are 1.5x and 2x the model contamination 0.05 in configs/model_config.yaml; update them if contamination changes.",
       "gridPos": {
         "x": 12,
-        "y": 7,
+        "y": 8,
         "w": 12,
         "h": 7
       },
@@ -357,7 +365,7 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "(sum(rate(anomalies_detected_total[5m])) / clamp_min(sum(rate(prediction_requests_total[5m])), 0.001)) * 100",
+          "expr": "((sum(rate(anomalies_detected_total[5m])) or vector(0)) / clamp_min(sum(rate(predictions_scored_total[5m])), 0.001)) * 100 and on() (sum(rate(predictions_scored_total[5m])) > 0)",
           "legendFormat": "anomaly_rate",
           "refId": "A"
         }
@@ -374,14 +382,20 @@
               },
               {
                 "color": "yellow",
-                "value": 150
+                "value": 7.5
               },
               {
                 "color": "red",
-                "value": 200
+                "value": 10
               }
             ]
-          }
+          },
+          "custom": {
+            "thresholdsStyle": {
+              "mode": "dashed"
+            }
+          },
+          "noValue": "idle"
         },
         "overrides": []
       },
@@ -405,10 +419,10 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Online inference p95 latency. Target: below 200 ms.",
+      "description": "p95 latency of single predictions (/predict) over 5 minutes; budget 200 ms. Shows idle when there is no /predict traffic.",
       "gridPos": {
         "x": 0,
-        "y": 14,
+        "y": 15,
         "w": 6,
         "h": 4
       },
@@ -418,14 +432,17 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "histogram_quantile(0.95, sum(rate(prediction_latency_ms_bucket[5m])) by (le))",
+          "expr": "histogram_quantile(0.95, sum(rate(prediction_latency_ms_bucket{endpoint=\"/predict\"}[5m])) by (le)) and on() (sum(rate(prediction_requests_total{endpoint=\"/predict\"}[5m])) > 0)",
           "legendFormat": "p95",
-          "refId": "A"
+          "refId": "A",
+          "instant": true,
+          "range": false
         }
       ],
       "fieldConfig": {
         "defaults": {
           "unit": "ms",
+          "mappings": [],
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -443,7 +460,7 @@
               }
             ]
           },
-          "mappings": []
+          "noValue": "idle"
         },
         "overrides": []
       },
@@ -458,7 +475,7 @@
         "orientation": "auto",
         "textMode": "auto",
         "colorMode": "background",
-        "graphMode": "area",
+        "graphMode": "none",
         "justifyMode": "center"
       }
     },
@@ -470,10 +487,10 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Recent warning or critical drift detections.",
+      "description": "Warning or critical features in drift runs the API loaded in the last 15 minutes (0 when none).",
       "gridPos": {
         "x": 6,
-        "y": 14,
+        "y": 15,
         "w": 6,
         "h": 4
       },
@@ -483,32 +500,30 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "round(sum(increase(drift_detected_total[15m])))",
+          "expr": "round(sum(increase(drift_detected_total[15m]))) or vector(0)",
           "legendFormat": "drift_events",
-          "refId": "A"
+          "refId": "A",
+          "instant": true,
+          "range": false
         }
       ],
       "fieldConfig": {
         "defaults": {
           "unit": "short",
+          "mappings": [],
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
+                "color": "blue",
                 "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 1
-              },
-              {
-                "color": "red",
-                "value": 5
               }
             ]
-          },
-          "mappings": []
+          }
         },
         "overrides": []
       },
@@ -523,7 +538,7 @@
         "orientation": "auto",
         "textMode": "auto",
         "colorMode": "background",
-        "graphMode": "area",
+        "graphMode": "none",
         "justifyMode": "center"
       }
     },
@@ -535,10 +550,10 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Rollback events. This becomes active after rollback controls are implemented.",
+      "description": "Model rollbacks applied through /admin/rollback in the last 24 hours (0 when none).",
       "gridPos": {
         "x": 12,
-        "y": 14,
+        "y": 15,
         "w": 6,
         "h": 4
       },
@@ -548,32 +563,30 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "round(sum(increase(model_rollback_total[24h])))",
+          "expr": "round(sum(increase(model_rollback_total[24h]))) or vector(0)",
           "legendFormat": "rollbacks",
-          "refId": "A"
+          "refId": "A",
+          "instant": true,
+          "range": false
         }
       ],
       "fieldConfig": {
         "defaults": {
           "unit": "short",
+          "mappings": [],
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
+                "color": "blue",
                 "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 1
-              },
-              {
-                "color": "red",
-                "value": 5
               }
             ]
-          },
-          "mappings": []
+          }
         },
         "overrides": []
       },
@@ -588,7 +601,7 @@
         "orientation": "auto",
         "textMode": "auto",
         "colorMode": "background",
-        "graphMode": "area",
+        "graphMode": "none",
         "justifyMode": "center"
       }
     },
@@ -600,10 +613,10 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Recent anomaly count.",
+      "description": "Rows flagged anomalous in the last 15 minutes (every batch row counts).",
       "gridPos": {
         "x": 18,
-        "y": 14,
+        "y": 15,
         "w": 6,
         "h": 4
       },
@@ -613,32 +626,30 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "round(sum(increase(anomalies_detected_total[15m])))",
+          "expr": "round(sum(increase(anomalies_detected_total[15m]))) or vector(0)",
           "legendFormat": "anomalies",
-          "refId": "A"
+          "refId": "A",
+          "instant": true,
+          "range": false
         }
       ],
       "fieldConfig": {
         "defaults": {
           "unit": "short",
+          "mappings": [],
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "blue"
+          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
               {
-                "color": "green",
+                "color": "blue",
                 "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 500
-              },
-              {
-                "color": "red",
-                "value": 2000
               }
             ]
-          },
-          "mappings": []
+          }
         },
         "overrides": []
       },
@@ -653,7 +664,7 @@
         "orientation": "auto",
         "textMode": "auto",
         "colorMode": "background",
-        "graphMode": "area",
+        "graphMode": "none",
         "justifyMode": "center"
       }
     },
@@ -665,10 +676,10 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "p95 latency trend against the 200 ms budget.",
+      "description": "p95 of single predictions (/predict) against the 200 ms budget (dashed).",
       "gridPos": {
         "x": 0,
-        "y": 18,
+        "y": 19,
         "w": 12,
         "h": 7
       },
@@ -678,8 +689,8 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "histogram_quantile(0.95, sum(rate(prediction_latency_ms_bucket[5m])) by (le))",
-          "legendFormat": "p95_latency",
+          "expr": "histogram_quantile(0.95, sum(rate(prediction_latency_ms_bucket{endpoint=\"/predict\"}[5m])) by (le))",
+          "legendFormat": "p95 /predict",
           "refId": "A"
         }
       ],
@@ -702,6 +713,13 @@
                 "value": 200
               }
             ]
+          },
+          "custom": {
+            "thresholdsStyle": {
+              "mode": "dashed"
+            },
+            "axisSoftMin": 0,
+            "axisSoftMax": 220
           }
         },
         "overrides": []
@@ -726,10 +744,10 @@
         "type": "prometheus",
         "uid": "${DS_PROMETHEUS}"
       },
-      "description": "Drift trend grouped by status.",
+      "description": "Worst feature drift status per segment in the latest drift run: 0 normal, 1 warning, 2 critical.",
       "gridPos": {
         "x": 12,
-        "y": 18,
+        "y": 19,
         "w": 12,
         "h": 7
       },
@@ -739,14 +757,14 @@
             "type": "prometheus",
             "uid": "${DS_PROMETHEUS}"
           },
-          "expr": "sum(rate(drift_detected_total[5m])) by (drift_status)",
-          "legendFormat": "{{drift_status}}",
+          "expr": "max by (segment) (feature_drift_status)",
+          "legendFormat": "{{segment}}",
           "refId": "A"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "short",
+          "unit": "none",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -756,14 +774,45 @@
               },
               {
                 "color": "yellow",
-                "value": 150
+                "value": 1
               },
               {
                 "color": "red",
-                "value": 200
+                "value": 2
               }
             ]
-          }
+          },
+          "custom": {
+            "lineInterpolation": "stepAfter",
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "min": 0,
+          "max": 2,
+          "decimals": 0,
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "normal",
+                  "color": "green",
+                  "index": 0
+                },
+                "1": {
+                  "text": "warning",
+                  "color": "yellow",
+                  "index": 1
+                },
+                "2": {
+                  "text": "critical",
+                  "color": "red",
+                  "index": 2
+                }
+              }
+            }
+          ]
         },
         "overrides": []
       },
@@ -785,19 +834,18 @@
       "type": "text",
       "gridPos": {
         "x": 0,
-        "y": 25,
+        "y": 26,
         "w": 24,
-        "h": 4
+        "h": 7
       },
       "options": {
         "mode": "markdown",
-        "content": "### How to read this dashboard\n- Healthy: active model is visible, request count moves, p95 latency stays below 200 ms, prediction errors remain near zero, and drift events stay low.\n- Investigate: anomaly rate spikes, p95 latency crosses 200 ms, repeated drift appears, or rollback count increases unexpectedly.\n- Current limitation: explicit alert-event metrics and rollback execution arrive in later checkpoints."
+        "content": "### How to read this dashboard\n- **Healthy:** active model shown, requests moving, p95 of single predictions below 200 ms, errors at 0, every segment's drift normal.\n- **Investigate:** anomaly rate above 7.5% (1.5x contamination 0.05), p95 above 200 ms, a segment at warning or critical, or a rollback.\n- **Rollback is live:** every rollback applied through /admin/rollback is counted."
       }
     }
   ],
-  "refresh": "10s",
+  "refresh": "30s",
   "schemaVersion": 39,
-  "style": "dark",
   "tags": [
     "project4",
     "mlops",

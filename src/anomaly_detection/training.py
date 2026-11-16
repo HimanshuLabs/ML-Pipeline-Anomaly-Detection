@@ -3,29 +3,56 @@
 The training pipeline reads a frozen feature snapshot, validates the feature
 contract, trains an Isolation Forest model, and writes versioned local artifacts.
 
-This is intentionally local-first. The model registry/MLflow/S3 layer comes
-later; this checkpoint proves the first reproducible training artifact.
+Artifacts are local and versioned; the model registry decides what is served.
+The training CLI records each run in MLflow when MLFLOW_TRACKING_URI is set
+(see anomaly_detection.tracking); MLflow is a record, not the source of truth.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
+import platform
 import re
 import shutil
+import sys
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import joblib
+import numpy
 import pandas as pd
+import sklearn
 import yaml
 from sklearn.ensemble import IsolationForest
 
-from anomaly_detection.evaluation import build_baseline_stats_payload
+from anomaly_detection.evaluation import (
+    build_baseline_stats_payload,
+    calculate_feature_baseline_stats,
+)
 from anomaly_detection.feature_validation import get_model_feature_matrix
+from anomaly_detection.registry import (
+    DEFAULT_REGISTRY_PATH,
+    load_model_registry,
+    project_relative_path,
+)
+from anomaly_detection.segmented_model import (
+    SEGMENTED_MODEL_KIND,
+    SINGLE_MODEL_KIND,
+    SegmentedIsolationForest,
+    SegmentedModelError,
+    check_segment_row_counts,
+    feature_spec_for,
+    feature_spec_from_metadata,
+    fit_segmented_isolation_forest,
+    score_distribution,
+    segment_spec_fingerprint,
+)
+from anomaly_detection.tracking import TrackingError, TrainingRun, training_run
 from anomaly_detection.training_snapshot import (
     load_training_snapshot_metadata,
     read_training_snapshot,
@@ -53,6 +80,8 @@ class IsolationForestTrainingConfig:
     max_samples: int | float | str
     artifact_root: Path
     feature_schema_version: str
+    real_source_feature_schema_version: str
+    min_rows_per_segment: int
 
 
 @dataclass(frozen=True)
@@ -75,10 +104,84 @@ class ModelArtifactMetadata:
     training_snapshot_metadata: dict[str, Any]
     model_parameters: dict[str, Any]
     baseline_anomaly_rate: float
+    runtime_versions: dict[str, str]
+    feature_set_fingerprint: str
+    model_kind: str = SINGLE_MODEL_KIND
+    # Segmented models: {entity_type: {feature_names, row_count, feature_set_fingerprint}}.
+    segments: dict[str, Any] | None = None
+    # MLflow run that recorded this training (null when tracking was off or unavailable).
+    mlflow_run_id: str | None = None
+    mlflow_experiment_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Return JSON-safe metadata."""
         return asdict(self)
+
+
+def runtime_versions() -> dict[str, str]:
+    """Library versions of the running environment, recorded with each trained model."""
+
+    return {
+        "python": platform.python_version(),
+        "scikit-learn": sklearn.__version__,
+        "numpy": numpy.__version__,
+        "pandas": pd.__version__,
+        "joblib": joblib.__version__,
+    }
+
+
+def feature_set_fingerprint(feature_names: list[str]) -> str:
+    """sha256 of the ordered feature names, UTF-8, joined with newlines."""
+
+    return hashlib.sha256("\n".join(feature_names).encode("utf-8")).hexdigest()
+
+
+def ensure_feature_schema_version_is_unambiguous(
+    *,
+    feature_schema_version: str,
+    feature_names: list[str],
+    registry_path: str | Path = DEFAULT_REGISTRY_PATH,
+    segment_features: dict[str, list[str]] | None = None,
+) -> None:
+    """Refuse a schema label that the registry already uses for a different feature spec.
+
+    Single models compare the ordered feature_names, so the same names in a
+    different order also count as a different feature set. Segmented models
+    compare the whole segment spec (entity types and each type's ordered
+    features), and a segmented and a single model never share a label.
+    """
+
+    new_spec = feature_spec_for(feature_names, segment_features)
+
+    for entry in load_model_registry(registry_path):
+        if entry.feature_schema_version != feature_schema_version:
+            continue
+
+        metadata_path = Path(entry.metadata_path)
+        if not metadata_path.is_absolute():
+            metadata_path = PROJECT_ROOT / metadata_path
+
+        try:
+            registered_metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise TrainingError(
+                f"Cannot verify feature_schema_version {feature_schema_version!r}: "
+                f"metadata for {entry.model_name} {entry.model_version} is unreadable "
+                f"({entry.metadata_path})."
+            ) from exc
+
+        try:
+            difference = feature_spec_from_metadata(registered_metadata).difference(new_spec)
+        except ValueError as exc:
+            difference = f"its metadata has no usable feature spec ({exc})"
+
+        if difference is not None:
+            raise TrainingError(
+                f"feature_schema_version {feature_schema_version!r} is already used by "
+                f"{entry.model_name} {entry.model_version} for a different ordered "
+                f"feature_names list or segment spec: {difference}. Configure a new "
+                "feature_schema_version for this feature set."
+            )
 
 
 def _utc_now() -> datetime:
@@ -141,12 +244,25 @@ def load_training_config(
     feature_schema_version = str(
         features_config.get("schema_version", "feature_schema_v001")
     )
+    # The demo contract and the real-source feature set are different feature
+    # lists, so they carry different labels.
+    real_source_feature_schema_version = str(
+        features_config.get("real_source_schema_version", feature_schema_version)
+    )
 
     artifact_root_raw = artifact_root_override or training_config.get(
         "artifact_root",
         "artifacts/models",
     )
     artifact_root = _resolve_path(artifact_root_raw)
+
+    min_rows_per_segment = training_config.get("min_rows_per_segment", 30)
+    if isinstance(min_rows_per_segment, bool) or not isinstance(min_rows_per_segment, int):
+        raise TrainingError(
+            f"training.min_rows_per_segment must be an integer; got {min_rows_per_segment!r}"
+        )
+    if min_rows_per_segment < 1:
+        raise TrainingError("training.min_rows_per_segment must be at least 1")
 
     if isinstance(contamination, str) and contamination != "auto":
         raise TrainingError(
@@ -169,7 +285,20 @@ def load_training_config(
         max_samples=max_samples,
         artifact_root=artifact_root,
         feature_schema_version=feature_schema_version,
+        real_source_feature_schema_version=real_source_feature_schema_version,
+        min_rows_per_segment=min_rows_per_segment,
     )
+
+
+def resolve_feature_schema_version(
+    config: IsolationForestTrainingConfig,
+    snapshot_metadata: dict[str, Any],
+) -> str:
+    """Label for the trained feature set: real-source snapshots have their own."""
+
+    if snapshot_metadata.get("snapshot_type") == "real_source_extract":
+        return config.real_source_feature_schema_version
+    return config.feature_schema_version
 
 
 def _metadata_to_dict(metadata: Any) -> dict[str, Any]:
@@ -403,6 +532,8 @@ def train_isolation_forest_from_snapshot(
     artifact_root_override: str | Path | None = None,
     overwrite: bool = False,
     training_started_at_utc: datetime | None = None,
+    registry_path: str | Path = DEFAULT_REGISTRY_PATH,
+    training_run: TrainingRun | None = None,
 ) -> ModelArtifactMetadata:
     """Train Isolation Forest from a frozen training snapshot.
 
@@ -414,6 +545,10 @@ def train_isolation_forest_from_snapshot(
         artifact_root_override: Optional artifact root for tests/local overrides.
         overwrite: Whether to replace an existing artifact directory.
         training_started_at_utc: Optional fixed timestamp for deterministic tests.
+        registry_path: Registry checked so a feature_schema_version label is never
+            reused for a different ordered feature list.
+        training_run: MLflow run started by the caller (training CLI, retrain); its
+            ids go into metadata.json and the written bundle is logged to it.
 
     Returns:
         ModelArtifactMetadata describing written artifacts.
@@ -449,6 +584,34 @@ def train_isolation_forest_from_snapshot(
     if feature_matrix.empty:
         raise TrainingError("Validated model feature matrix must not be empty.")
 
+    feature_names = [str(column) for column in feature_matrix.columns]
+    feature_schema_version = resolve_feature_schema_version(config, snapshot_metadata)
+
+    # Real-source snapshots train one model per entity type on that type's own features.
+    segment_features: dict[str, list[str]] | None = None
+    entity_types = None
+    if snapshot_metadata.get("snapshot_type") == "real_source_extract":
+        segment_features, entity_types = _resolve_segment_features(
+            snapshot_frame,
+            feature_names=feature_names,
+            min_rows_per_segment=config.min_rows_per_segment,
+        )
+        feature_names = [
+            name
+            for name in feature_names
+            if any(name in names for names in segment_features.values())
+        ]
+        fingerprint = segment_spec_fingerprint(segment_features)
+    else:
+        fingerprint = feature_set_fingerprint(feature_names)
+
+    ensure_feature_schema_version_is_unambiguous(
+        feature_schema_version=feature_schema_version,
+        feature_names=feature_names,
+        registry_path=registry_path,
+        segment_features=segment_features,
+    )
+
     model_root = config.artifact_root / config.model_name
     resolved_model_version = model_version or resolve_next_model_version(model_root)
     artifact_dir = _prepare_artifact_dir(
@@ -466,20 +629,48 @@ def train_isolation_forest_from_snapshot(
         len(feature_matrix.columns),
     )
 
-    model = _build_model(config)
-    model.fit(feature_matrix)
-
-    anomaly_scores = model.decision_function(feature_matrix)
-    predictions = model.predict(feature_matrix)
+    segments_metadata: dict[str, Any] | None = None
+    if segment_features is None:
+        model: IsolationForest | SegmentedIsolationForest = _build_model(config)
+        model.fit(feature_matrix)
+        anomaly_scores = model.decision_function(feature_matrix)
+        predictions = model.predict(feature_matrix)
+    else:
+        feature_matrix = feature_matrix.loc[:, feature_names]
+        training_frame = feature_matrix.assign(entity_type=entity_types)
+        try:
+            model = fit_segmented_isolation_forest(
+                training_frame,
+                segment_features=segment_features,
+                build_model=lambda: _build_model(config),
+                min_rows_per_segment=config.min_rows_per_segment,
+            )
+        except SegmentedModelError as exc:
+            raise TrainingError(str(exc)) from exc
+        anomaly_scores = model.decision_function(training_frame)
+        predictions = model.predict(training_frame)
+        segments_metadata = {
+            entity_type: {
+                "feature_names": segment.feature_names,
+                "row_count": segment.row_count,
+                "feature_set_fingerprint": feature_set_fingerprint(segment.feature_names),
+            }
+            for entity_type, segment in model.segments.items()
+        }
 
     baseline_stats = build_baseline_stats_payload(
         model_name=config.model_name,
         model_version=resolved_model_version,
-        feature_schema_version=config.feature_schema_version,
+        feature_schema_version=feature_schema_version,
         feature_matrix=feature_matrix,
         anomaly_scores=anomaly_scores,
         predictions=predictions,
     )
+    if isinstance(model, SegmentedIsolationForest):
+        baseline_stats["model_kind"] = SEGMENTED_MODEL_KIND
+        baseline_stats["segments"] = _segment_baselines(
+            model, training_frame, anomaly_scores, predictions
+        )
 
     finished_at = _utc_now()
 
@@ -490,26 +681,32 @@ def train_isolation_forest_from_snapshot(
 
     joblib.dump(model, model_path)
 
+    # Describe where the features actually came from: the training snapshot.
     feature_schema_payload = {
-        "feature_schema_version": config.feature_schema_version,
-        "feature_names": list(feature_matrix.columns),
-        "feature_count": len(feature_matrix.columns),
+        "feature_schema_version": feature_schema_version,
+        "feature_names": feature_names,
+        "feature_count": len(feature_names),
+        "feature_set_fingerprint": fingerprint,
         "entity_key": "entity_id",
-        "timestamp_column": "feature_timestamp",
-        "source": "configs/model_config.yaml",
+        "timestamp_column": snapshot_metadata.get("timestamp_column"),
+        "source": snapshot_metadata.get("snapshot_id"),
     }
+    if segments_metadata is not None:
+        feature_schema_payload["model_kind"] = SEGMENTED_MODEL_KIND
+        feature_schema_payload["segments"] = segments_metadata
 
     artifact_metadata = ModelArtifactMetadata(
         model_name=config.model_name,
         model_version=resolved_model_version,
         algorithm=config.algorithm,
-        artifact_dir=str(artifact_dir),
-        model_path=str(model_path),
-        metadata_path=str(metadata_path),
-        feature_schema_path=str(feature_schema_path),
-        baseline_stats_path=str(baseline_stats_path),
-        feature_schema_version=config.feature_schema_version,
-        feature_names=list(feature_matrix.columns),
+        # Repo-relative inside the repository, absolute for a bundle outside it.
+        artifact_dir=project_relative_path(artifact_dir),
+        model_path=project_relative_path(model_path),
+        metadata_path=project_relative_path(metadata_path),
+        feature_schema_path=project_relative_path(feature_schema_path),
+        baseline_stats_path=project_relative_path(baseline_stats_path),
+        feature_schema_version=feature_schema_version,
+        feature_names=feature_names,
         row_count=int(len(feature_matrix)),
         training_started_at_utc=_isoformat_utc(started_at),
         training_finished_at_utc=_isoformat_utc(finished_at),
@@ -521,6 +718,12 @@ def train_isolation_forest_from_snapshot(
             "random_state": config.random_state,
         },
         baseline_anomaly_rate=float(baseline_stats["baseline_anomaly_rate"]),
+        runtime_versions=runtime_versions(),
+        feature_set_fingerprint=fingerprint,
+        model_kind=SEGMENTED_MODEL_KIND if segments_metadata is not None else SINGLE_MODEL_KIND,
+        segments=segments_metadata,
+        mlflow_run_id=training_run.run_id if training_run else None,
+        mlflow_experiment_id=training_run.experiment_id if training_run else None,
     )
 
     _write_json(feature_schema_path, feature_schema_payload)
@@ -529,24 +732,89 @@ def train_isolation_forest_from_snapshot(
 
     LOGGER.info("Wrote trained model artifacts to %s", artifact_dir)
 
+    if training_run is not None:
+        training_run.log_bundle(
+            metadata=artifact_metadata.to_dict(),
+            artifact_dir=artifact_dir,
+            baseline_stats=baseline_stats,
+            extra_params={"model.min_rows_per_segment": config.min_rows_per_segment},
+        )
+
     return artifact_metadata
 
 
-def load_trained_model(model_path: str | Path) -> IsolationForest:
-    """Load a trained Isolation Forest model artifact."""
+def load_trained_model(model_path: str | Path) -> IsolationForest | SegmentedIsolationForest:
+    """Load a trained (single or segmented) Isolation Forest model artifact."""
     path = Path(model_path)
     if not path.exists():
         raise TrainingError(f"Model artifact does not exist: {path}")
 
     model = joblib.load(path)
 
-    if not isinstance(model, IsolationForest):
+    if not isinstance(model, IsolationForest | SegmentedIsolationForest):
         raise TrainingError(
-            "Loaded model is not an IsolationForest instance. "
+            "Loaded model is not an IsolationForest or SegmentedIsolationForest instance. "
             f"Got: {type(model).__name__}"
         )
 
     return model
+
+
+def _resolve_segment_features(
+    snapshot_frame: pd.DataFrame,
+    *,
+    feature_names: list[str],
+    min_rows_per_segment: int,
+) -> tuple[dict[str, list[str]], Any]:
+    """Segment spec for the entity types present; refuses before anything is written."""
+
+    from anomaly_detection.source_extract import SEGMENT_FEATURE_COLUMNS
+
+    if "entity_type" not in snapshot_frame.columns:
+        raise TrainingError("Real-source snapshot has no entity_type column to segment by.")
+    if snapshot_frame["entity_type"].isna().any():
+        raise TrainingError("Real-source snapshot has null entity_type values.")
+    entity_types = snapshot_frame["entity_type"].astype(str).to_numpy()
+
+    try:
+        counts = check_segment_row_counts(
+            entity_types,
+            segment_features=SEGMENT_FEATURE_COLUMNS,
+            min_rows_per_segment=min_rows_per_segment,
+        )
+    except SegmentedModelError as exc:
+        raise TrainingError(str(exc)) from exc
+
+    segment_features = {t: list(SEGMENT_FEATURE_COLUMNS[t]) for t in sorted(counts)}
+    missing = sorted(
+        {name for names in segment_features.values() for name in names} - set(feature_names)
+    )
+    if missing:
+        raise TrainingError(f"Snapshot feature_columns lack segment feature(s): {missing}")
+    return segment_features, entity_types
+
+
+def _segment_baselines(
+    model: SegmentedIsolationForest,
+    training_frame: pd.DataFrame,
+    anomaly_scores: Any,
+    predictions: Any,
+) -> dict[str, Any]:
+    """Per segment: anomaly rate, p5/p50/p95 scores, and its features' baselines."""
+
+    entity_types = training_frame["entity_type"].to_numpy()
+    scores = numpy.asarray(anomaly_scores, dtype=float)
+    is_anomaly = numpy.asarray(predictions) == -1
+    baselines: dict[str, Any] = {}
+    for entity_type, segment in model.segments.items():
+        mask = entity_types == entity_type
+        baselines[entity_type] = {
+            **score_distribution(scores[mask], is_anomaly[mask]),
+            "feature_baselines": calculate_feature_baseline_stats(
+                training_frame.loc[mask, segment.feature_names]
+            ),
+        }
+    return baselines
 
 def parse_args() -> argparse.Namespace:
     """Parse training CLI arguments."""
@@ -588,25 +856,37 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> None:
     """CLI entrypoint for local model training."""
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s - %(message)s",
-    )
+    from anomaly_detection.logging_config import configure_logging
+
+    configure_logging()
 
     args = parse_args()
     features_path, metadata_path = resolve_snapshot_paths(
         args.snapshot,
         training_root=args.training_root,
     )
-
-    artifact_metadata = train_isolation_forest_from_snapshot(
-        features_path=features_path,
-        snapshot_metadata_path=metadata_path,
-        model_version=args.model_version,
-        config_path=args.config,
-        artifact_root_override=args.artifact_root,
-        overwrite=args.overwrite,
+    # The version is fixed up front so the MLflow run can be named after it.
+    config = load_training_config(args.config, artifact_root_override=args.artifact_root)
+    model_version = args.model_version or resolve_next_model_version(
+        config.artifact_root / config.model_name
     )
+
+    try:
+        with training_run(
+            entrypoint="train", model_version=model_version, model_name=config.model_name
+        ) as run:
+            artifact_metadata = train_isolation_forest_from_snapshot(
+                features_path=features_path,
+                snapshot_metadata_path=metadata_path,
+                model_version=model_version,
+                config_path=args.config,
+                artifact_root_override=args.artifact_root,
+                overwrite=args.overwrite,
+                training_run=run,
+            )
+    except TrackingError as exc:
+        print(f"REFUSED: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
 
     dataset_snapshot_id = artifact_metadata.training_snapshot_metadata.get(
         "snapshot_id",
@@ -630,6 +910,7 @@ def main() -> None:
     print(f"metadata_path={artifact_metadata.metadata_path}")
     print(f"feature_schema_path={artifact_metadata.feature_schema_path}")
     print(f"baseline_stats_path={artifact_metadata.baseline_stats_path}")
+    print(f"mlflow_run_id={artifact_metadata.mlflow_run_id}")
 
 
 if __name__ == "__main__":

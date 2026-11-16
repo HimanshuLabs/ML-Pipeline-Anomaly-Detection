@@ -34,7 +34,7 @@ def _write_json(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
-def _build_artifact_bundle(tmp_path: Path) -> Path:
+def _build_artifact_bundle(tmp_path: Path, extra_metadata: dict | None = None) -> Path:
     model_dir = tmp_path / "artifacts" / "models" / "isolation_forest" / "model_version=vtest"
     model_dir.mkdir(parents=True)
 
@@ -56,6 +56,7 @@ def _build_artifact_bundle(tmp_path: Path) -> Path:
             "baseline_stats_path": str(baseline_path),
             "feature_schema_path": str(schema_path),
             "model_path": str(model_path),
+            **(extra_metadata or {}),
         },
     )
 
@@ -161,6 +162,21 @@ def test_prepare_feature_matrix_fails_for_non_numeric_feature() -> None:
         prepare_feature_matrix(features, ["feature_a", "feature_b"])
 
 
+@pytest.mark.parametrize("value", ["inf", "-inf", np.inf, -np.inf])
+def test_prepare_feature_matrix_rejects_non_finite_values(value: float | str) -> None:
+    features = pd.DataFrame(
+        {"feature_a": [value, value], "feature_b": [1.0, value]}
+    )
+
+    with pytest.raises(BatchInferenceError) as exc_info:
+        prepare_feature_matrix(features, ["feature_a", "feature_b"])
+
+    assert str(exc_info.value) == (
+        "Input batch contains non-finite (inf/-inf) model feature values: "
+        "feature_a=2, feature_b=1"
+    )
+
+
 def test_hash_feature_payload_is_stable_for_key_order() -> None:
     first_hash = hash_feature_payload({"feature_b": 2.0, "feature_a": 1.0})
     second_hash = hash_feature_payload({"feature_a": 1.0, "feature_b": 2.0})
@@ -251,3 +267,119 @@ def test_write_predictions_jsonl_appends_records(tmp_path: Path) -> None:
     assert record["prediction_status"] == "success"
     assert record["threshold_used"] == 0.0
     assert len(record["feature_payload_hash"]) == 64
+
+
+# --- training/runtime library version checks ----------------------------------
+
+
+def _runtime_version_records(caplog: pytest.LogCaptureFixture, level: int) -> list:
+    return [
+        record
+        for record in caplog.records
+        if record.name == "anomaly_detection.batch_inference" and record.levelno == level
+    ]
+
+
+def _recorded_versions(scikit_learn_version: str) -> dict[str, str]:
+    return {
+        "python": "3.12.0",
+        "scikit-learn": scikit_learn_version,
+        "numpy": "2.0.0",
+        "pandas": "2.2.0",
+        "joblib": "1.4.0",
+    }
+
+
+def test_loading_model_trained_with_other_sklearn_warns_once_and_loads(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+
+    import sklearn
+
+    caplog.set_level(logging.INFO, logger="anomaly_detection.batch_inference")
+    active_path = _build_artifact_bundle(
+        tmp_path,
+        {"runtime_versions": _recorded_versions("0.0.1")},
+    )
+
+    artifacts = load_active_model_artifacts(active_path)
+
+    warnings = _runtime_version_records(caplog, logging.WARNING)
+    assert artifacts.model_version == "vtest"
+    assert len(warnings) == 1
+    assert "0.0.1" in warnings[0].getMessage()
+    assert sklearn.__version__ in warnings[0].getMessage()
+
+
+def test_loading_model_trained_with_same_sklearn_does_not_warn(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+
+    import sklearn
+
+    caplog.set_level(logging.INFO, logger="anomaly_detection.batch_inference")
+    active_path = _build_artifact_bundle(
+        tmp_path,
+        {"runtime_versions": _recorded_versions(sklearn.__version__)},
+    )
+
+    load_active_model_artifacts(active_path)
+
+    assert _runtime_version_records(caplog, logging.WARNING) == []
+
+
+def test_loading_model_without_recorded_versions_logs_info_and_loads(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+
+    caplog.set_level(logging.INFO, logger="anomaly_detection.batch_inference")
+    active_path = _build_artifact_bundle(tmp_path)
+
+    artifacts = load_active_model_artifacts(active_path)
+
+    infos = [
+        record
+        for record in _runtime_version_records(caplog, logging.INFO)
+        if "not recorded" in record.getMessage()
+    ]
+    assert artifacts.model_version == "vtest"
+    assert len(infos) == 1
+    assert _runtime_version_records(caplog, logging.WARNING) == []
+
+
+def test_batch_run_fails_naming_the_postgres_sink_after_jsonl_is_written(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from anomaly_detection import database
+    from anomaly_detection.batch_inference import run_batch_inference
+
+    active_path = _build_artifact_bundle(tmp_path)
+    output_path = tmp_path / "batch_predictions.jsonl"
+
+    def _broken_insert(_records):
+        raise ConnectionError("database unreachable")
+
+    monkeypatch.setattr(database, "is_configured", lambda: True)
+    monkeypatch.setattr(database, "insert_batch_predictions", _broken_insert)
+
+    features = pd.DataFrame(
+        [
+            {"entity_id": "customer_001", "feature_a": 1.0, "feature_b": 2.0},
+            {"entity_id": "customer_002", "feature_a": 3.0, "feature_b": 4.0},
+        ]
+    )
+
+    with pytest.raises(BatchInferenceError) as error:
+        run_batch_inference(features, active_model_path=active_path, output_path=output_path)
+
+    message = str(error.value)
+    assert "postgres sink (ml.batch_predictions) failed" in message
+    assert str(output_path) in message
+    assert len(output_path.read_text(encoding="utf-8").splitlines()) == 2

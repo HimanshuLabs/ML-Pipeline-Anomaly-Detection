@@ -16,6 +16,23 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
+    # Disposable database for the schema checks and the postgres-marked tests; same image
+    # as compose's anomaly-postgres, on 5547 (never the real 5433/5434/5435 ports).
+    services:
+      postgres:
+        image: postgres:16.14
+        env:
+          POSTGRES_USER: p4test
+          POSTGRES_PASSWORD: project4_ci_only
+          POSTGRES_DB: project4_ml
+        ports:
+          - 5547:5432
+        options: >-
+          --health-cmd "pg_isready -U p4test -d project4_ml"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+
     steps:
       - name: Check out repository
         uses: actions/checkout@v5
@@ -28,7 +45,7 @@ jobs:
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade "pip>=25,<26"
-          python -m pip install -r requirements.txt
+          python -m pip install -r requirements-dev.txt -c constraints.txt
 
       - name: Run Ruff quality gate
         run: |
@@ -88,38 +105,24 @@ jobs:
           print("OK: no basic secret patterns found")
           PY
 
-      - name: Run SQL smoke checks
+      - name: Apply PostgreSQL schema twice (idempotency) and check
+        env:
+          PROJECT4_POSTGRES_HOST: 127.0.0.1
+          PROJECT4_POSTGRES_PORT: "5547"
+          PROJECT4_POSTGRES_DB: project4_ml
+          PROJECT4_POSTGRES_USER: p4test
+          PROJECT4_POSTGRES_PASSWORD: project4_ci_only
         run: |
-          python - <<'PY'
-          from __future__ import annotations
+          PYTHONPATH=src python -m anomaly_detection.database apply-schema
+          PYTHONPATH=src python -m anomaly_detection.database apply-schema
+          PYTHONPATH=src python -m anomaly_detection.database check
 
-          from pathlib import Path
-
-          required_sql_files = [
-              Path("sql/create_ml_schemas.sql"),
-              Path("sql/create_feature_tables.sql"),
-              Path("sql/create_model_registry_tables.sql"),
-              Path("sql/create_prediction_tables.sql"),
-              Path("sql/create_monitoring_tables.sql"),
-              Path("sql/validation_queries.sql"),
-          ]
-
-          for path in required_sql_files:
-              if not path.exists():
-                  raise SystemExit(f"Missing SQL file: {path}")
-
-              text = path.read_text(encoding="utf-8").strip()
-              if not text:
-                  raise SystemExit(f"Empty SQL file: {path}")
-
-              lowered = text.lower()
-              if not any(keyword in lowered for keyword in ["create schema", "create table", "select"]):
-                  raise SystemExit(f"SQL smoke check failed for {path}")
-
-              print(f"OK: {path}")
-
-          print("OK: SQL smoke checks passed")
-          PY
+      - name: Run PostgreSQL integration tests
+        env:
+          PROJECT4_TEST_DATABASE_URL: postgresql+psycopg2://p4test:project4_ci_only@127.0.0.1:5547/project4_ml
+          PROJECT4_REQUIRE_TEST_DATABASE: "1"
+        run: |
+          PYTHONPATH=src pytest -m postgres tests/test_database.py -q
 
       - name: Run training smoke tests
         run: |
@@ -140,13 +143,20 @@ jobs:
 
           import yaml
 
-          model_dir = Path("artifacts/models/isolation_forest/model_version=v002")
+          active_path = Path("configs/active_model.yaml")
+          if not active_path.exists():
+              raise SystemExit(f"Missing active model pointer: {active_path}")
+
+          active = yaml.safe_load(active_path.read_text(encoding="utf-8"))
+          active_version = active["active_model_version"]
+          print(f"Active model version from pointer: {active_version}")
+
+          model_dir = Path(active["artifact_path"]).parent
           metadata_path = model_dir / "metadata.json"
           baseline_path = model_dir / "baseline_stats.json"
           schema_path = model_dir / "feature_schema.json"
-          active_path = Path("configs/active_model.yaml")
 
-          for path in [metadata_path, baseline_path, schema_path, active_path]:
+          for path in [metadata_path, baseline_path, schema_path]:
               if not path.exists():
                   raise SystemExit(f"Missing baseline artifact: {path}")
               print(f"OK: {path}")
@@ -154,15 +164,17 @@ jobs:
           metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
           baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
           schema = json.loads(schema_path.read_text(encoding="utf-8"))
-          active = yaml.safe_load(active_path.read_text(encoding="utf-8"))
 
           feature_names = metadata["feature_names"]
           feature_baselines = baseline["feature_baselines"]
 
           checks = {
-              "active_model_is_v002": active["active_model_version"] == "v002",
-              "metadata_model_version_is_v002": metadata["model_version"] == "v002",
-              "baseline_model_version_is_v002": baseline["model_version"] == "v002",
+              "active_model_version_is_set": bool(active_version),
+              "artifact_dir_matches_active_version": (
+                  model_dir.name == f"model_version={active_version}"
+              ),
+              "metadata_model_version_matches_active": metadata["model_version"] == active_version,
+              "baseline_model_version_matches_active": baseline["model_version"] == active_version,
               "schema_feature_count_matches_metadata": schema["feature_count"] == len(feature_names),
               "all_features_have_baselines": set(feature_names) == set(feature_baselines),
               "baseline_has_anomaly_rate": "baseline_anomaly_rate" in baseline,
@@ -173,6 +185,39 @@ jobs:
                   metadata["training_snapshot_metadata"]["snapshot_type"] == "real_source_extract"
               ),
           }
+
+          # Segmented models: every segment, in addition to the checks above.
+          if metadata.get("model_kind") == "segmented_isolation_forest":
+              meta_segments = metadata.get("segments") or {}
+              base_segments = baseline.get("segments") or {}
+              schema_segments = schema.get("segments") or {}
+              print(f"Segments: {sorted(meta_segments)}")
+              checks["segments_match_across_metadata_baseline_schema"] = (
+                  bool(meta_segments)
+                  and set(meta_segments) == set(base_segments) == set(schema_segments)
+              )
+              all_segments = sorted(set(meta_segments) | set(base_segments) | set(schema_segments))
+              for segment in all_segments:
+                  spec = meta_segments.get(segment) or {}
+                  segment_baseline = base_segments.get(segment) or {}
+                  names = spec.get("feature_names") or []
+                  rate = segment_baseline.get("anomaly_rate")
+                  prefix = f"segment[{segment}]."
+                  checks[prefix + "feature_baselines_equal_feature_names"] = bool(names) and (
+                      set(segment_baseline.get("feature_baselines") or {}) == set(names)
+                  )
+                  checks[prefix + "feature_names_within_model"] = bool(names) and (
+                      set(names) <= set(feature_names)
+                  )
+                  checks[prefix + "anomaly_rate_in_0_1"] = (
+                      isinstance(rate, (int, float))
+                      and not isinstance(rate, bool)
+                      and 0 <= rate <= 1
+                  )
+                  checks[prefix + "row_count_matches_baseline"] = (
+                      spec.get("row_count") is not None
+                      and spec.get("row_count") == segment_baseline.get("row_count")
+                  )
 
           failed = [name for name, passed in checks.items() if not passed]
           for name, passed in checks.items():
@@ -192,7 +237,12 @@ jobs:
         run: |
           PYTHONPATH=src pytest tests/test_api.py tests/test_metrics.py tests/test_prediction_logging.py -q
 
+      # Every postgres-marked test runs against the service; with the require flag a
+      # missing URL fails the suite instead of skipping those tests.
       - name: Run full pytest suite with JUnit report
+        env:
+          PROJECT4_TEST_DATABASE_URL: postgresql+psycopg2://p4test:project4_ci_only@127.0.0.1:5547/project4_ml
+          PROJECT4_REQUIRE_TEST_DATABASE: "1"
         run: |
           mkdir -p reports
           PYTHONPATH=src pytest -q --junitxml=reports/pytest-results.xml
@@ -261,10 +311,63 @@ jobs:
           path: reports/pytest-results.xml
           if-no-files-found: warn
 
-      - name: Build API Docker image
+      - name: Build runtime (API) Docker image
         run: |
-          docker build -f docker/Dockerfile.api -t project4-anomaly-api:ci .
+          docker build -f docker/Dockerfile --target runtime -t project4-anomaly-api:ci .
 
-      - name: Build batch Docker image
+      - name: Build tools Docker image
         run: |
-          docker build -f docker/Dockerfile.batch -t project4-anomaly-batch:ci .
+          docker build -f docker/Dockerfile --target tools -t project4-anomaly-tools:ci .
+
+      - name: Build dev Docker image
+        run: |
+          docker build -f docker/Dockerfile --target dev -t project4-anomaly-dev:ci .
+
+      - name: Check image contents
+        run: |
+          docker run --rm --network none project4-anomaly-api:ci python -c '
+          import importlib.util, sys
+          from pathlib import Path
+          present = [m for m in ("mlflow", "pyarrow", "pytest", "ruff", "httpx") if importlib.util.find_spec(m)]
+          if present or Path("/app/sql").exists():
+              sys.exit(f"runtime image must not contain {present} or /app/sql")
+          import api.main
+          print("OK: runtime image has no tools, tests or sql and imports api.main")'
+          docker run --rm --network none project4-anomaly-tools:ci test -d /app/sql
+          docker run --rm --network none project4-anomaly-tools:ci sh -c 'ls /app/sql/*.sql'
+
+  k8s-manifests:
+    name: Validate Kubernetes manifests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Download and verify kubeconform v0.8.0
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/kubeconform"
+          cd "$RUNNER_TEMP/kubeconform"
+          curl -fsSL -o kubeconform-linux-amd64.tar.gz https://github.com/yannh/kubeconform/releases/download/v0.8.0/kubeconform-linux-amd64.tar.gz
+          echo "9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883  kubeconform-linux-amd64.tar.gz" | sha256sum -c -
+          tar -xzf kubeconform-linux-amd64.tar.gz
+          ./kubeconform -v
+          echo "$RUNNER_TEMP/kubeconform" >> "$GITHUB_PATH"
+
+      - name: Show kubectl client
+        run: |
+          if ! command -v kubectl >/dev/null; then
+            echo "::error::kubectl is not installed on this runner; kubectl kustomize is required"
+            exit 1
+          fi
+          kubectl version --client
+
+      # Kubernetes 1.36.1: the kind node version of the live validation (runbook). Every
+      # kind must have a schema: a kind without one fails the step.
+      - name: Validate manifests with kubeconform (strict)
+        run: |
+          set -euo pipefail
+          kubectl kustomize k8s/ | kubeconform -strict -summary -kubernetes-version 1.36.1 -
+          kubeconform -strict -summary -kubernetes-version 1.36.1 k8s/seed-job.yaml k8s/secret.example.yaml
