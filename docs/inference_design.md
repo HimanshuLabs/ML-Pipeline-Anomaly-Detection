@@ -401,7 +401,7 @@ The full list of metric families is in the README ("Metrics and monitoring").
 |---|---|
 | Drift status | The response carries the latest drift-job status of the request's segment; there is no per-request drift evaluation. |
 | Prediction persistence | JSONL always and `ml.online_predictions` in database mode, written after the response; failures are counted, never returned to the client. |
-| Rollback | `/admin/rollback` supports dry-run and applied rollback through the shared pointer; no compatible target exists for v004 until v005. |
+| Rollback | `/admin/rollback` supports dry-run and applied rollback through the shared pointer; applied end to end on 2026-11-16 (v005 → v004 in compose and on both kind replicas). v004 is active and has no compatible target today (v005 is `rolled_back`). |
 | Threshold tuning | Uses fallback `0.0`; no version has an explicit threshold artifact yet. |
 | Authentication | One shared admin token for `/admin/*`; no users or roles. Prediction endpoints are open on the local network. |
 

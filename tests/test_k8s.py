@@ -237,7 +237,9 @@ def test_every_kubectl_command_in_the_docs_names_the_project4_context() -> None:
     assert not offenders
     # The commands exist (the check above is not vacuous).
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-    assert readme.count(f"kubectl {CONTEXT_FLAG}") >= 3
+    assert sum(
+        1 for line in readme.splitlines() if command.search(line) and CONTEXT_FLAG in line
+    ) >= 3
 
 
 def test_no_file_refers_to_another_projects_cluster() -> None:
@@ -415,26 +417,36 @@ def test_labels_used_by_the_policies_exist_on_the_workloads() -> None:
 RUNBOOK = REPO_ROOT / "docs" / "kubernetes_runtime_validation.md"
 
 
-def test_runbook_creates_its_own_cluster_restores_the_context_and_tears_down() -> None:
-    text = RUNBOOK.read_text(encoding="utf-8")
-    lines = text.splitlines()
+KCFG_FLAG = '--kubeconfig "$KCFG"'
 
-    create = next(i for i, line in enumerate(lines)
-                  if "kind create cluster --name project4-local" in line)
-    # Saved only when a context exists; restored only when one was saved.
-    save = next(i for i, line in enumerate(lines)
-                if 'PREVIOUS_CONTEXT="$(kubectl config current-context 2>/dev/null || true)"'
-                in line)
-    restore = next(i for i, line in enumerate(lines)
-                   if 'if [ -n "$PREVIOUS_CONTEXT" ]; then kubectl config use-context '
-                   '"$PREVIOUS_CONTEXT"; fi' in line)
-    assert save < create < restore
-    # The restore is the very next command after creating the cluster.
-    between = [
-        line for line in lines[create + 1:restore]
-        if line.strip().startswith(("kubectl", "kind", "docker"))
+
+def test_runbook_creates_the_cluster_in_its_own_kubeconfig_and_never_switches_context() -> None:
+    text = RUNBOOK.read_text(encoding="utf-8")
+    create_step = _section(text, 1)
+    teardown = _section(text, 11)
+
+    # The default kubeconfig is never written, so there is no context to switch back.
+    assert "use-context" not in text and "PREVIOUS_CONTEXT" not in text
+    assert 'STATE="$(mktemp -d)"' in create_step
+    assert 'KCFG="$STATE/kubeconfig-project4"' in create_step
+    create = create_step.index('kind create cluster --name project4-local --kubeconfig "$KCFG"')
+    assert create_step.index('> "$STATE/context.before"') < create
+    assert create_step.index('> "$STATE/kubeconfig.before"') < create
+    for step in (create_step, teardown):
+        assert 'sha256sum -c "$STATE/kubeconfig.before"' in step
+        assert 'diff - "$STATE/context.before"' in step
+    assert create_step.index('sha256sum -c "$STATE/kubeconfig.before"') > create
+    delete = teardown.index('kind delete cluster --name project4-local --kubeconfig "$KCFG"')
+    assert delete < teardown.index('sha256sum -c "$STATE/kubeconfig.before"')
+    assert teardown.index('rm -rf "$STATE"') > teardown.index('sha256sum -c')
+    # Every command that talks to the cluster uses the cluster's own kubeconfig file.
+    cluster_commands = [
+        line for line in text.splitlines()
+        if re.search(r"\bkubectl\s+\S", line) and not re.search(r"\bkubectl\s+config\s", line)
     ]
-    assert between == []
+    assert len(cluster_commands) >= 20
+    for line in cluster_commands:
+        assert f"{KCFG_FLAG} {CONTEXT_FLAG}" in line, line
     for step in (
         "kind delete cluster --name project4-local",
         "apply -f k8s/seed-job.yaml",
@@ -504,17 +516,78 @@ def test_runbook_waits_for_every_pod_to_switch_to_the_database_pointer() -> None
     assert "stay unready" not in seed
 
 
-def test_runbook_proves_cross_replica_propagation_with_promote_not_a_rollback() -> None:
+def test_runbook_promotes_v005_then_really_rolls_back_to_v004_on_every_replica() -> None:
     step = _section(RUNBOOK.read_text(encoding="utf-8"), 7)
 
-    assert '"dry_run": true' in step and '"dry_run": false' not in step
-    assert "No compatible rollback target" in step  # the documented expected refusal
-    v002 = step.index("registry promote --model-version v002")
-    v004 = step.index("registry promote --model-version v004")
-    assert v002 < v004
-    assert step[v002:v004].count("sleep 35") == 1 and step[v004:].count("sleep 35") == 1
-    assert step.count("/model/active") >= 3  # noted, then every pod twice
-    assert "v005" in step  # the real /admin/rollback run comes after the v005 retrain
+    promote = step.index("registry promote --model-version v005")
+    dry_run = step.index('"dry_run": true')
+    applied = step.index('"dry_run": false')
+    assert promote < dry_run < applied
+    # Each pointer change is followed by one poll and a check of every pod.
+    assert step[promote:dry_run].count("sleep 35") == 1
+    assert step[applied:].count("sleep 35") == 1
+    assert step.count("for pod in $(") == 2 and step.count("/model/active") >= 2
+    assert "every pod: v005" in step and "every pod: v004" in step
+    assert "1 (seed) → 2 (promote) → 3 (rollback)" in step
+    assert '"to_model_version":"v004"' in step and '"status":"applied"' in step
+    assert "No compatible rollback target" not in step  # v004 is a target once v005 is active
+    assert "audit.rollback_events" in step and "model_rollback_total" in step
+    # Project 5's view of the result, without logging in as project5_reader.
+    assert '"SET ROLE project5_reader"' in step
+    assert "bad" in step and "md5(string_agg(" in step
+
+
+def test_runbook_seed_expectations_match_the_committed_registry() -> None:
+    seed = _section(RUNBOOK.read_text(encoding="utf-8"), 5)
+
+    for expected in (
+        "snapshot_rows_inserted 6",
+        "registry_inserted 5",
+        "pointer_model_version v004",
+        "pointer_version 1",
+        "5 registry rows",
+        "4 snapshots",
+        "2 datasets",
+        "0 rollback events",
+        "64e7a3c0-bd07-5f74-95f5-71cc9e494e1b",
+    ):
+        assert expected in seed, expected
+    assert "4 registry rows" not in seed
+
+
+def test_runbook_port_forwards_run_kubectl_directly_and_are_killed_by_pid() -> None:
+    text = RUNBOOK.read_text(encoding="utf-8")
+    lines = text.splitlines()
+
+    # No shell function anywhere: a backgrounded function orphans its kubectl.
+    assert not re.search(r"^\s*[A-Za-z_][A-Za-z0-9_]*\s*\(\)\s*\{", text, re.MULTILINE)
+    forwards = [i for i, line in enumerate(lines) if "port-forward" in line and ":8004" in line]
+    assert len(forwards) == 2
+    for index in forwards:
+        line = lines[index].strip()
+        assert line.startswith("kubectl "), line
+        assert line.endswith("&"), line
+        assert re.fullmatch(r"PF_80\d\d_PID=\$!", lines[index + 1].strip()), lines[index + 1]
+        before = "\n".join(lines[max(0, index - 3):index])
+        assert "ss -ltn" in before  # the port is checked free before forwarding
+
+
+def test_runbook_records_the_2026_11_16_live_run_above_the_earlier_ones() -> None:
+    text = RUNBOOK.read_text(encoding="utf-8")
+    heading = "## 2026-11-16 live record (stage 15e)"
+    record = text.split(f"\n{heading}\n", 1)[1].split("\n## ", 1)[0]
+
+    assert text.index(heading) < text.index("## Live validation (2026-11-15)")
+    for observed in (
+        "1f855c5", "5 registry rows", "pointer_version 1", "4 snapshot rows",
+        "2 dataset rows", "0 rollback events", "pointer_version 2", "pointer_version 3",
+        "1 → 2", "093e2da8", "6ac0c919", "36f6f02f", "22 columns", "26 columns",
+        "23 columns", "byte-identical", "UIDs",
+        "02f0962f4224b0ff447c2421256d1f9e216f56d58fc165378878edcf74cd6858",
+        "context unchanged", "`sha256sum -c` OK", "orphaned port-forward", "8016 free",
+    ):
+        assert observed in record, observed
+    assert "project5-local" not in record  # the other cluster is never named
 
 
 def test_runbook_egress_check_targets_the_kubernetes_api_not_the_internet() -> None:
@@ -526,9 +599,11 @@ def test_runbook_egress_check_targets_the_kubernetes_api_not_the_internet() -> N
 
 
 def test_runbook_stops_the_port_forwards_before_teardown() -> None:
-    step = _section(RUNBOOK.read_text(encoding="utf-8"), 11)
+    text = RUNBOOK.read_text(encoding="utf-8")
+    step = _section(text, 11)
 
-    stop = step.index("pkill -f")
-    assert "port-forward svc/project4-anomaly-api 8015:8004" in step
-    assert "8016:8004" in step
-    assert stop < step.index("kind delete cluster --name project4-local")
+    assert "pkill" not in text
+    stop = step.index('kill "$PF_8015_PID" "$PF_8016_PID"')
+    free = step.index("ss -ltn '( sport = :8015 or sport = :8016 )'")
+    assert stop < free < step.index("kind delete cluster --name project4-local")
+    assert "orphan" in step  # why the forwards are started and stopped this way

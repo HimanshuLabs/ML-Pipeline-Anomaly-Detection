@@ -93,7 +93,7 @@ rollback to previous stable model
 
 ## Model lifecycle
 
-Registered versions on 2026-11-15:
+Registered versions on 2026-11-16:
 
 | Version | Status | Kind | Feature schema | Why |
 |---|---|---|---|---|
@@ -101,6 +101,7 @@ Registered versions on 2026-11-15:
 | `v002` | archived | single | `feature_schema_v001` | First real-source model (Project 1 + Project 2/3 extracts, 51 features); production until v004. |
 | `v003` | retired | single | `feature_schema_v002` | Superseded: the single model learned the entity type rather than anomalies (see its `evaluation_report.json`). |
 | `v004` | production | segmented | `feature_schema_v003` | One Isolation Forest per entity type (6 segments, 52 features in total). |
+| `v005` | rolled_back | segmented | `feature_schema_v003` | Retrained from a fresh read-only extract (same data as v004); `training_dataset_id` `64e7a3c0-bd07-5f74-95f5-71cc9e494e1b`, MLflow run `93a91a6a69834659befd027b2496b953`. Promoted, then rolled back to v004: the first real rollback (compose and kind). |
 
 Current active model:
 
@@ -587,10 +588,13 @@ previous stable version. The target must:
   features for single models, the same segment spec for segmented models; a single and a
   segmented model are never compatible
 
-Among eligible versions the most recently archived one is chosen. **Today there is no
-compatible target until v005**: v001 and v003 are retired, and v002 (single) is never
-compatible with the segmented v004, so a dry run returns HTTP 400
-`No compatible rollback target for isolation_forest: …`.
+Among eligible versions the most recently archived one is chosen. The first real
+rollbacks, v005 → v004, ran on 2026-11-16 in compose and on both replicas of the kind
+cluster (see [the rollback runbook](docs/rollback_runbook.md)). **v004 is active and has no
+compatible target today**: v005 is `rolled_back` (not a target), v001 and v003 are
+retired, and v002 (single) is never compatible with the segmented v004, so a dry run
+returns HTTP 400 `No compatible rollback target for isolation_forest: …` until a version
+with v004's segment spec is promoted.
 
 Rollback supports:
 
@@ -833,7 +837,7 @@ Docker scope:
 | Every tracked model bundle packaged into the images; the pointer selects one | Implemented |
 | Prometheus metrics from containerized API | Implemented |
 | CI builds of all three images and an image content check | Implemented |
-| Kubernetes runtime manifests | Implemented; validated live on kind on 2026-11-15 |
+| Kubernetes runtime manifests | Implemented; validated live on kind on 2026-11-15 and 2026-11-16 (real rollback) |
 | Cloud deployment | Not implemented |
 
 ## Kubernetes runtime manifests
@@ -866,6 +870,7 @@ Validation status:
 - Passed: YAML parsing and manifest tests (`tests/test_k8s.py`: hardening, images, secrets, kustomization).
 - Passed in CI: kubeconform v0.8.0, strict, against Kubernetes 1.36.1.
 - Validated live on 2026-11-15 on the dedicated kind cluster `project4-local`: seed job, both replicas on the database pointer, promote propagation across replicas, network-policy deny checks, drift job, non-root read-only pods, and HPA. See [the live validation](docs/kubernetes_runtime_validation.md#live-validation-2026-11-15).
+- Validated live again on 2026-11-16 (stage 15e) with images built from `1f855c5`: the seed reproduced the committed registry state exactly, v005 was promoted and then really rolled back to v004 through `/admin/rollback`, both replicas following each change within one poll, and the integration views matched the compose database. See [the 2026-11-16 record](docs/kubernetes_runtime_validation.md#2026-11-16-live-record-stage-15e).
 - Not implemented: cloud Kubernetes deployment, public ingress, managed load balancer, or managed cluster autoscaler.
 
 Render the manifests offline (no cluster is contacted):
@@ -874,11 +879,12 @@ Render the manifests offline (no cluster is contacted):
 
 The tested, step-by-step procedure is
 [the Kubernetes runtime validation](docs/kubernetes_runtime_validation.md): images,
-cluster creation (restoring the context that was current before), generated secrets, apply,
-seed, checks, and teardown. On a running cluster:
+cluster creation in its own kubeconfig file (`$KCFG`, so the current context is never
+changed), generated secrets, apply, seed, a promote and a real rollback, checks, and
+teardown. On a running cluster:
 
-    kubectl --context kind-project4-local -n project4-ml get pods,svc,hpa,pdb,cronjob,networkpolicy
-    kubectl --context kind-project4-local -n project4-ml port-forward svc/project4-anomaly-api 8015:8004
+    kubectl --kubeconfig "$KCFG" --context kind-project4-local -n project4-ml get pods,svc,hpa,pdb,cronjob,networkpolicy
+    kubectl --kubeconfig "$KCFG" --context kind-project4-local -n project4-ml port-forward svc/project4-anomaly-api 8015:8004
 
 ## CI/CD validation
 
@@ -1069,6 +1075,15 @@ Implemented locally, not production-deployed:
 - local Docker runtime and a local kind cluster
 - local rollback controls
 - administrative endpoints protected by one shared token (no users or roles)
+- `registry promote` accepts a registered version in any status, including `retired`;
+  only the serving check gates it (hardening: refuse `retired` unless explicitly overridden)
+- some tests read the committed registry state (`artifacts/models/_registry/model_registry.json`,
+  `configs/active_model.yaml`), so committing new lifecycle state can break them (seen in
+  stage 15f: a frozen-clock mirror test archived v004 before its committed `promoted_at`);
+  hardening: fixture registries instead of the committed files
+- the documented admin `curl` commands pass the token as a `-H` argument, which the same
+  user can see in the process list; reading it on stdin
+  (`printf 'X-Admin-Token: %s\n' "$ADMIN_TOKEN" | curl -H @- …`) avoids that
 - no managed cloud deployment
 - no real production traffic
 - no verified anomaly labels

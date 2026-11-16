@@ -237,7 +237,7 @@ The artifact path is stored repo-relative.
 
 ---
 
-## Current model state (2026-11-15)
+## Current model state (2026-11-16)
 
 | Version | Status | Kind | Feature schema | Notes |
 |---|---|---|---|---|
@@ -245,10 +245,26 @@ The artifact path is stored repo-relative.
 | `v002` | archived | single | `feature_schema_v001` | First real-source model (51 features); production until v004. |
 | `v003` | retired | single | `feature_schema_v002` | Superseded: the single model learned the entity type rather than anomalies. |
 | `v004` | production | segmented | `feature_schema_v003` | One Isolation Forest per entity type (6 segments, 52 features); baseline anomaly rate 0.0507. |
+| `v005` | rolled_back | segmented | `feature_schema_v003` | Retrained on 2026-11-16 from a fresh read-only extract (`real_source_20261116T035043Z`, same data as v004); `training_dataset_id` `64e7a3c0-bd07-5f74-95f5-71cc9e494e1b`, MLflow run `93a91a6a69834659befd027b2496b953`. Promoted, then rolled back to v004 (the first real rollback). |
 
-No version is a compatible rollback target for v004 until v005 is trained and promoted
-(v002 is single, v004 segmented). The live state is in `ml.model_registry` and
-`ml.active_model_pointer`, and `GET /model/active` reports the served version.
+v004 is active and has no compatible rollback target: v005 is `rolled_back` (not a
+target), v001 and v003 are retired, and v002 is single while v004 is segmented. Promoting a
+version with v004's segment spec makes v004 its target again. The live state is in
+`ml.model_registry` and `ml.active_model_pointer`, and `GET /model/active` reports the
+served version.
+
+### v005 evidence (stage 15)
+
+- The fresh extract (15b) had the same `content_sha256`
+  (`ad2c8596da09eae4b77875b3d96c698de948ac1508a42a482bb9e4f44f02f6f1`, 2504 rows) as
+  v004's training data: the sources had not changed.
+- `retrain --compare-with v004` (15c, `evaluation_report.json`): the same 6 segments and 52
+  features, identical flag rates in every segment, Jaccard overlap of flagged entities
+  0.924 overall (campaign, customer, product and web_customer 1.000; user 0.905;
+  funnel_day 0.843). Same data, rows in a different order (v004's snapshot predates the
+  sorted extract), so the Isolation Forest subsampler drew different samples.
+- Known gap: `registry promote` accepts a version in any status, including `retired`
+  (v001, v003). Only the serving check gates it; see the README's known limitations.
 
 ---
 

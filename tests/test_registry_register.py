@@ -26,7 +26,9 @@ from tests.test_database import (  # noqa: F401 - pytest fixtures
     postgres_engine,
 )
 
-FROZEN_NOW = "2026-11-16T00:00:00+00:00"
+# Later than every timestamp in the committed registry: archiving a version "now" must
+# not predate its promotion (model_registry_archive_time_chk).
+FROZEN_NOW = "2100-01-01T00:00:00+00:00"
 
 
 def _mirror_paths(isolate_repo_state: Path) -> dict[str, Path]:
