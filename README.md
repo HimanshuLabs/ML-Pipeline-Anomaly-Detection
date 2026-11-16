@@ -927,10 +927,31 @@ Each bullet is a step name in `.github/workflows/ci.yml`: the job `Validate ML p
 runs everything up to "Check image contents", the job `Validate Kubernetes manifests` the
 last three. Each job first checks out the repository; the first also sets up Python 3.12.
 
-CI evidence: the latest *ML Platform Validation* run in the repository's Actions tab. Its
-job summary lists the totals from the JUnit report, and the `pytest-results` artifact
-holds the report itself. Postgres-marked tests are required in CI, so the summary shows
-0 skipped.
+First CI run:
+[run 43817679214](https://github.com/HimanshuLabs/ML-Pipeline-Anomaly-Detection/actions/runs/43817679214),
+event `pull_request`, started 2026-11-16T06:34:33Z, on commit `2ce4918` (the branch head
+before this README record was added, so it validated everything except this paragraph).
+
+- `Validate ML platform`: success in 4m33s, every step successful, including
+  "Run Ruff quality gate" (no output in its log) and "Run full pytest suite with
+  JUnit report". The run's JUnit report for commit `2ce4918` recorded 621 tests,
+  0 failures, 0 errors, 0 skipped (82.7 s). The per-segment
+  baseline audit printed `OK` for all four checks of each of the six segments
+  (`campaign`, `customer`, `funnel_day`, `product`, `user`, `web_customer`: feature
+  baselines equal feature names, feature names within the model, anomaly rate in [0, 1],
+  row count matches the baseline), then `OK: baseline metrics audit passed`. The image
+  builds printed
+  `OK: active model bundle is present and loads: artifacts/models/isolation_forest/model_version=v004`.
+  "Check image contents" printed
+  `OK: runtime image has no tools, tests or sql and imports api.main`, then listed nine
+  `/app/sql/*.sql` files.
+- `Validate Kubernetes manifests`: success in 10s. kubeconform v0.8.0 in strict mode
+  against Kubernetes 1.36.1: kustomize output 14/14 valid; seed job and secret example
+  4/4 valid.
+
+Each run's job summary lists the pytest totals from the JUnit report, and the
+`pytest-results` artifact holds the report itself. Postgres-marked tests are required in
+CI, so the summary shows 0 skipped.
 
 ## Local runbook
 
