@@ -324,3 +324,139 @@ def test_retrain_refuses_an_already_registered_version(tmp_path: Path) -> None:
         )
 
     assert not (tmp_path / "artifacts").exists()
+
+
+# --- stage 15a: optional comparison with a previous version ---------------------------------
+
+
+def test_retrain_compares_with_a_previous_version_on_the_new_snapshot(tmp_path: Path) -> None:
+    from anomaly_detection.retrain import retrain
+
+    snapshot = _write_real_snapshot(tmp_path / "snapshots")
+    snapshot_metadata = json.loads(snapshot.metadata_path.read_text(encoding="utf-8"))
+    registry_path = registry.DEFAULT_REGISTRY_PATH
+    previous = registry.read_active_model_pointer().active_model_version
+    new_version = _unregistered_version(registry_path)
+
+    result = retrain(
+        snapshot=str(snapshot.snapshot_path),
+        model_version=new_version,
+        artifact_root=tmp_path / "artifacts",
+        compare_with=previous,
+    )
+
+    comparison = result.evaluation_report["comparison"]
+    on_disk = json.loads(result.evaluation_report_path.read_text(encoding="utf-8"))
+    assert on_disk["comparison"] == comparison
+    assert comparison["previous_model_version"] == previous
+    assert comparison["new_model_version"] == new_version
+    assert comparison["segment_spec_equal"] is True
+    assert comparison["scored_snapshot_id"] == snapshot.snapshot_id
+    assert comparison["new_snapshot_content_sha256"] == snapshot_metadata["content_sha256"]
+    previous_metadata = json.loads(
+        registry.read_bundle_paths(
+            registry.find_model_entry(
+                model_name="isolation_forest", model_version=previous
+            ).metadata_path
+        )["metadata_path"].read_text(encoding="utf-8")
+    )
+    assert comparison["previous_snapshot_id"] == (
+        previous_metadata["training_snapshot_metadata"]["snapshot_id"]
+    )
+    # The previous snapshot's directory is not under the (test) training root.
+    assert comparison["previous_snapshot_content_sha256"] is None
+
+    total_rows = 0
+    for group in ("overall", *ENTITY_TYPES):
+        stats = comparison["overall"] if group == "overall" else comparison["entity_types"][group]
+        assert 0.0 <= stats["previous_flag_rate"] <= 1.0
+        assert 0.0 <= stats["new_flag_rate"] <= 1.0
+        assert stats["flagged_both"] <= min(stats["flagged_previous"], stats["flagged_new"])
+        union = stats["flagged_previous"] + stats["flagged_new"] - stats["flagged_both"]
+        expected = None if union == 0 else stats["flagged_both"] / union
+        assert stats["jaccard"] == (None if expected is None else pytest.approx(expected))
+        if group != "overall":
+            total_rows += stats["row_count"]
+            assert stats["new_flag_rate"] == pytest.approx(
+                result.evaluation_report["entity_types"][group]["anomaly_rate"]
+            )
+    assert total_rows == comparison["overall"]["row_count"] == len(ENTITY_TYPES) * 40
+
+
+def test_retrain_comparison_recomputes_the_previous_snapshot_hash_from_its_directory(
+    tmp_path: Path,
+) -> None:
+    from anomaly_detection.retrain import retrain
+    from anomaly_detection.source_extract import content_sha256
+
+    training_root = tmp_path / "snapshots"
+    first = _write_real_snapshot(training_root / "first")
+    registry_path = registry.DEFAULT_REGISTRY_PATH
+    first_version = _unregistered_version(registry_path)
+    first_result = retrain(
+        snapshot=str(first.snapshot_path),
+        model_version=first_version,
+        artifact_root=tmp_path / "artifacts",
+    )
+    # Like v004: the bundle does not carry the hash, so it must come from the
+    # previous snapshot's directory under the training root.
+    bundle_metadata_path = registry.read_bundle_paths(first_result.artifact.metadata_path)[
+        "metadata_path"
+    ]
+    bundle_metadata = json.loads(bundle_metadata_path.read_text(encoding="utf-8"))
+    del bundle_metadata["training_snapshot_metadata"]["content_sha256"]
+    bundle_metadata_path.write_text(json.dumps(bundle_metadata), encoding="utf-8")
+    changed = _real_source_frame()
+    changed.loc[0, "total_events"] = 0.5
+    second = _write_real_snapshot(training_root / "second", frame=changed)
+
+    result = retrain(
+        snapshot=str(second.snapshot_path),
+        model_version=_unregistered_version(registry_path),
+        artifact_root=tmp_path / "artifacts",
+        training_root=training_root,
+        compare_with=first_version,
+    )
+
+    comparison = result.evaluation_report["comparison"]
+    assert comparison["previous_snapshot_content_sha256"] == content_sha256(_real_source_frame())
+    assert comparison["new_snapshot_content_sha256"] == content_sha256(changed)
+    assert comparison["previous_snapshot_content_sha256"] != (
+        comparison["new_snapshot_content_sha256"]
+    )
+
+
+def test_retrain_refuses_to_compare_with_a_different_segment_spec_before_training(
+    tmp_path: Path,
+) -> None:
+    from anomaly_detection.retrain import RetrainError, retrain
+
+    snapshot = _write_real_snapshot(tmp_path / "snapshots")
+    registry_before = registry.DEFAULT_REGISTRY_PATH.read_bytes()
+
+    with pytest.raises(RetrainError, match="segment spec"):
+        retrain(
+            snapshot=str(snapshot.snapshot_path),
+            model_version=_unregistered_version(registry.DEFAULT_REGISTRY_PATH),
+            artifact_root=tmp_path / "artifacts",
+            compare_with="v002",  # a single model: never rollback-compatible
+        )
+
+    assert not (tmp_path / "artifacts").exists()
+    assert registry.DEFAULT_REGISTRY_PATH.read_bytes() == registry_before
+
+
+def test_retrain_refuses_to_compare_with_an_unregistered_version(tmp_path: Path) -> None:
+    from anomaly_detection.retrain import RetrainError, retrain
+
+    snapshot = _write_real_snapshot(tmp_path / "snapshots")
+
+    with pytest.raises(RetrainError, match="v999 is not registered"):
+        retrain(
+            snapshot=str(snapshot.snapshot_path),
+            model_version=_unregistered_version(registry.DEFAULT_REGISTRY_PATH),
+            artifact_root=tmp_path / "artifacts",
+            compare_with="v999",
+        )
+
+    assert not (tmp_path / "artifacts").exists()

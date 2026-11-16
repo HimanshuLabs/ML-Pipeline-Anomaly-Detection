@@ -142,10 +142,31 @@ it leaves `rolled_back`.
 
 ```bash
 # tools() runs the tools image (see "Local runbook"); retrain never promotes
-tools python -m anomaly_detection.retrain --snapshot latest --model-version v005
+tools python -m anomaly_detection.retrain --snapshot latest --model-version v005 --compare-with v004
 tools python -m anomaly_detection.registry promote --model-version v005 --notes "why"
 tools python -m anomaly_detection.registry retire --model-version v003 --notes "why"
+tools python -m anomaly_detection.registry register --metadata-path artifacts/models/isolation_forest/model_version=v005/metadata.json
+tools python -m anomaly_detection.registry mirror
 ```
+
+- `retrain --compare-with <version>` scores the new snapshot with that version and the new
+  one and adds a `comparison` section to `evaluation_report.json`: per entity type the
+  flag rate of each, the Jaccard overlap of the flagged entities, and the `content_sha256`
+  of both training snapshots (the previous one is `null` when its bundle does not record
+  it and its snapshot directory is not under the training root). It is evidence, not a
+  gate; the only hard check is that the version has the same segment spec (what makes
+  the two rollback targets of each other), refused before anything is trained.
+- `register --metadata-path` adds an already trained bundle as `candidate` after the
+  same serving check as `promote`: its snapshot row, its `ml.training_datasets` row (when
+  the bundle records a `training_dataset_id`) and its registry row, in that order, in one
+  transaction. It works as `project4_app`, never promotes, changes nothing when the same
+  bundle is registered again, and refuses a different bundle under a registered version.
+  It is how a database that already has a pointer (a seeded cluster) learns a new version.
+- `mirror` rewrites `artifacts/models/_registry/model_registry.json` and
+  `configs/active_model.yaml` from the database (it only reads the database), exactly as a
+  promote or rollback that left the database in that state writes them. Run it after a
+  change made where the repository is not mounted, such as an `/admin/rollback` handled by
+  the compose API (its mirror is written inside its own container).
 
 Registration (`register_model_from_artifacts`, used by training and retraining) takes a
 relative `metadata.json` path as relative to the repository root, never to the current
@@ -352,6 +373,42 @@ data/features/training/
 ```
 
 The model registry links each trained model back to the snapshot used to train it.
+
+Each real-source snapshot written since stage 15a also records:
+
+- `content_sha256`: sha256 of the data. Rows are sorted by every column in a fixed order
+  (entity type and id first) before both the hash and `features.parquet`, so the same
+  source data gives the same hash and the same file whatever order the sources return.
+  `extracted_at` (when the run happened) is kept in the file but not hashed.
+- `training_dataset_id`: `uuid5(NAMESPACE_URL, "project4.training_dataset|<snapshot_id>|<content_sha256>|<feature_set_fingerprint>")`,
+  only for a snapshot that passed validation. Registering a model trained on it inserts
+  one `ml.training_datasets` row (`ON CONFLICT DO NOTHING`, so re-running adds nothing),
+  and the id appears in `integration.model_metadata`, `/model/active` and predictions.
+  v002–v004 were trained before this and keep `training_dataset_id` null; their rows
+  are never rewritten.
+
+Extraction reads Project 1 (127.0.0.1:5433) and Project 2/3 (127.0.0.1:5434) read-only.
+Every source session is opened with
+`-c default_transaction_read_only=on -c statement_timeout=120000` (Project 4's own
+database engine is not), and before each table is read the extract checks
+`SHOW transaction_read_only` is `on` and refuses otherwise. It issues only `SELECT *` per
+configured table (plus `warehouse.dim_customer` for web events). It runs as a
+`--network host` container against the sources' loopback ports, so they never need to
+listen beyond 127.0.0.1. The two passwords are read singly from `.env` and passed by
+name; never `--env-file .env`, which would hand the extract every Project 4 secret too:
+
+```bash
+PROJECT1_POSTGRES_PASSWORD="$(grep '^PROJECT1_POSTGRES_PASSWORD=' .env | cut -d= -f2-)" \
+PROJECT23_POSTGRES_PASSWORD="$(grep '^PROJECT23_POSTGRES_PASSWORD=' .env | cut -d= -f2-)" \
+docker run --rm --network host --user "$(id -u):$(id -g)" -e HOME=/tmp \
+  -e PROJECT1_POSTGRES_PASSWORD -e PROJECT23_POSTGRES_PASSWORD \
+  -v "$PWD":/app -w /app --entrypoint "" project4-anomaly-tools:local \
+  python -m anomaly_detection.source_extract --config configs/source_extract.yaml
+```
+
+The assignments in front of `docker run` set the variables for that one command only;
+`-e NAME` without a value passes each one on from it, so neither password appears on a
+command line or on screen.
 
 ## Batch inference
 

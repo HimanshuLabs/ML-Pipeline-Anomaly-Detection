@@ -271,3 +271,48 @@ def test_rollback_module_docstring_describes_the_database_path() -> None:
 
     assert "Database support is planned" not in docstring
     assert "audit.rollback_events row are committed in one" in docstring
+
+
+# --- stage 15a: register, mirror, read-only extraction ---------------------------------------
+
+SOURCE_INTEGRATION = DOCS / "source_integration.md"
+HOME_OR_SCRATCH_PATH = re.compile(r"/home/[A-Za-z0-9_]|~/Desktop|scratchpad|/tmp/claude")
+
+
+def _extract_commands(text: str) -> list[str]:
+    return [c for c in _commands(text) if "python -m anomaly_detection.source_extract" in c]
+
+
+def test_readme_documents_register_and_mirror() -> None:
+    lifecycle = _section("Model lifecycle")
+
+    assert "python -m anomaly_detection.registry register --metadata-path" in lifecycle
+    assert "python -m anomaly_detection.registry mirror" in lifecycle
+    assert "--compare-with" in lifecycle
+
+
+def test_every_documented_extract_runs_on_the_host_network_with_passwords_by_name() -> None:
+    commands = _extract_commands(_text()) + _extract_commands(
+        SOURCE_INTEGRATION.read_text(encoding="utf-8")
+    )
+
+    assert len(commands) >= 2  # README and docs/source_integration.md
+    for command in commands:
+        assert "docker run" in command and "--network host" in command, command
+        assert "--env-file" not in command, command
+        for name in ("PROJECT1_POSTGRES_PASSWORD", "PROJECT23_POSTGRES_PASSWORD"):
+            assert f"-e {name} " in command, (name, command)
+            assert f"-e {name}=" not in command, (name, command)
+
+
+def test_readme_and_source_docs_state_the_extract_is_read_only() -> None:
+    for text in (_section("Training snapshots"), SOURCE_INTEGRATION.read_text(encoding="utf-8")):
+        assert "default_transaction_read_only=on" in text
+        assert "statement_timeout" in text
+        assert "SHOW transaction_read_only" in text
+
+
+def test_readme_and_docs_have_no_home_or_scratch_paths() -> None:
+    for path in (README, *sorted(DOCS.glob("*.md"))):
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+            assert not HOME_OR_SCRATCH_PATH.search(line), f"{path.name}:{number}: {line}"

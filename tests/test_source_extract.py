@@ -553,3 +553,277 @@ def test_snapshot_metadata_records_extraction_statistics_and_fingerprint(tmp_pat
     assert tables["marts.mart_customer_360"]["rows_read"] == 2
     assert tables["marts.mart_customer_360"]["rows_after_filter"] == 1
     assert tables["public.user_features"]["null_fills"] == {"avg_event_price": 1}
+
+
+# --- stage 15a: deterministic content hash and training_dataset_id -----------------------
+
+
+def _unified_frame_for_hashing() -> pd.DataFrame:
+    from conftest import real_source_test_frame
+
+    return real_source_test_frame(entity_types=("user", "campaign", "product"), rows_per_type=5)
+
+
+def test_training_dataset_id_is_a_uuid5_of_snapshot_hash_and_fingerprint() -> None:
+    import uuid
+
+    from anomaly_detection.source_extract import training_dataset_id_for
+
+    first = training_dataset_id_for("real_source_x", "a" * 64, "f" * 64)
+
+    assert first == training_dataset_id_for("real_source_x", "a" * 64, "f" * 64)
+    key = f"project4.training_dataset|real_source_x|{'a' * 64}|{'f' * 64}"
+    assert first == str(uuid.uuid5(uuid.NAMESPACE_URL, key))
+    assert first != training_dataset_id_for("real_source_y", "a" * 64, "f" * 64)
+    assert first != training_dataset_id_for("real_source_x", "b" * 64, "f" * 64)
+    assert first != training_dataset_id_for("real_source_x", "a" * 64, "e" * 64)
+
+
+def test_same_data_in_another_row_order_gives_the_same_hash_and_parquet(tmp_path) -> None:
+    from anomaly_detection.source_extract import content_sha256
+
+    frame = _unified_frame_for_hashing()
+    shuffled = frame.sample(frac=1.0, random_state=3).reset_index(drop=True)
+    assert not shuffled.equals(frame)
+
+    first = write_snapshot(frame, _snapshot_config(tmp_path / "a"), output_root=tmp_path / "a")
+    second = write_snapshot(
+        shuffled, _snapshot_config(tmp_path / "b"), output_root=tmp_path / "b"
+    )
+
+    first_meta = json.loads(first.metadata_path.read_text(encoding="utf-8"))
+    second_meta = json.loads(second.metadata_path.read_text(encoding="utf-8"))
+    assert first_meta["content_sha256"] == second_meta["content_sha256"] == content_sha256(frame)
+    assert len(first_meta["content_sha256"]) == 64
+    assert first.features_path.read_bytes() == second.features_path.read_bytes()
+    # Written sorted by entity_type, then entity_id.
+    written = pd.read_parquet(first.features_path)
+    keys = list(zip(written["entity_type"], written["entity_id"], strict=True))
+    assert keys == sorted(keys)
+
+
+def test_content_hash_ignores_the_run_timestamp_but_not_the_data() -> None:
+    from anomaly_detection.source_extract import content_sha256
+
+    frame = _unified_frame_for_hashing()
+    later_run = frame.assign(extracted_at="2027-01-01T00:00:00+00:00")
+    changed = frame.copy()
+    changed.loc[0, "total_events"] = changed.loc[0, "total_events"] + 1.0
+
+    assert content_sha256(later_run) == content_sha256(frame)
+    assert content_sha256(changed) != content_sha256(frame)
+
+
+def test_snapshot_metadata_records_content_hash_and_training_dataset_id(tmp_path) -> None:
+    from anomaly_detection.source_extract import content_sha256, training_dataset_id_for
+    from anomaly_detection.training import feature_set_fingerprint
+
+    frame = _unified_frame_for_hashing()
+    result = write_snapshot(frame, _snapshot_config(tmp_path), output_root=tmp_path)
+
+    metadata = json.loads(result.metadata_path.read_text(encoding="utf-8"))
+    assert metadata["content_sha256"] == content_sha256(frame)
+    assert metadata["training_dataset_id"] == training_dataset_id_for(
+        metadata["snapshot_id"],
+        metadata["content_sha256"],
+        feature_set_fingerprint(MODEL_FEATURE_COLUMNS),
+    )
+    assert result.training_dataset_id == metadata["training_dataset_id"]
+
+
+def test_failed_snapshot_has_no_training_dataset_id(tmp_path) -> None:
+    frame = _clean_unified_frame()
+    frame.loc[0, "order_count"] = -3.0
+
+    result = write_snapshot(frame, _snapshot_config(tmp_path), output_root=tmp_path)
+
+    metadata = json.loads(result.metadata_path.read_text(encoding="utf-8"))
+    assert metadata["data_quality_status"] == "failed"
+    assert len(metadata["content_sha256"]) == 64
+    assert metadata["training_dataset_id"] is None
+
+
+def test_source_tables_include_the_customer_dimension_read_for_web_events(tmp_path) -> None:
+    result = write_snapshot(
+        _unified_frame_for_hashing(), _snapshot_config(tmp_path), output_root=tmp_path
+    )
+
+    tables = json.loads(result.metadata_path.read_text(encoding="utf-8"))["source_tables"]
+    assert tables.index("warehouse.dim_customer") == tables.index("warehouse.fact_web_events") + 1
+
+
+# --- stage 15a: read-only source sessions --------------------------------------------------
+
+SOURCE_SESSION_OPTIONS = "-c default_transaction_read_only=on -c statement_timeout=120000"
+
+
+def _source_config(**overrides) -> dict:
+    config = {
+        "host": "127.0.0.1",
+        "port": 5999,
+        "database": "source_db",
+        "username": "reader",
+        "password_env_var": "PROJECT4_TEST_SOURCE_PASSWORD",
+    }
+    config.update(overrides)
+    return config
+
+
+def test_source_engine_is_read_only_with_a_statement_timeout(monkeypatch) -> None:
+    from anomaly_detection import source_extract
+
+    captured: dict = {}
+    real_create_engine = source_extract.create_engine
+
+    def _capture(url, **kwargs):
+        captured.update(kwargs)
+        return real_create_engine(url, **kwargs)
+
+    monkeypatch.setattr(source_extract, "create_engine", _capture)
+    monkeypatch.setenv("PROJECT4_TEST_SOURCE_PASSWORD", "not-a-real-password")
+
+    engine = source_extract.build_postgres_engine(_source_config())
+
+    assert captured["connect_args"] == {"options": SOURCE_SESSION_OPTIONS}
+    assert engine.get_execution_options()["postgresql_readonly"] is True
+    assert "not-a-real-password" not in repr(engine.url)
+
+
+def test_project4_engine_is_not_made_read_only(monkeypatch) -> None:
+    from anomaly_detection import database
+
+    captured: dict = {}
+    real_create_engine = database.create_engine
+
+    def _capture(url, **kwargs):
+        captured.update(kwargs)
+        return real_create_engine(url, **kwargs)
+
+    monkeypatch.setattr(database, "create_engine", _capture)
+    settings = database.DatabaseSettings(
+        host="127.0.0.1", port=5999, database="project4_ml", user="u", password="p"
+    )
+
+    engine = database.get_engine(settings)
+
+    assert "connect_args" not in captured
+    assert "postgresql_readonly" not in engine.get_execution_options()
+
+
+class _ProbeConnection:
+    def __init__(self, read_only: str) -> None:
+        self.read_only = read_only
+        self.statements: list[str] = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc) -> None:
+        return None
+
+    def execute(self, statement):
+        self.statements.append(str(statement))
+
+        class _Result:
+            def __init__(self, value) -> None:
+                self.value = value
+
+            def scalar_one(self):
+                return self.value
+
+        return _Result(self.read_only)
+
+
+class _ProbeEngine:
+    def __init__(self, read_only: str) -> None:
+        self.connection = _ProbeConnection(read_only)
+
+    def connect(self):
+        return self.connection
+
+
+@pytest.mark.parametrize("value", ["off", "", "OFF"])
+def test_read_only_probe_refuses_before_reading_when_the_session_is_writable(
+    monkeypatch, value: str
+) -> None:
+    from anomaly_detection import source_extract
+
+    def _must_not_read(*args, **kwargs):
+        raise AssertionError("the table was read on a writable session")
+
+    monkeypatch.setattr(source_extract.pd, "read_sql_query", _must_not_read)
+    engine = _ProbeEngine(value)
+
+    with pytest.raises(SourceExtractionError, match="not read-only"):
+        source_extract.read_table(engine, "public", "user_features")
+
+    assert engine.connection.statements == ["SHOW transaction_read_only"]
+
+
+def test_read_only_probe_lets_a_read_only_session_read(monkeypatch) -> None:
+    from anomaly_detection import source_extract
+
+    calls: list = []
+    monkeypatch.setattr(
+        source_extract.pd,
+        "read_sql_query",
+        lambda query, connection: calls.append(str(query)) or pd.DataFrame({"a": [1]}),
+    )
+    engine = _ProbeEngine("on")
+
+    frame = source_extract.read_table(engine, "public", "user_features")
+
+    assert len(frame) == 1
+    assert engine.connection.statements == ["SHOW transaction_read_only"]
+    assert calls == ['SELECT * FROM "public"."user_features"']
+
+
+@pytest.mark.postgres
+def test_source_engine_session_is_read_only_on_a_real_database(monkeypatch) -> None:
+    import os
+
+    from sqlalchemy import text
+    from sqlalchemy.engine import make_url
+    from sqlalchemy.exc import DBAPIError
+
+    from anomaly_detection import source_extract
+
+    url_text = os.environ.get("PROJECT4_TEST_DATABASE_URL")
+    if not url_text:
+        if os.environ.get("PROJECT4_REQUIRE_TEST_DATABASE") == "1":
+            pytest.fail("PROJECT4_REQUIRE_TEST_DATABASE=1 but PROJECT4_TEST_DATABASE_URL is unset")
+        pytest.skip("PROJECT4_TEST_DATABASE_URL is not set")
+    url = make_url(url_text)
+    monkeypatch.setenv("PROJECT4_TEST_SOURCE_PASSWORD", url.password or "")
+    engine = source_extract.build_postgres_engine(
+        _source_config(
+            host=url.host, port=url.port, database=url.database, username=url.username
+        )
+    )
+    try:
+        with engine.connect() as connection:
+            assert connection.execute(text("SHOW transaction_read_only")).scalar_one() == "on"
+            assert connection.execute(text("SHOW statement_timeout")).scalar_one() == "2min"
+            with pytest.raises(DBAPIError, match="read-only transaction"):
+                connection.execute(text("CREATE TEMPORARY TABLE p4_must_fail (a int)"))
+
+        frame = source_extract.read_table(engine, "pg_catalog", "pg_namespace")
+        assert not frame.empty
+    finally:
+        engine.dispose()
+
+
+def test_a_sort_or_hash_failure_leaves_no_snapshot_directory(tmp_path, monkeypatch) -> None:
+    from anomaly_detection import source_extract
+
+    def _fails(frame):
+        raise TypeError("cannot order these rows")
+
+    monkeypatch.setattr(source_extract, "sort_feature_frame", _fails)
+
+    with pytest.raises(TypeError, match="cannot order"):
+        write_snapshot(
+            _unified_frame_for_hashing(), _snapshot_config(tmp_path), output_root=tmp_path
+        )
+
+    assert list(tmp_path.iterdir()) == []

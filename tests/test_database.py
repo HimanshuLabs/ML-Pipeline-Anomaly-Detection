@@ -2019,3 +2019,46 @@ def test_sync_from_files_if_empty_never_overwrites_a_populated_database(
     # That is why the seed job always passes --if-empty.
     database.sync_from_files(database_mode)
     assert _database_pointer(database_mode)["model_version"] == seeded["model_version"]
+
+
+# --- stage 15a: real-source training dataset rows ------------------------------------------
+
+V004_METADATA = (
+    REPO_ROOT / "artifacts" / "models" / "isolation_forest" / "model_version=v004" / "metadata.json"
+)
+
+
+def test_v004_style_metadata_gives_only_the_snapshot_row() -> None:
+    snapshot_metadata = json.loads(V004_METADATA.read_text(encoding="utf-8"))[
+        "training_snapshot_metadata"
+    ]
+    assert "training_dataset_id" not in snapshot_metadata
+
+    rows = database.snapshot_rows_for_training_metadata(snapshot_metadata)
+
+    assert [table for table, _row in rows] == ["ml.feature_snapshots"]
+    assert rows[0][1] == database.real_source_snapshot_row(snapshot_metadata)
+
+
+def test_real_source_metadata_with_a_dataset_id_gives_snapshot_then_dataset_row() -> None:
+    snapshot_metadata = {
+        **json.loads(V004_METADATA.read_text(encoding="utf-8"))["training_snapshot_metadata"],
+        "snapshot_id": "real_source_20261201T000000Z",
+        "content_sha256": "c" * 64,
+        "training_dataset_id": "6f1f7c52-5c1e-5b8e-9c43-0a4c7e7c6b11",
+    }
+
+    rows = database.snapshot_rows_for_training_metadata(snapshot_metadata)
+
+    assert [table for table, _row in rows] == ["ml.feature_snapshots", "ml.training_datasets"]
+    dataset = rows[1][1]
+    assert set(dataset) == _columns("ml.training_datasets")
+    assert dataset["training_dataset_id"] == snapshot_metadata["training_dataset_id"]
+    assert dataset["snapshot_id"] == dataset["dataset_name"] == "real_source_20261201T000000Z"
+    assert dataset["dataset_version"] == "c" * 12
+    assert dataset["feature_schema_version"] == snapshot_metadata["feature_schema_version"]
+    assert dataset["train_row_count"] == snapshot_metadata["row_count"]
+    assert json.loads(dataset["feature_columns"]) == snapshot_metadata["feature_columns"]
+    assert dataset["dataset_path"] is None  # bundle metadata only, never the snapshot dir
+    assert dataset["created_by"] == database.REAL_SOURCE_SNAPSHOT_WRITER
+    assert "c" * 64 in dataset["notes"]
