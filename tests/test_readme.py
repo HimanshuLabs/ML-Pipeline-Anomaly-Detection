@@ -239,7 +239,10 @@ DOCS_STALE_PHRASES = {
         "The registry is generated runtime metadata and is intentionally ignored by Git.",
         "| Database metadata write | Planned |",
         "The future online inference service will read this pointer",
+        # Removed by hardening H1 (promote refuses `retired` without --allow-retired).
+        "Known gap: `registry promote` accepts a version in any status",
     ),
+    "kubernetes_runtime_validation.md": ("registered version whatever its status",),
     "drift_monitoring.md": (
         "Loads the active v002 baseline statistics",
         "It does not persist directly to PostgreSQL yet.",
@@ -338,14 +341,27 @@ def test_readme_and_lifecycle_list_v005_as_rolled_back_with_its_lineage() -> Non
         assert v005["mlflow_run_id"] in row
 
 
-def test_known_limitations_list_that_promote_accepts_retired_versions() -> None:
+# Known limitations removed once the hardening round fixed them (H1, H4, H3).
+README_STALE_PHRASES_HARDENING = (
+    "`registry promote` accepts a registered version in any status",
+    "some tests read the committed registry state",
+    "pass the token as a `-H` argument",
+)
+# Known limitations that belong to later rounds and stay listed.
+KNOWN_LIMITATIONS_KEPT = (
+    "administrative endpoints protected by one shared token (no users or roles)",
+    "local Docker runtime and a local kind cluster",
+    "no verified anomaly labels",
+)
+
+
+def test_known_limitations_drop_the_entries_the_hardening_round_fixed() -> None:
     limitations = _section("Known limitations")
 
-    assert "`registry promote` accepts a registered version in any status" in limitations
-    assert "`retired`" in limitations
-    assert "some tests read the committed registry state" in limitations
-    assert "fixture registries" in limitations
-    assert "curl -H @-" in limitations and "process list" in limitations
+    for phrase in README_STALE_PHRASES_HARDENING:
+        assert phrase not in _text(), phrase
+    for entry in KNOWN_LIMITATIONS_KEPT:
+        assert entry in limitations, entry
 
 
 def test_docs_have_none_of_the_replaced_stale_phrases() -> None:
