@@ -22,13 +22,13 @@ jobs:
       postgres:
         image: postgres:16.14
         env:
-          POSTGRES_USER: manshu
+          POSTGRES_USER: p4test
           POSTGRES_PASSWORD: project4_ci_only
           POSTGRES_DB: project4_ml
         ports:
           - 5547:5432
         options: >-
-          --health-cmd "pg_isready -U manshu -d project4_ml"
+          --health-cmd "pg_isready -U p4test -d project4_ml"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 30
@@ -110,7 +110,7 @@ jobs:
           PROJECT4_POSTGRES_HOST: 127.0.0.1
           PROJECT4_POSTGRES_PORT: "5547"
           PROJECT4_POSTGRES_DB: project4_ml
-          PROJECT4_POSTGRES_USER: manshu
+          PROJECT4_POSTGRES_USER: p4test
           PROJECT4_POSTGRES_PASSWORD: project4_ci_only
         run: |
           PYTHONPATH=src python -m anomaly_detection.database apply-schema
@@ -119,7 +119,7 @@ jobs:
 
       - name: Run PostgreSQL integration tests
         env:
-          PROJECT4_TEST_DATABASE_URL: postgresql+psycopg2://manshu:project4_ci_only@127.0.0.1:5547/project4_ml
+          PROJECT4_TEST_DATABASE_URL: postgresql+psycopg2://p4test:project4_ci_only@127.0.0.1:5547/project4_ml
           PROJECT4_REQUIRE_TEST_DATABASE: "1"
         run: |
           PYTHONPATH=src pytest -m postgres tests/test_database.py -q
@@ -241,7 +241,7 @@ jobs:
       # missing URL fails the suite instead of skipping those tests.
       - name: Run full pytest suite with JUnit report
         env:
-          PROJECT4_TEST_DATABASE_URL: postgresql+psycopg2://manshu:project4_ci_only@127.0.0.1:5547/project4_ml
+          PROJECT4_TEST_DATABASE_URL: postgresql+psycopg2://p4test:project4_ci_only@127.0.0.1:5547/project4_ml
           PROJECT4_REQUIRE_TEST_DATABASE: "1"
         run: |
           mkdir -p reports

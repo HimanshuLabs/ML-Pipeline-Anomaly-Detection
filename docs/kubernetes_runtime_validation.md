@@ -232,13 +232,29 @@ the cluster, so the owner switches to it):
 ```bash
 kubectl --kubeconfig "$KCFG" --context kind-project4-local -n project4-ml exec statefulset/project4-postgres -- psql -U "$OWNER" -d project4_ml \
   -c "SET ROLE project5_reader" \
-  -c "SELECT source_entity, count(*) AS n, count(*) FILTER (WHERE source_system <> 'postgresql' OR schema_version <> 'project4.integration.v1') AS bad FROM (SELECT source_entity, source_system, schema_version FROM integration.model_metadata UNION ALL SELECT source_entity, source_system, schema_version FROM integration.prediction_outputs UNION ALL SELECT source_entity, source_system, schema_version FROM integration.drift_validation_rollback) v GROUP BY 1 ORDER BY 1" \
-  -c "SELECT table_name, count(*) AS columns, md5(string_agg(column_name || ':' || data_type, ',' ORDER BY ordinal_position)) AS signature FROM information_schema.columns WHERE table_schema = 'integration' GROUP BY 1 ORDER BY 1"
+  -c "SELECT source_entity, count(*) AS n, count(*) FILTER (WHERE source_system <> 'postgresql' OR schema_version <> 'project4.integration.v1') AS bad FROM (SELECT source_entity, source_system, schema_version FROM integration.model_metadata UNION ALL SELECT source_entity, source_system, schema_version FROM integration.prediction_outputs UNION ALL SELECT source_entity, source_system, schema_version FROM integration.drift_validation_rollback) v GROUP BY 1 ORDER BY 1"
 ```
 
-Expected: `bad` is 0 for every view; 22, 26 and 23 columns for `drift_validation_rollback`,
-`model_metadata` and `prediction_outputs`, with the same signatures as the compose
-database.
+Expected: `bad` is 0 for every view.
+
+Then the column signatures, once in the cluster and once in compose, both as
+`project5_reader` and with the same query and output format. In compose
+`project5_reader` logs in itself (read-only; its password is read singly from `.env`):
+
+```bash
+SIGNATURE_QUERY="SELECT table_name, count(*) AS columns, md5(string_agg(column_name || ':' || data_type, ',' ORDER BY ordinal_position)) AS signature FROM information_schema.columns WHERE table_schema = 'integration' GROUP BY 1 ORDER BY 1"
+kubectl --kubeconfig "$KCFG" --context kind-project4-local -n project4-ml exec statefulset/project4-postgres -- psql -U "$OWNER" -d project4_ml -At -F ' | ' \
+  -c "SET ROLE project5_reader" -c "$SIGNATURE_QUERY" > "$STATE/signatures.cluster"
+PGPASSWORD="$(grep '^PROJECT4_P5_READER_PASSWORD=' .env | cut -d= -f2-)" \
+  docker compose exec -T -e PGPASSWORD anomaly-postgres psql -h 127.0.0.1 -U project5_reader -d project4_ml -At -F ' | ' \
+  -c "$SIGNATURE_QUERY" > "$STATE/signatures.compose"
+grep -v '^SET$' "$STATE/signatures.cluster" | diff - "$STATE/signatures.compose" && echo "integration column signatures identical"
+```
+
+Expected: three lines each (22, 26 and 23 columns for `drift_validation_rollback`,
+`model_metadata` and `prediction_outputs`) and `integration column signatures identical`.
+The cluster output starts with psql's `SET` line from `SET ROLE`; the `grep -v` drops it
+before the diff.
 
 ## 8. Network policy deny test
 
