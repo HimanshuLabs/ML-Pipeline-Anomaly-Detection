@@ -30,8 +30,11 @@ from anomaly_detection.training_snapshot import (
     create_training_snapshot,
     metadata_to_database_records,
 )
+from tests.conftest import FIXTURE_REGISTRY_PATH
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+# The committed registry: read on purpose by the tests that check every committed entry maps
+# to database rows, and used to locate the registry inside the per-test mirror.
 REAL_REGISTRY_PATH = REPO_ROOT / "artifacts" / "models" / "_registry" / "model_registry.json"
 COLUMN_TYPES = "UUID|TEXT|BIGINT|INTEGER|NUMERIC|BOOLEAN|JSONB|DATE|TIMESTAMPTZ"
 SECRET_PASSWORD = "do-not-print-this-password-7f3a"
@@ -1081,7 +1084,7 @@ def test_writes_refuse_an_uninitialized_database_without_touching_anything(
     from anomaly_detection import registry, rollback
     from anomaly_detection.registry import RegistryState, RegistryStorageError
 
-    entries = [] if entries_kind == "none" else load_model_registry(REAL_REGISTRY_PATH)
+    entries = [] if entries_kind == "none" else load_model_registry(FIXTURE_REGISTRY_PATH)
     fake_state = RegistryState(
         entries=entries,
         model_name="isolation_forest",
