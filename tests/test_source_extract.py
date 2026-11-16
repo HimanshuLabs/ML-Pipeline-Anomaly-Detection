@@ -827,3 +827,59 @@ def test_a_sort_or_hash_failure_leaves_no_snapshot_directory(tmp_path, monkeypat
         )
 
     assert list(tmp_path.iterdir()) == []
+
+
+# --- hardening H2: source_paths names project and table, never a host path ---------------
+
+HOME_PATH_MARKERS = ("~", "/home/", "Desktop")
+
+
+def _written_metadata(tmp_path) -> dict:
+    frame = transform_project1_user_features(
+        pd.concat(
+            [_p1_user_features(), _p1_user_features(user_id=102, total_events=20)],
+            ignore_index=True,
+        )
+    )
+    result = write_snapshot(frame, _snapshot_config(tmp_path), output_root=tmp_path)
+    return json.loads(result.metadata_path.read_text(encoding="utf-8"))
+
+
+def test_source_paths_name_the_config_project_and_table_without_home_paths(tmp_path) -> None:
+    metadata = _written_metadata(tmp_path)
+
+    assert metadata["source_paths"] == [
+        "project_1/public.user_features",
+        "project_2_3/marts.mart_customer_360",
+        "project_2_3/warehouse.fact_web_events",
+        "project_2_3/warehouse.dim_customer",
+    ]
+    serialized = json.dumps(metadata)
+    for marker in HOME_PATH_MARKERS:
+        assert marker not in serialized, marker
+
+
+def test_source_paths_follow_source_tables_one_to_one(tmp_path) -> None:
+    metadata = _written_metadata(tmp_path)
+
+    assert len(metadata["source_paths"]) == len(metadata["source_tables"])
+    assert [path.split("/", 1)[1] for path in metadata["source_paths"]] == metadata[
+        "source_tables"
+    ]
+
+
+def test_a_bundle_trained_from_a_new_snapshot_records_no_home_path(
+    segmented_metadata_paths,
+) -> None:
+    for version, metadata_path in segmented_metadata_paths.items():
+        snapshot = json.loads(metadata_path.read_text(encoding="utf-8"))[
+            "training_snapshot_metadata"
+        ]
+
+        assert snapshot["source_paths"] == [
+            "project_1/public.user_features",
+            "project_2_3/marts.mart_campaign",
+        ], version
+        serialized = json.dumps(snapshot)
+        for marker in HOME_PATH_MARKERS:
+            assert marker not in serialized, (version, marker)

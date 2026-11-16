@@ -225,6 +225,12 @@ to the repository root. v001–v004 keep the absolute paths they were written wi
 (`/home/...` for v001/v002, `/app/...` for v003/v004); registration resolves them to the
 files next to the `metadata.json` being read, wherever the bundle is.
 
+New snapshots record `source_paths` as `<config project key>/<schema>.<table>` (for
+example `project_1/public.user_features`), one entry per table in `source_tables`; the
+`training_snapshot_metadata` of v002–v005 keeps the older home-directory form and is not
+rewritten. Nothing reads `source_paths`: the database rows, the integration views and
+the MLflow params use other fields.
+
 ---
 
 ## Active model pointer
