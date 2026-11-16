@@ -7,6 +7,7 @@ import re
 import shlex
 import subprocess
 import sys
+from pathlib import Path
 
 import yaml
 
@@ -66,12 +67,35 @@ def test_readme_lists_exactly_the_metric_families_of_metrics_py() -> None:
     assert listed == registered
 
 
-def test_every_admin_curl_in_the_readme_sends_the_admin_token() -> None:
-    admin_curls = [c for c in _commands(_text()) if "curl" in c and "/admin/" in c]
+# printf is a shell builtin, so the token never appears in any process's arguments; curl
+# reads the header line from stdin (-H @-).
+STDIN_TOKEN_CURL = "printf 'X-Admin-Token: %s\\n' \"$ADMIN_TOKEN\" | curl -s -X POST http"
+ADMIN_CURL_HEADERS = " -H @- -H 'Content-Type: application/json' -d '"
 
-    assert admin_curls, "the README shows how to call /admin/rollback"
-    for command in admin_curls:
-        assert '-H "X-Admin-Token: $ADMIN_TOKEN"' in command, command
+
+def _admin_curls(path: Path) -> list[str]:
+    """Admin curl commands, continuations joined and runs of spaces collapsed."""
+    return [
+        f"{path.name}: {' '.join(command.split())}"
+        for command in _commands(path.read_text(encoding="utf-8"))
+        if "curl" in command and "/admin/" in command
+    ]
+
+
+def test_every_admin_curl_reads_the_token_from_stdin() -> None:
+    readme_curls = _admin_curls(README)
+    docs_curls = [command for path in sorted(DOCS.glob("*.md")) for command in _admin_curls(path)]
+
+    assert readme_curls, "the README shows how to call /admin/rollback"
+    # README, rollback runbook (dry run, applied), Kubernetes runbook (dry run, applied).
+    assert len(readme_curls) + len(docs_curls) >= 5
+    for command in readme_curls + docs_curls:
+        assert STDIN_TOKEN_CURL in command and ADMIN_CURL_HEADERS in command, command
+
+
+def test_no_doc_passes_the_admin_token_as_a_header_argument() -> None:
+    for path in (README, *sorted(DOCS.glob("*.md"))):
+        assert '-H "X-Admin-Token' not in path.read_text(encoding="utf-8"), path.name
 
 
 def test_readme_has_none_of_the_stale_phrases() -> None:
@@ -215,7 +239,10 @@ DOCS_STALE_PHRASES = {
         "The registry is generated runtime metadata and is intentionally ignored by Git.",
         "| Database metadata write | Planned |",
         "The future online inference service will read this pointer",
+        # Removed by hardening H1 (promote refuses `retired` without --allow-retired).
+        "Known gap: `registry promote` accepts a version in any status",
     ),
+    "kubernetes_runtime_validation.md": ("registered version whatever its status",),
     "drift_monitoring.md": (
         "Loads the active v002 baseline statistics",
         "It does not persist directly to PostgreSQL yet.",
@@ -314,14 +341,27 @@ def test_readme_and_lifecycle_list_v005_as_rolled_back_with_its_lineage() -> Non
         assert v005["mlflow_run_id"] in row
 
 
-def test_known_limitations_list_that_promote_accepts_retired_versions() -> None:
+# Known limitations removed once the hardening round fixed them (H1, H4, H3).
+README_STALE_PHRASES_HARDENING = (
+    "`registry promote` accepts a registered version in any status",
+    "some tests read the committed registry state",
+    "pass the token as a `-H` argument",
+)
+# Known limitations that belong to later rounds and stay listed.
+KNOWN_LIMITATIONS_KEPT = (
+    "administrative endpoints protected by one shared token (no users or roles)",
+    "local Docker runtime and a local kind cluster",
+    "no verified anomaly labels",
+)
+
+
+def test_known_limitations_drop_the_entries_the_hardening_round_fixed() -> None:
     limitations = _section("Known limitations")
 
-    assert "`registry promote` accepts a registered version in any status" in limitations
-    assert "`retired`" in limitations
-    assert "some tests read the committed registry state" in limitations
-    assert "fixture registries" in limitations
-    assert "curl -H @-" in limitations and "process list" in limitations
+    for phrase in README_STALE_PHRASES_HARDENING:
+        assert phrase not in _text(), phrase
+    for entry in KNOWN_LIMITATIONS_KEPT:
+        assert entry in limitations, entry
 
 
 def test_docs_have_none_of_the_replaced_stale_phrases() -> None:
@@ -329,19 +369,6 @@ def test_docs_have_none_of_the_replaced_stale_phrases() -> None:
         text = (DOCS / name).read_text(encoding="utf-8")
         for phrase in phrases:
             assert phrase not in text, f"{name}: {phrase}"
-
-
-def test_every_admin_curl_in_the_docs_sends_the_admin_token() -> None:
-    admin_curls = [
-        f"{path.name}: {command}"
-        for path in sorted(DOCS.glob("*.md"))
-        for command in _commands(path.read_text(encoding="utf-8"))
-        if "curl" in command and "/admin/" in command
-    ]
-
-    assert len(admin_curls) >= 3  # rollback runbook (dry run, applied) and the k8s runbook
-    for command in admin_curls:
-        assert '-H "X-Admin-Token: $ADMIN_TOKEN"' in command, command
 
 
 def test_readme_has_no_home_directory_paths() -> None:

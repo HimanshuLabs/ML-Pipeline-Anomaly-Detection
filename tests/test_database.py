@@ -30,8 +30,11 @@ from anomaly_detection.training_snapshot import (
     create_training_snapshot,
     metadata_to_database_records,
 )
+from tests.conftest import FIXTURE_REGISTRY_PATH
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+# The committed registry: read on purpose by the tests that check every committed entry maps
+# to database rows, and used to locate the registry inside the per-test mirror.
 REAL_REGISTRY_PATH = REPO_ROOT / "artifacts" / "models" / "_registry" / "model_registry.json"
 COLUMN_TYPES = "UUID|TEXT|BIGINT|INTEGER|NUMERIC|BOOLEAN|JSONB|DATE|TIMESTAMPTZ"
 SECRET_PASSWORD = "do-not-print-this-password-7f3a"
@@ -910,6 +913,41 @@ def test_forced_database_failure_changes_neither_database_nor_files(
 
 
 @pytest.mark.postgres
+def test_promote_refuses_a_retired_version_in_the_database_and_changes_nothing(
+    initialized_database,
+    isolate_repo_state: Path,
+    trained_metadata_paths: dict[str, Path],
+) -> None:
+    from anomaly_detection.registry import (
+        RegistryError,
+        promote_model_version,
+        retire_model_version,
+    )
+
+    _register_trained(trained_metadata_paths, ["v101", "v102"])
+    promote_model_version(model_name="isolation_forest", model_version="v101")
+    retire_model_version(model_name="isolation_forest", model_version="v102", notes="pytest")
+    mirror_registry = isolate_repo_state / REAL_REGISTRY_PATH.relative_to(REPO_ROOT)
+    mirror_pointer = isolate_repo_state / "configs" / "active_model.yaml"
+    files_before = (mirror_registry.read_bytes(), mirror_pointer.read_bytes())
+    entries_before = {
+        version: entry.to_dict()
+        for version, entry in _database_entries(initialized_database).items()
+    }
+    pointer_before = _database_pointer(initialized_database)
+
+    with pytest.raises(RegistryError, match=r"v102 is retired.*--allow-retired"):
+        promote_model_version(model_name="isolation_forest", model_version="v102")
+
+    assert {
+        version: entry.to_dict()
+        for version, entry in _database_entries(initialized_database).items()
+    } == entries_before
+    assert _database_pointer(initialized_database) == pointer_before
+    assert (mirror_registry.read_bytes(), mirror_pointer.read_bytes()) == files_before
+
+
+@pytest.mark.postgres
 def test_two_serving_processes_converge_on_a_new_pointer_version(
     initialized_database,
     trained_metadata_paths: dict[str, Path],
@@ -1046,7 +1084,7 @@ def test_writes_refuse_an_uninitialized_database_without_touching_anything(
     from anomaly_detection import registry, rollback
     from anomaly_detection.registry import RegistryState, RegistryStorageError
 
-    entries = [] if entries_kind == "none" else load_model_registry(REAL_REGISTRY_PATH)
+    entries = [] if entries_kind == "none" else load_model_registry(FIXTURE_REGISTRY_PATH)
     fake_state = RegistryState(
         entries=entries,
         model_name="isolation_forest",

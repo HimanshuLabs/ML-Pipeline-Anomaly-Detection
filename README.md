@@ -139,12 +139,15 @@ the registry.
 Lifecycle: training and retraining register a version as `candidate`; `promote` makes it
 `production` after a serving check and archives the previous production version; `retire`
 takes a non-active version out of use (its files are kept); a rollback marks the version
-it leaves `rolled_back`.
+it leaves `rolled_back`. `promote` accepts a `rolled_back` version as any other, but
+refuses a `retired` one before the serving check unless `--allow-retired` is given, which
+needs `--notes` saying why.
 
 ```bash
 # tools() runs the tools image (see "Local runbook"); retrain never promotes
 tools python -m anomaly_detection.retrain --snapshot latest --model-version v005 --compare-with v004
 tools python -m anomaly_detection.registry promote --model-version v005 --notes "why"
+tools python -m anomaly_detection.registry promote --model-version v003 --allow-retired --notes "why"
 tools python -m anomaly_detection.registry retire --model-version v003 --notes "why"
 tools python -m anomaly_detection.registry register --metadata-path artifacts/models/isolation_forest/model_version=v005/metadata.json
 tools python -m anomaly_detection.registry mirror
@@ -477,12 +480,13 @@ docker compose up -d anomaly-api
 ```
 
 Call an admin endpoint by reading the token into a variable (never onto the screen) and
-unsetting it afterwards:
+unsetting it afterwards. `printf` is a shell builtin and curl reads the header from stdin
+(`-H @-`), so the token never appears in any process's arguments (`ps`):
 
 ```bash
 ADMIN_TOKEN="$(grep '^PROJECT4_ADMIN_TOKEN=' .env | cut -d= -f2-)"
-curl -s -X POST http://127.0.0.1:8014/admin/rollback \
-  -H "X-Admin-Token: $ADMIN_TOKEN" -H 'Content-Type: application/json' \
+printf 'X-Admin-Token: %s\n' "$ADMIN_TOKEN" | curl -s -X POST http://127.0.0.1:8014/admin/rollback \
+  -H @- -H 'Content-Type: application/json' \
   -d '{"dry_run": true, "rollback_reason": "manual check", "triggered_by": "operator"}'
 unset ADMIN_TOKEN
 ```
@@ -1097,15 +1101,6 @@ Implemented locally, not production-deployed:
 - local Docker runtime and a local kind cluster
 - local rollback controls
 - administrative endpoints protected by one shared token (no users or roles)
-- `registry promote` accepts a registered version in any status, including `retired`;
-  only the serving check gates it (hardening: refuse `retired` unless explicitly overridden)
-- some tests read the committed registry state (`artifacts/models/_registry/model_registry.json`,
-  `configs/active_model.yaml`), so committing new lifecycle state can break them (seen in
-  stage 15f: a frozen-clock mirror test archived v004 before its committed `promoted_at`);
-  hardening: fixture registries instead of the committed files
-- the documented admin `curl` commands pass the token as a `-H` argument, which the same
-  user can see in the process list; reading it on stdin
-  (`printf 'X-Admin-Token: %s\n' "$ADMIN_TOKEN" | curl -H @- …`) avoids that
 - no managed cloud deployment
 - no real production traffic
 - no verified anomaly labels

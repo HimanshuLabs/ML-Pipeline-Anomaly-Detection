@@ -990,7 +990,7 @@ def register_model_from_artifacts(
     status: str = "candidate",
     approved_for_prod: bool = False,
     notes: str | None = None,
-    replace_existing: bool = True,
+    replace_existing: bool = False,
 ) -> ModelRegistryEntry:
     """Register a trained local model artifact.
 
@@ -1000,7 +1000,8 @@ def register_model_from_artifacts(
         status: Lifecycle status for the registered version.
         approved_for_prod: Whether this model is approved for production use.
         notes: Optional human-readable registry note.
-        replace_existing: Replace an existing same model/version record.
+        replace_existing: Replace an existing same model/version record (whatever its
+            status); by default an existing version is refused.
 
     Returns:
         Registered model entry.
@@ -1398,6 +1399,16 @@ def read_active_model_pointer(
     )
 
 
+def _refuse_retired(entry: ModelRegistryEntry, *, allow_retired: bool, action: str) -> None:
+    """A retired version leaves retired only with an explicit override."""
+
+    if entry.status == ModelStatus.RETIRED and not allow_retired:
+        raise RegistryError(
+            f"{entry.model_name} {entry.model_version} is retired; {action} it needs "
+            "--allow-retired (with --notes saying why)"
+        )
+
+
 def _set_entry_status(
     *,
     model_name: str,
@@ -1406,10 +1417,12 @@ def _set_entry_status(
     registry_path: str | Path,
     active_model_path: str | Path,
     notes: str | None = None,
+    allow_retired: bool = False,
 ) -> ModelRegistryEntry:
     """Change a version's status outside the production promotion path.
 
-    notes, when given, replaces the version's registry note.
+    notes, when given, replaces the version's registry note. A retired version keeps
+    its status (its note may change) unless allow_retired is set.
     """
     _validate_status(status)
     state = load_registry_state(
@@ -1419,11 +1432,19 @@ def _set_entry_status(
     )
     ensure_database_initialized(state, model_name)
     entries = state.entries
-    if not any(
-        entry.model_name == model_name and entry.model_version == model_version
-        for entry in entries
-    ):
+    target = next(
+        (
+            entry
+            for entry in entries
+            if entry.model_name == model_name and entry.model_version == model_version
+        ),
+        None,
+    )
+    if target is None:
         raise RegistryError(f"Model version not registered: {model_name} {model_version}")
+
+    if status != ModelStatus.RETIRED:
+        _refuse_retired(target, allow_retired=allow_retired, action=f"setting {status!r} on")
 
     if state.model_name == model_name and state.active_model_version == model_version:
         raise RegistryError(
@@ -1493,13 +1514,15 @@ def promote_model_version(
     registry_path: str | Path = DEFAULT_REGISTRY_PATH,
     active_model_path: str | Path = DEFAULT_ACTIVE_MODEL_PATH,
     notes: str | None = None,
+    allow_retired: bool = False,
 ) -> ModelRegistryEntry:
     """Promote a registered model version to production.
 
     Any existing production version for the same model is archived. This gives
-    rollback logic a clean previous-stable trail later. The target's artifact
-    must load and its metadata.json must list feature_names before anything is
-    written.
+    rollback logic a clean previous-stable trail later. A retired version is
+    refused unless allow_retired is set; a rolled_back one is promoted as any
+    other. The target's artifact must load and its metadata.json must list
+    feature_names before anything is written.
     """
     state = load_registry_state(
         registry_path=registry_path,
@@ -1523,6 +1546,7 @@ def promote_model_version(
     if target_index is None:
         raise RegistryError(f"Model version not registered: {model_name} {model_version}")
 
+    _refuse_retired(entries[target_index], allow_retired=allow_retired, action="promoting")
     load_verified_feature_names(entries[target_index])
 
     for entry in entries:
@@ -1585,8 +1609,12 @@ def promote_model(
     target_status: ModelStatus | str = ModelStatus.PRODUCTION,
     registry_path: str | Path | None = None,
     active_model_config_path: str | Path | None = None,
+    allow_retired: bool = False,
 ) -> dict[str, Any]:
-    """Move a model version to target_status; production also updates the pointer."""
+    """Move a model version to target_status; production also updates the pointer.
+
+    A retired version is moved to another status only when allow_retired is set.
+    """
 
     normalized_status = _status_value(target_status)
     _validate_status(normalized_status)
@@ -1599,6 +1627,7 @@ def promote_model(
             model_version=model_version,
             registry_path=resolved_registry_path,
             active_model_path=resolved_active_model_path,
+            allow_retired=allow_retired,
         )
     else:
         entry = _set_entry_status(
@@ -1607,6 +1636,7 @@ def promote_model(
             status=normalized_status,
             registry_path=resolved_registry_path,
             active_model_path=resolved_active_model_path,
+            allow_retired=allow_retired,
         )
 
     return entry.to_dict()
@@ -1699,6 +1729,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     python -m anomaly_detection.registry register --metadata-path <bundle>/metadata.json
     python -m anomaly_detection.registry retire --model-version v003 --notes "..."
     python -m anomaly_detection.registry promote --model-version v004
+    python -m anomaly_detection.registry promote --model-version v003 --allow-retired --notes "..."
     python -m anomaly_detection.registry mirror
 
     Postgres when PROJECT4_POSTGRES_* is configured (with the file mirror), else files.
@@ -1726,6 +1757,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     promote.add_argument("--model-version", required=True)
     promote.add_argument("--notes", default=None)
+    promote.add_argument(
+        "--allow-retired",
+        action="store_true",
+        help="Promote a retired version anyway; needs --notes saying why.",
+    )
     promote.add_argument("--model-name", default=None, help="Default: model_config.yaml.")
     register = commands.add_parser(
         "register",
@@ -1783,6 +1819,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 notes=args.notes,
             )
         else:
+            if args.allow_retired and not (args.notes and args.notes.strip()):
+                raise RegistryError("--allow-retired needs --notes saying why")
             before = load_registry_state(model_name=model_name)
             candidate = next(
                 (
@@ -1796,11 +1834,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise RegistryError(
                     f"Model version not registered: {model_name} {args.model_version}"
                 )
+            _refuse_retired(candidate, allow_retired=args.allow_retired, action="promoting")
             verify_servable(candidate)
             entry = promote_model_version(
                 model_name=model_name,
                 model_version=args.model_version,
                 notes=args.notes,
+                allow_retired=args.allow_retired,
             )
         state = load_registry_state(model_name=model_name)
     except RegistryError as exc:

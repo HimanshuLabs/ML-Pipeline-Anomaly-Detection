@@ -84,11 +84,12 @@ nothing. An applied rollback changes the shared pointer and writes audit evidenc
 ## Dry run
 
 Read the token into a variable (never onto the screen), call the compose API on 8014,
-and unset the variable afterwards:
+and unset the variable afterwards. `printf` is a shell builtin and curl reads the header
+from stdin (`-H @-`), so the token never appears in any process's arguments:
 
     ADMIN_TOKEN="$(grep '^PROJECT4_ADMIN_TOKEN=' .env | cut -d= -f2-)"
-    curl -s -X POST http://127.0.0.1:8014/admin/rollback \
-      -H "X-Admin-Token: $ADMIN_TOKEN" -H 'Content-Type: application/json' \
+    printf 'X-Admin-Token: %s\n' "$ADMIN_TOKEN" | curl -s -X POST http://127.0.0.1:8014/admin/rollback \
+      -H @- -H 'Content-Type: application/json' \
       -d '{"rollback_reason": "manual dry-run validation", "triggered_by": "operator", "dry_run": true}'
     unset ADMIN_TOKEN
 
@@ -105,8 +106,8 @@ Expected result once a compatible target exists:
 ## Applied rollback
 
     ADMIN_TOKEN="$(grep '^PROJECT4_ADMIN_TOKEN=' .env | cut -d= -f2-)"
-    curl -s -X POST http://127.0.0.1:8014/admin/rollback \
-      -H "X-Admin-Token: $ADMIN_TOKEN" -H 'Content-Type: application/json' \
+    printf 'X-Admin-Token: %s\n' "$ADMIN_TOKEN" | curl -s -X POST http://127.0.0.1:8014/admin/rollback \
+      -H @- -H 'Content-Type: application/json' \
       -d '{"rollback_reason": "critical drift detected", "triggered_by": "operator", "dry_run": false}'
     unset ADMIN_TOKEN
 

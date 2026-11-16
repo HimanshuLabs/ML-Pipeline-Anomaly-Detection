@@ -32,7 +32,7 @@ PATH_FIELDS = ("artifact_dir", "model_path", "metadata_path", "feature_schema_pa
 def _real_bundle_hashes() -> dict[str, str]:
     return {
         str(path.relative_to(REPO_ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
-        for path in sorted(MODELS.glob("model_version=v00[1-4]/*"))
+        for path in sorted(MODELS.glob("model_version=v00[1-5]/*"))
     }
 
 
