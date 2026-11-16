@@ -18,8 +18,8 @@ source_tables:
 - marts.mart_product_sales
 - warehouse.fact_web_events
 snapshot_type: real_source_extract
-last_updated_at: '2026-11-15T02:47:08.235361+00:00'
-updated_at: '2026-11-15T02:47:08.235361+00:00'
-notes: 'Promoted segmented v004 (D5: one IsolationForest per entity type)'
+last_updated_at: '2026-11-16T04:19:02.463447+00:00'
+updated_at: '2026-11-16T04:19:02.463447+00:00'
+notes: 'Rolled back from v005 to v004: stage 15d: first real rollback v005 -> v004'
 latency_budget:
   online_prediction_p95_ms: 200
