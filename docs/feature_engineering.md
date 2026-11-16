@@ -89,13 +89,18 @@ Timestamps are parsed with explicit mixed-format support so pandas does not rely
 
 ## Feature schema
 
-The current feature schema version is:
+The feature builder described here produces the 11-feature demo contract, labelled:
 
     feature_schema_v001
 
-Every generated feature row includes:
+Every row it generates includes:
 
     schema_version = feature_schema_v001
+
+The production model (v004) is trained from real-source snapshots instead
+(`source_extract.py`, extract label `feature_schema_v002`) and carries the model label
+`feature_schema_v003`; see `docs/data_contract.md` ("Feature schema versions") and
+`docs/source_integration.md`.
 
 The schema version and required feature list are controlled through:
 

@@ -14,6 +14,7 @@ class HealthResponse(BaseModel):
     service: str
     active_model_version: str | None
     model_loaded: bool
+    pointer_source: str | None = None
 
 
 class ActiveModelResponse(BaseModel):
@@ -33,6 +34,10 @@ class ActiveModelResponse(BaseModel):
     snapshot_type: str | None
     latency_budget_p95_ms: float | None
     loaded_at: str
+    pointer_source: str | None = None
+    model_kind: str = "isolation_forest"
+    # Segmented models: {entity_type: feature_count}; null for a single model.
+    segments: dict[str, int] | None = None
 
 
 class PredictRequest(BaseModel):
@@ -57,7 +62,10 @@ class BatchPredictRequest(BaseModel):
     feature_payloads: list[dict[str, Any]] = Field(
         ...,
         min_length=1,
-        description="List of model-ready feature payloads.",
+        description=(
+            "List of model-ready feature payloads. For a segmented model a payload may "
+            "carry its own entity_type, overriding the request-level entity_type."
+        ),
     )
 
 

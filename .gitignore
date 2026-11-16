@@ -25,6 +25,19 @@ data/features/batch_scoring/*
 data/features/online_samples/*
 data/validation/*
 artifacts/models/*
+# Model bundles and the registry are tracked; nothing else under artifacts/models.
+!artifacts/models/_registry/
+artifacts/models/_registry/*
+!artifacts/models/_registry/model_registry.json
+!artifacts/models/isolation_forest/
+artifacts/models/isolation_forest/*
+!artifacts/models/isolation_forest/model_version=*/
+artifacts/models/isolation_forest/model_version=*/*
+!artifacts/models/isolation_forest/model_version=*/model.joblib
+!artifacts/models/isolation_forest/model_version=*/metadata.json
+!artifacts/models/isolation_forest/model_version=*/feature_schema.json
+!artifacts/models/isolation_forest/model_version=*/baseline_stats.json
+!artifacts/models/isolation_forest/model_version=*/evaluation_report.json
 mlruns/
 logs/alerts/*
 logs/predictions/*

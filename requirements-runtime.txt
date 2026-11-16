@@ -1,0 +1,29 @@
+# API serving: image project4-anomaly-api:local (docker/Dockerfile, target runtime).
+# Install with: pip install -r requirements-runtime.txt -c constraints.txt
+# Never add mlflow, pyarrow or test tools here; the runtime build refuses them.
+
+# Core data processing
+# numpy <2.5: NumPy 2.5 deprecates ndarray.shape assignment used by pandas 2.3 timedelta ops
+# (incl. feature_builder.py:101-102). Lift when pandas>=3 is allowed (needs an MLflow that
+# permits it).
+numpy>=1.26,<2.5
+pandas>=2.2,<3.0
+
+# ML and model artifacts
+scikit-learn>=1.5,<2.0
+# joblib >=1.6: stops assigning ndarray.shape when loading models, so a later NumPy 2.5+
+# doesn't break model loading.
+joblib>=1.6,<2.0
+
+# API and validation
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30,<1.0
+pydantic>=2.8,<3.0
+
+# Database (psycopg2 is the driver: postgresql+psycopg2)
+sqlalchemy>=2.0,<3.0
+psycopg2-binary>=2.9.9,<3.0.0
+
+# Config and observability
+PyYAML>=6.0,<7.0
+prometheus-client>=0.20,<1.0

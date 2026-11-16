@@ -1,0 +1,9 @@
+# Training, retrain, batch scoring, source extraction, drift job, MLflow tracking and
+# the MLflow server: image project4-anomaly-tools:local (docker/Dockerfile, target tools).
+-r requirements-runtime.txt
+
+# Parquet snapshots and batch inputs
+pyarrow==24.0.0
+
+# Experiment tracking (client and server)
+mlflow>=3.0,<4.0

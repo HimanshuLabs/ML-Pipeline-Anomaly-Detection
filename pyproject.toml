@@ -10,8 +10,12 @@ authors = [
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["."]
+pythonpath = ["src", "."]
 addopts = "-q"
+markers = [
+  "postgres: needs a disposable PostgreSQL database at PROJECT4_TEST_DATABASE_URL (skipped otherwise)",
+  "expect_persist_failure: the test breaks a prediction evidence sink on purpose",
+]
 
 [tool.ruff]
 line-length = 100

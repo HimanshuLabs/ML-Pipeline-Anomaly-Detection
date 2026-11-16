@@ -13,7 +13,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import logging
 import time
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -23,9 +25,13 @@ from uuid import uuid4
 import joblib
 import numpy as np
 import pandas as pd
+import sklearn
 import yaml
 
 from anomaly_detection.prediction_logging import write_batch_predictions_jsonl
+from anomaly_detection.segmented_model import SEGMENTED_MODEL_KIND, SegmentedIsolationForest
+
+LOGGER = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -156,6 +162,53 @@ def hash_feature_payload(payload: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _as_hash_value(value: Any) -> Any:
+    if value is None or isinstance(value, str):
+        return _json_safe(value)
+    try:
+        return _json_safe(float(value))  # 4, 4.0, np.int64(4) -> 4.0; NaN/inf -> None
+    except (TypeError, ValueError):
+        return _json_safe(value)
+
+
+def canonical_feature_payload_hash(
+    payload: Mapping[str, Any], feature_names: Sequence[str]
+) -> str:
+    """feature_payload_hash of a scored record, the same for online and batch scoring.
+
+    Only the features the model scored for the record (a segmented model's segment
+    features for its entity type, a single model's features) enter the hash, as
+    floats (NaN/inf as null), in sorted-key canonical JSON. Extra keys (entity_id,
+    entity_type, unknown keys) never do. Stage 14c-5 onwards; earlier online rows
+    hashed the whole request payload as sent.
+    """
+
+    return hash_feature_payload({name: _as_hash_value(payload[name]) for name in feature_names})
+
+
+def _log_training_runtime_versions(metadata: dict[str, Any], *, model_version: str) -> None:
+    """Compare the training scikit-learn version with the runtime; never fails loading."""
+
+    recorded_versions = metadata.get("runtime_versions")
+    if not isinstance(recorded_versions, dict):
+        LOGGER.info(
+            "Model %s metadata has no runtime_versions; training library versions were "
+            "not recorded",
+            model_version,
+        )
+        return
+
+    trained_sklearn = recorded_versions.get("scikit-learn")
+    if trained_sklearn and trained_sklearn != sklearn.__version__:
+        LOGGER.warning(
+            "Model %s was trained with scikit-learn %s but the runtime has scikit-learn %s; "
+            "predictions may differ",
+            model_version,
+            trained_sklearn,
+            sklearn.__version__,
+        )
+
+
 def load_active_model_artifacts(
     active_model_path: Path = DEFAULT_ACTIVE_MODEL_PATH,
 ) -> ActiveModelArtifacts:
@@ -225,7 +278,16 @@ def load_active_model_artifacts(
             "feature_schema.json feature_count does not match metadata feature_names"
         )
 
+    _log_training_runtime_versions(metadata, model_version=model_version)
+
     model = joblib.load(model_path)
+
+    declares_segmented = metadata.get("model_kind") == SEGMENTED_MODEL_KIND
+    if declares_segmented != isinstance(model, SegmentedIsolationForest):
+        raise BatchInferenceError(
+            f"metadata.json model_kind {metadata.get('model_kind')!r} does not match the "
+            f"loaded artifact ({type(model).__name__}) for model {model_version}"
+        )
 
     return ActiveModelArtifacts(
         model_name=model_name,
@@ -252,6 +314,49 @@ def get_required_feature_names(artifacts: ActiveModelArtifacts) -> list[str]:
         raise BatchInferenceError("Active model metadata has no feature_names")
 
     return [str(feature_name) for feature_name in feature_names]
+
+
+def segment_feature_names(artifacts: ActiveModelArtifacts) -> dict[str, list[str]] | None:
+    """Entity type -> ordered features for a segmented model; None for a single model."""
+
+    if isinstance(artifacts.model, SegmentedIsolationForest):
+        return artifacts.model.feature_spec()
+    return None
+
+
+def required_feature_names_for(artifacts: ActiveModelArtifacts, entity_type: str) -> list[str]:
+    """Features needed to score one entity_type.
+
+    Single models need all their features whatever the entity type. Segmented
+    models need only that entity type's segment, and refuse a type they have no
+    segment for.
+    """
+
+    segments = segment_feature_names(artifacts)
+    if segments is None:
+        return get_required_feature_names(artifacts)
+
+    if entity_type not in segments:
+        raise BatchInferenceError(
+            f"entity_type {entity_type!r} is not served by model {artifacts.model_version}; "
+            f"allowed entity types: {sorted(segments)}"
+        )
+    return segments[entity_type]
+
+
+def score_entity_matrix(
+    artifacts: ActiveModelArtifacts,
+    matrix: pd.DataFrame,
+    entity_type: str,
+) -> np.ndarray:
+    """decision_function for rows of one entity_type (segmented: that type's segment)."""
+
+    if isinstance(artifacts.model, SegmentedIsolationForest):
+        return np.asarray(
+            artifacts.model.decision_function(matrix.assign(entity_type=entity_type)),
+            dtype=float,
+        )
+    return np.asarray(artifacts.model.decision_function(matrix), dtype=float)
 
 
 def prepare_feature_matrix(
@@ -291,7 +396,20 @@ def prepare_feature_matrix(
             + details
         )
 
-    return matrix.astype(float)
+    matrix = matrix.astype(float)
+    non_finite_counts = (~np.isfinite(matrix)).sum()
+    columns_with_non_finite = non_finite_counts[non_finite_counts > 0]
+    if not columns_with_non_finite.empty:
+        details = ", ".join(
+            f"{column}={count}"
+            for column, count in columns_with_non_finite.items()
+        )
+        raise BatchInferenceError(
+            "Input batch contains non-finite (inf/-inf) model feature values: "
+            + details
+        )
+
+    return matrix
 
 
 def _get_entity_id(
@@ -327,9 +445,26 @@ def score_feature_batch(
     source_table: str | None = None,
     batch_run_id: str | None = None,
 ) -> list[BatchPredictionRecord]:
-    """Score a batch of features with the active model."""
+    """Score a batch of features with the active model.
+
+    Segmented models route each row by its entity_type column (or, without
+    that column, every row is entity_type) to that type's segment and need
+    only that segment's features. Single models score every row on all their
+    features and label every record with entity_type.
+    """
 
     batch_id = batch_run_id or str(uuid4())
+
+    if segment_feature_names(artifacts) is not None:
+        return _score_segmented_batch(
+            features,
+            artifacts,
+            entity_type=entity_type,
+            source_project=source_project,
+            source_table=source_table,
+            batch_id=batch_id,
+        )
+
     feature_names = get_required_feature_names(artifacts)
     feature_matrix = prepare_feature_matrix(features, feature_names)
 
@@ -355,6 +490,86 @@ def score_feature_batch(
     elapsed_ms = (time.perf_counter() - started) * 1000
     per_record_latency_ms = elapsed_ms / max(len(feature_matrix), 1)
 
+    return _build_records(
+        features,
+        artifacts,
+        scores=scores,
+        anomaly_flags=anomaly_flags,
+        threshold_used=threshold_used,
+        row_feature_names=[feature_names] * len(features),
+        row_entity_types=[entity_type] * len(features),
+        per_record_latency_ms=per_record_latency_ms,
+        source_project=source_project,
+        source_table=source_table,
+        batch_id=batch_id,
+    )
+
+
+def _score_segmented_batch(
+    features: pd.DataFrame,
+    artifacts: ActiveModelArtifacts,
+    *,
+    entity_type: str,
+    source_project: str | None,
+    source_table: str | None,
+    batch_id: str,
+) -> list[BatchPredictionRecord]:
+    if features.empty:
+        raise BatchInferenceError("Cannot score an empty feature batch")
+
+    if "entity_type" in features.columns:
+        if features["entity_type"].isna().any():
+            raise BatchInferenceError("Input batch has rows with a null entity_type")
+        row_entity_types = features["entity_type"].astype(str).tolist()
+    else:
+        row_entity_types = [str(entity_type)] * len(features)
+
+    types = np.asarray(row_entity_types)
+    names_by_type = {
+        value: required_feature_names_for(artifacts, value)
+        for value in sorted(set(row_entity_types))
+    }
+    matrices = {
+        value: prepare_feature_matrix(features.loc[types == value], names)
+        for value, names in names_by_type.items()
+    }
+
+    started = time.perf_counter()
+    scores = np.empty(len(features), dtype=float)
+    for value, matrix in matrices.items():
+        scores[types == value] = score_entity_matrix(artifacts, matrix, value)
+    elapsed_ms = (time.perf_counter() - started) * 1000
+
+    threshold_used = 0.0
+    return _build_records(
+        features,
+        artifacts,
+        scores=scores,
+        anomaly_flags=scores < threshold_used,
+        threshold_used=threshold_used,
+        row_feature_names=[names_by_type[value] for value in row_entity_types],
+        row_entity_types=row_entity_types,
+        per_record_latency_ms=elapsed_ms / len(features),
+        source_project=source_project,
+        source_table=source_table,
+        batch_id=batch_id,
+    )
+
+
+def _build_records(
+    features: pd.DataFrame,
+    artifacts: ActiveModelArtifacts,
+    *,
+    scores: Any,
+    anomaly_flags: Any,
+    threshold_used: float,
+    row_feature_names: list[list[str]],
+    row_entity_types: list[str],
+    per_record_latency_ms: float,
+    source_project: str | None,
+    source_table: str | None,
+    batch_id: str,
+) -> list[BatchPredictionRecord]:
     score_timestamp = datetime.now(UTC).isoformat()
     entity_key = str(artifacts.feature_schema.get("entity_key") or "entity_id")
 
@@ -363,7 +578,7 @@ def score_feature_batch(
     for row_number, (_row_index, row) in enumerate(features.iterrows()):
         feature_payload = {
             feature_name: _json_safe(row[feature_name])
-            for feature_name in feature_names
+            for feature_name in row_feature_names[row_number]
         }
 
         entity_id = _get_entity_id(row, row_number, entity_key)
@@ -377,7 +592,7 @@ def score_feature_batch(
                 dataset_snapshot_id=artifacts.dataset_snapshot_id,
                 training_dataset_id=artifacts.training_dataset_id,
                 feature_schema_version=artifacts.feature_schema_version,
-                entity_type=entity_type,
+                entity_type=row_entity_types[row_number],
                 entity_id=entity_id,
                 source_project=source_project,
                 source_table=source_table,
@@ -386,7 +601,9 @@ def score_feature_batch(
                 anomaly_score=float(scores[row_number]),
                 is_anomaly=bool(anomaly_flags[row_number]),
                 threshold_used=float(threshold_used),
-                feature_payload_hash=hash_feature_payload(feature_payload),
+                feature_payload_hash=canonical_feature_payload_hash(
+                    feature_payload, row_feature_names[row_number]
+                ),
                 feature_payload=feature_payload,
                 inference_latency_ms=float(per_record_latency_ms),
             )
@@ -484,8 +701,33 @@ def run_batch_inference(
 
     if persist_jsonl:
         write_predictions_jsonl(predictions, output_path)
+        _write_batch_predictions_to_database(predictions, output_path)
 
     return predictions
+
+
+def _write_batch_predictions_to_database(
+    predictions: list[BatchPredictionRecord],
+    jsonl_path: Path,
+) -> None:
+    """In database mode, store one run's records in ml.batch_predictions in one transaction.
+
+    Runs after the JSONL write; a failure fails the run and names the sink that failed.
+    """
+
+    from anomaly_detection import database
+
+    if not predictions or not database.is_configured():
+        return
+
+    try:
+        database.insert_batch_predictions(predictions)
+    except Exception as exc:  # noqa: BLE001 - report which sink failed
+        raise BatchInferenceError(
+            f"Batch run {predictions[0].batch_run_id}: {len(predictions)} predictions were "
+            f"written to the JSONL sink ({jsonl_path}) but the postgres sink "
+            f"(ml.batch_predictions) failed: {type(exc).__name__}"
+        ) from exc
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -529,6 +771,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    from anomaly_detection.logging_config import configure_logging
+
+    configure_logging()
     parser = _build_parser()
     args = parser.parse_args()
 

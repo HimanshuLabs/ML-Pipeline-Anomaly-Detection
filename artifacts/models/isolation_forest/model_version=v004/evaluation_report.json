@@ -1,0 +1,203 @@
+{
+  "contamination": 0.05,
+  "entity_types": {
+    "campaign": {
+      "anomaly_count": 2,
+      "anomaly_rate": 0.05405405405405406,
+      "row_count": 37,
+      "score_p5": 4.466912950640278e-17,
+      "score_p50": 0.13083486603149452,
+      "score_p95": 0.17496660355071364
+    },
+    "customer": {
+      "anomaly_count": 25,
+      "anomaly_rate": 0.05030181086519115,
+      "row_count": 497,
+      "score_p5": 1.0842021724855044e-18,
+      "score_p50": 0.12726146626302665,
+      "score_p95": 0.1694499679629911
+    },
+    "funnel_day": {
+      "anomaly_count": 47,
+      "anomaly_rate": 0.05075593952483801,
+      "row_count": 926,
+      "score_p5": 2.7755575615628914e-17,
+      "score_p50": 0.09161233539522701,
+      "score_p95": 0.1379761089147018
+    },
+    "product": {
+      "anomaly_count": 8,
+      "anomaly_rate": 0.05442176870748299,
+      "row_count": 147,
+      "score_p5": -2.949029909160572e-17,
+      "score_p50": 0.13657639968509994,
+      "score_p95": 0.18534460997189148
+    },
+    "user": {
+      "anomaly_count": 20,
+      "anomaly_rate": 0.05,
+      "row_count": 400,
+      "score_p5": -2.4936649967166602e-18,
+      "score_p50": 0.19376591339671068,
+      "score_p95": 0.22802961139605635
+    },
+    "web_customer": {
+      "anomaly_count": 25,
+      "anomaly_rate": 0.05030181086519115,
+      "row_count": 497,
+      "score_p5": -4.109126233720062e-17,
+      "score_p50": 0.07501965359368828,
+      "score_p95": 0.11557807835172024
+    }
+  },
+  "feature_count": 52,
+  "feature_schema_version": "feature_schema_v003",
+  "feature_set_fingerprint": "1fd00d47cdd158f68d5d76c7a49b584b44c212d2ee5458b254c1116bc7db5761",
+  "generated_at_utc": "2026-11-15T02:06:46.693362+00:00",
+  "missing_entity_types": [],
+  "model_kind": "segmented_isolation_forest",
+  "model_name": "isolation_forest",
+  "model_version": "v004",
+  "overall": {
+    "anomaly_count": 127,
+    "anomaly_rate": 0.05071884984025559,
+    "row_count": 2504,
+    "score_p5": -0.0009517531353368573,
+    "score_p50": 0.1013610095740958,
+    "score_p95": 0.2083061063101419
+  },
+  "report_type": "retrain_evaluation",
+  "row_counts": {
+    "by_entity_type": {
+      "campaign": 37,
+      "customer": 497,
+      "funnel_day": 926,
+      "product": 147,
+      "user": 400,
+      "web_customer": 497
+    },
+    "snapshot": 2504,
+    "trained": 2504
+  },
+  "score_definition": "IsolationForest.decision_function on the training rows (segmented models: each row's own entity-type model); lower is more anomalous; a row is an anomaly when predict() == -1.",
+  "segments": {
+    "campaign": {
+      "feature_count": 19,
+      "feature_names": [
+        "avg_engagement_score",
+        "avg_purchase_probability",
+        "web_event_count",
+        "session_count",
+        "average_order_value",
+        "campaign_budget",
+        "total_spend",
+        "budget_remaining",
+        "impressions",
+        "clicks",
+        "ad_platform_conversions",
+        "purchase_event_count",
+        "order_count",
+        "attributed_revenue",
+        "roas",
+        "click_through_rate_pct",
+        "cost_per_click",
+        "cost_per_order",
+        "session_to_order_conversion_rate_pct"
+      ]
+    },
+    "customer": {
+      "feature_count": 18,
+      "feature_names": [
+        "avg_engagement_score",
+        "avg_purchase_probability",
+        "web_event_count",
+        "session_count",
+        "purchase_intent_event_count",
+        "customer_conversion_rate_pct",
+        "avg_cart_abandonment_probability",
+        "lifetime_value",
+        "average_order_value",
+        "gross_revenue",
+        "total_discount_amount",
+        "total_units_purchased",
+        "product_categories_purchased",
+        "distinct_products_purchased",
+        "days_since_last_order",
+        "repeat_purchase_signal",
+        "order_count",
+        "never_ordered"
+      ]
+    },
+    "funnel_day": {
+      "feature_count": 9,
+      "feature_names": [
+        "total_events",
+        "product_view_count",
+        "add_to_cart_count",
+        "purchase_count",
+        "avg_engagement_score",
+        "avg_purchase_probability",
+        "session_count",
+        "avg_cart_abandonment_probability",
+        "funnel_conversion_rate_pct"
+      ]
+    },
+    "product": {
+      "feature_count": 16,
+      "feature_names": [
+        "product_view_count",
+        "add_to_cart_count",
+        "purchase_count",
+        "avg_event_price",
+        "max_event_price",
+        "web_event_count",
+        "session_count",
+        "average_order_value",
+        "order_count",
+        "product_revenue",
+        "inventory_remaining",
+        "units_sold",
+        "product_conversion_rate_pct",
+        "avg_product_engagement_score",
+        "category_revenue_rank",
+        "category_revenue_share_pct"
+      ]
+    },
+    "user": {
+      "feature_count": 12,
+      "feature_names": [
+        "total_events",
+        "page_view_count",
+        "product_view_count",
+        "add_to_cart_count",
+        "purchase_count",
+        "search_count",
+        "avg_event_price",
+        "max_event_price",
+        "avg_engagement_score",
+        "avg_purchase_probability",
+        "unique_products_interacted",
+        "session_count"
+      ]
+    },
+    "web_customer": {
+      "feature_count": 13,
+      "feature_names": [
+        "total_events",
+        "page_view_count",
+        "product_view_count",
+        "add_to_cart_count",
+        "purchase_count",
+        "avg_engagement_score",
+        "avg_purchase_probability",
+        "session_count",
+        "avg_cart_abandonment_probability",
+        "avg_api_latency_ms",
+        "avg_page_load_time_ms",
+        "avg_fraud_score",
+        "avg_event_value"
+      ]
+    }
+  },
+  "snapshot_id": "real_source_20261115T010701Z"
+}

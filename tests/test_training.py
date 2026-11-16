@@ -82,6 +82,7 @@ def test_train_isolation_forest_from_snapshot_writes_versioned_artifacts(
         artifact_root_override=artifact_root,
         overwrite=True,
         training_started_at_utc=datetime(2026, 6, 8, 12, 5, 0, tzinfo=UTC),
+        registry_path=tmp_path / "empty_registry.json",
     )
 
     artifact_dir = artifact_root / "isolation_forest" / "model_version=v001"
@@ -229,3 +230,183 @@ def test_resolve_snapshot_paths_supports_latest_snapshot(tmp_path: Path) -> None
 
     assert resolved_features_path == features_path
     assert resolved_metadata_path == metadata_path
+
+
+# --- reproducibility: runtime versions, fingerprints, schema labels ----------
+
+
+def _feature_set_fingerprint(feature_names: list[str]) -> str:
+    import hashlib
+
+    return hashlib.sha256("\n".join(feature_names).encode("utf-8")).hexdigest()
+
+
+def _demo_snapshot(tmp_path: Path):
+    return create_training_snapshot(
+        _sample_feature_frame(),
+        snapshot_config=TrainingSnapshotConfig(output_root=tmp_path / "snapshots"),
+        source_tables=["project4_test_features"],
+        created_at_utc=datetime(2026, 6, 8, 12, 0, 0, tzinfo=UTC),
+    )
+
+
+def test_training_records_runtime_versions_and_feature_set_fingerprint(
+    tmp_path: Path,
+) -> None:
+    import platform
+
+    import joblib
+    import numpy
+    import sklearn
+
+    snapshot = _demo_snapshot(tmp_path)
+
+    artifact = train_isolation_forest_from_snapshot(
+        features_path=snapshot.features_path,
+        snapshot_metadata_path=snapshot.metadata_path,
+        model_version="v001",
+        artifact_root_override=tmp_path / "artifacts",
+        registry_path=tmp_path / "empty_registry.json",
+    )
+
+    metadata = json.loads(Path(artifact.metadata_path).read_text(encoding="utf-8"))
+    schema = json.loads(Path(artifact.feature_schema_path).read_text(encoding="utf-8"))
+    expected_fingerprint = _feature_set_fingerprint(metadata["feature_names"])
+
+    assert metadata["runtime_versions"] == {
+        "python": platform.python_version(),
+        "scikit-learn": sklearn.__version__,
+        "numpy": numpy.__version__,
+        "pandas": pd.__version__,
+        "joblib": joblib.__version__,
+    }
+    assert metadata["feature_set_fingerprint"] == expected_fingerprint
+    assert schema["feature_set_fingerprint"] == expected_fingerprint
+    assert schema["source"] == snapshot.snapshot_id
+    assert schema["timestamp_column"] == snapshot.timestamp_column
+
+
+def test_feature_schema_source_and_timestamp_come_from_snapshot_metadata(
+    tmp_path: Path,
+) -> None:
+    from anomaly_detection.source_extract import SEGMENT_FEATURE_COLUMNS
+
+    # A one-entity-type real-source snapshot (real-source training is segmented).
+    feature_columns = list(SEGMENT_FEATURE_COLUMNS["user"])
+    snapshot_dir = tmp_path / "snapshot_id=real_source_test_001"
+    snapshot_dir.mkdir()
+    pd.DataFrame(
+        {
+            "entity_type": ["user"] * 40,
+            "entity_id": [f"entity_{index}" for index in range(40)],
+            **{
+                column: [float((index * (position + 3)) % 11) for index in range(40)]
+                for position, column in enumerate(feature_columns)
+            },
+        }
+    ).to_parquet(snapshot_dir / "features.parquet", index=False)
+    (snapshot_dir / "metadata.json").write_text(
+        json.dumps(
+            {
+                "snapshot_id": "real_source_test_001",
+                "snapshot_type": "real_source_extract",
+                "feature_columns": feature_columns,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    artifact = train_isolation_forest_from_snapshot(
+        features_path=snapshot_dir / "features.parquet",
+        snapshot_metadata_path=snapshot_dir / "metadata.json",
+        model_version="v001",
+        artifact_root_override=tmp_path / "artifacts",
+        registry_path=tmp_path / "empty_registry.json",
+    )
+
+    schema = json.loads(Path(artifact.feature_schema_path).read_text(encoding="utf-8"))
+
+    assert schema["source"] == "real_source_test_001"
+    assert schema["timestamp_column"] is None
+    assert schema["feature_names"] == feature_columns
+
+
+def _registry_with_schema_label(
+    tmp_path: Path,
+    feature_names: list[str],
+    feature_schema_version: str = "feature_schema_v001",
+) -> Path:
+    import joblib
+
+    from anomaly_detection.registry import register_model
+
+    registry_path = tmp_path / "registry" / "model_registry.json"
+    artifact_dir = tmp_path / "existing_model"
+    artifact_dir.mkdir()
+    joblib.dump({"fake_model": "v900"}, artifact_dir / "model.joblib")
+    (artifact_dir / "metadata.json").write_text(
+        json.dumps({"feature_names": feature_names}),
+        encoding="utf-8",
+    )
+    register_model(
+        model_name="isolation_forest",
+        model_version="v900",
+        artifact_path=str(artifact_dir / "model.joblib"),
+        dataset_snapshot_id="snapshot_v900",
+        feature_schema_version=feature_schema_version,
+        training_timestamp="2026-06-10T10:00:00+00:00",
+        registry_path=registry_path,
+    )
+    return registry_path
+
+
+def _configured_feature_names() -> list[str]:
+    from anomaly_detection.feature_validation import load_feature_validation_config
+
+    return list(load_feature_validation_config().required_numeric_features)
+
+
+@pytest.mark.parametrize(
+    "existing_feature_names",
+    [
+        pytest.param(["some_other_feature", "another_feature"], id="different_names"),
+        pytest.param("reversed", id="same_names_different_order"),
+    ],
+)
+def test_training_refuses_schema_label_used_for_different_feature_names(
+    tmp_path: Path,
+    existing_feature_names,
+) -> None:
+    if existing_feature_names == "reversed":
+        existing_feature_names = list(reversed(_configured_feature_names()))
+    registry_path = _registry_with_schema_label(tmp_path, existing_feature_names)
+    snapshot = _demo_snapshot(tmp_path)
+    artifact_root = tmp_path / "artifacts"
+
+    with pytest.raises(TrainingError, match="feature_schema_v001.*v900"):
+        train_isolation_forest_from_snapshot(
+            features_path=snapshot.features_path,
+            snapshot_metadata_path=snapshot.metadata_path,
+            model_version="v001",
+            artifact_root_override=artifact_root,
+            registry_path=registry_path,
+        )
+
+    assert not (artifact_root / "isolation_forest" / "model_version=v001").exists()
+
+
+def test_training_allows_schema_label_used_for_identical_feature_names(
+    tmp_path: Path,
+) -> None:
+    registry_path = _registry_with_schema_label(tmp_path, _configured_feature_names())
+    snapshot = _demo_snapshot(tmp_path)
+
+    artifact = train_isolation_forest_from_snapshot(
+        features_path=snapshot.features_path,
+        snapshot_metadata_path=snapshot.metadata_path,
+        model_version="v001",
+        artifact_root_override=tmp_path / "artifacts",
+        registry_path=registry_path,
+    )
+
+    assert artifact.feature_schema_version == "feature_schema_v001"

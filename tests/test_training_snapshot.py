@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -145,5 +146,5 @@ def test_training_snapshot_metadata_maps_to_database_records(tmp_path: Path) -> 
 
     assert training_dataset["training_dataset_id"] == metadata.training_dataset_id
     assert training_dataset["snapshot_id"] == metadata.snapshot_id
-    assert training_dataset["row_count"] == 2
-    assert training_dataset["feature_columns"] == metadata.feature_columns
+    assert training_dataset["train_row_count"] == 2
+    assert json.loads(training_dataset["feature_columns"]) == metadata.feature_columns

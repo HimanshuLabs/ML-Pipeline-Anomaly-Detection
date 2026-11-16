@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS ml.batch_predictions (
     model_name TEXT NOT NULL,
     model_version TEXT NOT NULL,
 
-    dataset_snapshot_id UUID REFERENCES ml.feature_snapshots(snapshot_id) ON DELETE SET NULL,
+    dataset_snapshot_id TEXT REFERENCES ml.feature_snapshots(snapshot_id) ON DELETE SET NULL,
     training_dataset_id UUID REFERENCES ml.training_datasets(training_dataset_id) ON DELETE SET NULL,
     feature_schema_version TEXT NOT NULL,
 
@@ -52,6 +52,8 @@ CREATE TABLE IF NOT EXISTS ml.online_predictions (
     model_name TEXT NOT NULL,
     model_version TEXT NOT NULL,
 
+    dataset_snapshot_id TEXT REFERENCES ml.feature_snapshots(snapshot_id) ON DELETE SET NULL,
+    training_dataset_id UUID REFERENCES ml.training_datasets(training_dataset_id) ON DELETE SET NULL,
     feature_schema_version TEXT NOT NULL,
 
     entity_type TEXT NOT NULL,

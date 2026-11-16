@@ -24,11 +24,15 @@ monitoring
 k8s
 tests
 scripts
-sql
 
 *.md
 !README.md
 
+# Only the tracked model bundles and the registry (same files as .gitignore keeps).
 artifacts/*
-!artifacts/models
-!artifacts/models/**
+!artifacts/models/_registry/model_registry.json
+!artifacts/models/isolation_forest/model_version=*/model.joblib
+!artifacts/models/isolation_forest/model_version=*/metadata.json
+!artifacts/models/isolation_forest/model_version=*/feature_schema.json
+!artifacts/models/isolation_forest/model_version=*/baseline_stats.json
+!artifacts/models/isolation_forest/model_version=*/evaluation_report.json

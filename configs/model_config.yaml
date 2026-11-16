@@ -7,7 +7,12 @@ model:
   max_samples: auto
 
 features:
+  # Label of the 11-feature demo contract below (feature_builder, training_snapshot).
   schema_version: feature_schema_v001
+  # Label stamped on models trained from real-source snapshots: the segmented model
+  # spec (one IsolationForest per entity type on source_extract.SEGMENT_FEATURE_COLUMNS).
+  # The snapshots themselves keep the extract label in source_extract.yaml (v002).
+  real_source_schema_version: feature_schema_v003
   entity_key: entity_id
   timestamp_column: feature_timestamp
   required_numeric_features:
@@ -24,11 +29,9 @@ features:
     - page_load_p95_ms
 
 training:
-  snapshot_root: data/features/training
   artifact_root: artifacts/models
-  model_registry_backend: local
-  mlflow_tracking_uri: file:./mlruns
-  approval_required: true
+  # Segmented training refuses an entity type with fewer rows than this.
+  min_rows_per_segment: 30
 
 latency_budget:
   online_prediction_p95_ms: 200

@@ -2,7 +2,7 @@
 -- Feature snapshot, training dataset, baseline, and current feature statistic tables.
 
 CREATE TABLE IF NOT EXISTS ml.feature_snapshots (
-    snapshot_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    snapshot_id TEXT PRIMARY KEY DEFAULT gen_random_uuid()::text,
     snapshot_name TEXT NOT NULL UNIQUE,
     source_project TEXT NOT NULL,
     source_layer TEXT NOT NULL,
@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS ml.feature_snapshots (
 CREATE TABLE IF NOT EXISTS ml.training_datasets (
     training_dataset_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     dataset_name TEXT NOT NULL UNIQUE,
-    snapshot_id UUID NOT NULL REFERENCES ml.feature_snapshots(snapshot_id) ON DELETE RESTRICT,
+    snapshot_id TEXT NOT NULL REFERENCES ml.feature_snapshots(snapshot_id) ON DELETE RESTRICT,
     dataset_version TEXT NOT NULL,
     feature_schema_version TEXT NOT NULL,
     train_row_count BIGINT NOT NULL CHECK (train_row_count >= 0),
@@ -49,7 +49,7 @@ CREATE TABLE IF NOT EXISTS ml.training_datasets (
 
 CREATE TABLE IF NOT EXISTS ml.feature_baselines (
     baseline_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    snapshot_id UUID NOT NULL REFERENCES ml.feature_snapshots(snapshot_id) ON DELETE RESTRICT,
+    snapshot_id TEXT NOT NULL REFERENCES ml.feature_snapshots(snapshot_id) ON DELETE RESTRICT,
     training_dataset_id UUID REFERENCES ml.training_datasets(training_dataset_id) ON DELETE SET NULL,
     model_version TEXT,
     feature_schema_version TEXT NOT NULL,
@@ -70,7 +70,7 @@ CREATE TABLE IF NOT EXISTS ml.feature_baselines (
 
 CREATE TABLE IF NOT EXISTS ml.feature_current_stats (
     current_stat_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    snapshot_id UUID REFERENCES ml.feature_snapshots(snapshot_id) ON DELETE SET NULL,
+    snapshot_id TEXT REFERENCES ml.feature_snapshots(snapshot_id) ON DELETE SET NULL,
     model_version TEXT,
     feature_schema_version TEXT NOT NULL,
     feature_name TEXT NOT NULL,
