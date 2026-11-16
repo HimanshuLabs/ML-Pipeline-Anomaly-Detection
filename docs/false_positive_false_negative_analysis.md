@@ -361,8 +361,8 @@ Recommended response:
 
 * make the threshold less aggressive
 * add suppression rules for known benign patterns
-* segment thresholds by entity type or business domain
-* separate campaign anomalies from user-behavior anomalies
+* tune the noisy entity type's own cutoff: v004 (and v005) already train one Isolation Forest per entity type, each with its own learned cutoff at the shared 5% contamination; per-segment contamination and business-domain thresholds beyond entity type are still future work
+* review campaign anomalies apart from user-behavior anomalies (since v004 they are already scored by separate segment models, `campaign` and `user`)
 * add features that distinguish planned spikes from unexpected spikes
 * require drift confirmation before raising critical alerts
 * review records near the threshold boundary
@@ -403,7 +403,7 @@ Recommended response:
 * add domain-specific high-risk rules
 * add richer behavioral and temporal features
 * retrain with a more recent snapshot
-* segment the model by entity type
+* review the affected entity type's own model (the model is already segmented by entity type since v004: one Isolation Forest per type, each scoring only that type's features)
 * add replay tests with known bad patterns
 * add delayed-label backtesting
 * review false-negative candidates near the model boundary
@@ -497,7 +497,7 @@ Planned hardening:
 * human review queue
 * threshold backtesting
 * business-rule overlays for critical conditions
-* per-domain thresholds
+* per-segment contamination and business-domain thresholds (each entity type already has its own model and learned cutoff since v004; the contamination is still one shared 5%)
 * incident-linked model evaluation
 
 ---
@@ -768,7 +768,7 @@ Mitigation:
 * reduce sensitivity
 * review false-positive candidates
 * add domain-specific suppression
-* segment thresholds
+* tune the affected segment's contamination (the per-entity-type segments themselves exist since v004)
 * collect labels
 
 ### Failure mode: threshold too weak
@@ -814,10 +814,10 @@ Result:
 
 Mitigation:
 
-* domain-specific thresholds
-* entity-type segmentation
-* separate business and system anomaly paths
-* threshold review by source domain
+* entity-type segmentation: in place since v004 (and in v005): one Isolation Forest per entity type, so each type has its own model and its own learned cutoff instead of one global threshold
+* domain-specific thresholds beyond entity type (future)
+* separate business and system anomaly paths (future)
+* threshold review by source domain (future)
 
 ### Failure mode: alert volume grows without investigation feedback
 

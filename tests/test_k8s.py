@@ -535,6 +535,22 @@ def test_runbook_promotes_v005_then_really_rolls_back_to_v004_on_every_replica()
     # Project 5's view of the result, without logging in as project5_reader.
     assert '"SET ROLE project5_reader"' in step
     assert "bad" in step and "md5(string_agg(" in step
+    # The same signature query in compose, as project5_reader itself, diffed against the
+    # cluster's output without psql's SET line.
+    assert step.count('-c "$SIGNATURE_QUERY"') == 2
+    assert step.count("-At -F ' | '") == 2
+    assert (
+        "PGPASSWORD=\"$(grep '^PROJECT4_P5_READER_PASSWORD=' .env | cut -d= -f2-)\"" in step
+    )
+    assert (
+        "docker compose exec -T -e PGPASSWORD anomaly-postgres psql -h 127.0.0.1 "
+        "-U project5_reader -d project4_ml -At -F ' | '" in step
+    )
+    assert (
+        "grep -v '^SET$' \"$STATE/signatures.cluster\" | diff - \"$STATE/signatures.compose\""
+        in step
+    )
+    assert "--env-file" not in step
 
 
 def test_runbook_seed_expectations_match_the_committed_registry() -> None:

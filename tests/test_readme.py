@@ -231,6 +231,15 @@ DOCS_STALE_PHRASES_15F = {
         "## Current model state (2026-11-15)",
     ),
     "inference_design.md": ("no compatible target exists for v004 until v005",),
+    # Segmentation by entity type presented as future work; it exists since v004.
+    "false_positive_false_negative_analysis.md": (
+        "* segment thresholds by entity type or business domain\n",
+        "* separate campaign anomalies from user-behavior anomalies\n",
+        "* segment the model by entity type\n",
+        "* per-domain thresholds\n",
+        "* segment thresholds\n",
+        "Mitigation:\n\n* domain-specific thresholds\n* entity-type segmentation\n",
+    ),
     "kubernetes_runtime_validation.md": (
         "use-context",
         "PREVIOUS_CONTEXT",
@@ -319,9 +328,11 @@ def test_local_runbook_shows_the_disposable_test_database_recipe() -> None:
     assert "postgres:16.14" in runbook
     assert "dev_db() { docker run --rm --network host" in runbook
     assert (
-        "-e PROJECT4_TEST_DATABASE_URL=postgresql+psycopg2://manshu:test_only@127.0.0.1:5547/"
+        "-e PROJECT4_TEST_DATABASE_URL=postgresql+psycopg2://p4test:test_only@127.0.0.1:5547/"
         "project4_ml -e PROJECT4_REQUIRE_TEST_DATABASE=1" in runbook
     )
+    assert "-e POSTGRES_USER=p4test -e POSTGRES_PASSWORD=test_only" in runbook
+    assert "pg_isready -h 127.0.0.1 -p 5432 -U p4test -q" in runbook
     assert "dev_db env -u PYTHONPATH python -m pytest" in runbook
     assert "docker stop project4_pg_test" in runbook
     assert "`--network none`, so it cannot reach any database" in runbook
@@ -383,3 +394,44 @@ def test_readme_and_docs_have_no_home_or_scratch_paths() -> None:
     for path in (README, *sorted(DOCS.glob("*.md"))):
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             assert not HOME_OR_SCRATCH_PATH.search(line), f"{path.name}:{number}: {line}"
+
+
+# --- F1: the disposable test database role is p4test, never a personal name ------------------
+
+TEST_DB_ROLE = "p4test"
+PERSONAL_NAME = re.compile(r"\bmanshu\b", re.IGNORECASE)
+
+
+def test_readme_test_database_recipe_and_ci_service_create_the_same_role() -> None:
+    workflow = yaml.safe_load(CI.read_text(encoding="utf-8"))
+    service = workflow["jobs"]["validate"]["services"]["postgres"]["env"]
+    runbook = _section("Local runbook")
+
+    assert service["POSTGRES_USER"] == TEST_DB_ROLE
+    assert f"-e POSTGRES_USER={TEST_DB_ROLE} " in runbook
+    for step in (s for job in workflow["jobs"].values() for s in job["steps"]):
+        env = step.get("env") or {}
+        if env.get("PROJECT4_POSTGRES_PORT") == "5547":
+            assert env["PROJECT4_POSTGRES_USER"] == TEST_DB_ROLE, step["name"]
+        url = env.get("PROJECT4_TEST_DATABASE_URL")
+        if url:
+            assert url.startswith(f"postgresql+psycopg2://{TEST_DB_ROLE}:"), step["name"]
+
+
+def test_no_personal_name_in_the_test_database_recipes() -> None:
+    # Scoped to the disposable test database (CI service, README recipe, test URLs).
+    # `manshu` remains the owner role of the compose database on 5435, which Project 5
+    # connects as, and the absolute paths inside the committed v001/v002 bundles; both
+    # are outside this guard on purpose.
+    texts = {
+        "ci.yml": CI.read_text(encoding="utf-8"),
+        "README Local runbook": _section("Local runbook"),
+        **{
+            path.name: path.read_text(encoding="utf-8")
+            for path in sorted((REPO_ROOT / "tests").glob("*.py"))
+        },
+    }
+    for name, text in texts.items():
+        for number, line in enumerate(text.splitlines(), 1):
+            if "5547" in line or "project4_pg_test" in line or "POSTGRES_USER:" in line:
+                assert not PERSONAL_NAME.search(line), f"{name}:{number}: {line.strip()}"

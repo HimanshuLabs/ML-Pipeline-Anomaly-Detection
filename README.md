@@ -959,15 +959,16 @@ host network with the test database set:
 
 ```bash
 docker run --rm -d --name project4_pg_test -p 127.0.0.1:5547:5432 \
-  -e POSTGRES_USER=manshu -e POSTGRES_PASSWORD=test_only -e POSTGRES_DB=project4_ml postgres:16.14
-timeout 90 sh -c 'until docker exec project4_pg_test pg_isready -h 127.0.0.1 -p 5432 -U manshu -q; do sleep 1; done'
-dev_db() { docker run --rm --network host --user "$(id -u):$(id -g)" -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 -e PROJECT4_TEST_DATABASE_URL=postgresql+psycopg2://manshu:test_only@127.0.0.1:5547/project4_ml -e PROJECT4_REQUIRE_TEST_DATABASE=1 -v "$PWD":/app -w /app --entrypoint "" project4-anomaly-dev:local "$@"; }
+  -e POSTGRES_USER=p4test -e POSTGRES_PASSWORD=test_only -e POSTGRES_DB=project4_ml postgres:16.14
+timeout 90 sh -c 'until docker exec project4_pg_test pg_isready -h 127.0.0.1 -p 5432 -U p4test -q; do sleep 1; done'
+dev_db() { docker run --rm --network host --user "$(id -u):$(id -g)" -e HOME=/tmp -e PYTHONDONTWRITEBYTECODE=1 -e PROJECT4_TEST_DATABASE_URL=postgresql+psycopg2://p4test:test_only@127.0.0.1:5547/project4_ml -e PROJECT4_REQUIRE_TEST_DATABASE=1 -v "$PWD":/app -w /app --entrypoint "" project4-anomaly-dev:local "$@"; }
 dev_db env -u PYTHONPATH python -m pytest -p no:cacheprovider -o addopts= -q
 docker stop project4_pg_test   # --rm removes the container (and its data) on stop
 ```
 
-The container is disposable: its password exists only for this throwaway database, and
-nothing else ever connects to 5547.
+The container is disposable: its role `p4test` (the same role CI's Postgres service
+creates) and its password exist only for this throwaway database, and nothing else ever
+connects to 5547.
 
 Outside Docker, a Python 3.12 virtual environment works too:
 `python3.12 -m venv .venv && . .venv/bin/activate && pip install -r requirements-dev.txt -c constraints.txt`.
