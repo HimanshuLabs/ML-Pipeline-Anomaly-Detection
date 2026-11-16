@@ -788,18 +788,18 @@ def _only_v003_status_and_notes_changed(before, after) -> None:
 
 @pytest.fixture()
 def real_v003_registered() -> None:
-    """The real v003 entry, as the candidate it was before retirement, in the mirror only.
+    """The v003 entry, as the candidate it was before retirement, in the mirror only.
 
-    The real registry has v003 retired since the owner ran the retirement; the
-    per-test mirror is put back to the pre-retirement state so the retirement
-    path is exercised against the real v003 entry and files.
+    The fixture registry the mirror starts from (conftest) has v003 retired, as the
+    owner retired it; the per-test mirror is put back to the pre-retirement state so
+    the retirement path is exercised against the v003 entry and its real files.
     """
     from anomaly_detection import registry
     from anomaly_detection.registry import ModelRegistryEntry, save_model_registry
 
     entries = load_model_registry(registry.DEFAULT_REGISTRY_PATH)
     if not any(entry.model_version == "v003" for entry in entries):
-        pytest.skip("v003 is not in the real registry")
+        pytest.skip("v003 is not in the fixture registry")
 
     save_model_registry(
         [
@@ -824,7 +824,7 @@ def test_retire_v003_in_file_mode_changes_only_its_status_and_note_and_keeps_fil
     from anomaly_detection import registry
     from anomaly_detection.registry import retire_model_version
 
-    registry_path = registry.DEFAULT_REGISTRY_PATH  # per-test mirror of the real registry
+    registry_path = registry.DEFAULT_REGISTRY_PATH  # per-test mirror of the fixture registry
     pointer_before = registry.DEFAULT_ACTIVE_MODEL_PATH.read_bytes()
     entries_before = load_model_registry(registry_path)
     files_before = _v003_file_hashes()
@@ -1168,3 +1168,60 @@ def test_registering_an_existing_version_again_is_refused_by_default(
             )
 
     assert _bytes(registry_path, pointer_path) == before
+
+
+# --- hardening H4: tests run on a fixture registry, not on the committed lifecycle state ---
+
+FIXTURE_STATE = Path(__file__).resolve().parent / "fixtures" / "repo_state"
+
+
+def test_the_per_test_mirror_is_the_fixture_byte_for_byte(isolate_repo_state: Path) -> None:
+    from anomaly_detection import registry
+
+    assert registry.DEFAULT_REGISTRY_PATH.is_relative_to(isolate_repo_state)
+    assert registry.DEFAULT_REGISTRY_PATH.read_bytes() == (
+        FIXTURE_STATE / "model_registry.json"
+    ).read_bytes()
+    assert registry.DEFAULT_ACTIVE_MODEL_PATH.read_bytes() == (
+        FIXTURE_STATE / "active_model.yaml"
+    ).read_bytes()
+
+
+def test_the_fixture_registry_loads_and_saves_losslessly(tmp_path: Path) -> None:
+    from anomaly_detection.registry import save_model_registry
+
+    fixture_path = FIXTURE_STATE / "model_registry.json"
+    raw_models = json.loads(fixture_path.read_text(encoding="utf-8"))["models"]
+
+    entries = load_model_registry(fixture_path)
+    save_model_registry(entries, tmp_path / "model_registry.json")
+
+    assert [entry.to_dict() for entry in entries] == raw_models
+    assert json.loads((tmp_path / "model_registry.json").read_text(encoding="utf-8"))[
+        "models"
+    ] == raw_models
+
+
+def test_the_fixture_pointer_names_its_single_production_entry() -> None:
+    entries = load_model_registry(FIXTURE_STATE / "model_registry.json")
+    pointer = read_active_model_pointer(FIXTURE_STATE / "active_model.yaml")
+
+    production = [entry for entry in entries if entry.status == "production"]
+    assert [entry.model_version for entry in production] == [pointer.active_model_version]
+    assert pointer.model_name == production[0].model_name
+    assert pointer.artifact_path == production[0].artifact_path
+    raw_pointer = yaml.safe_load((FIXTURE_STATE / "active_model.yaml").read_text("utf-8"))
+    assert raw_pointer["dataset_snapshot_id"] == production[0].snapshot_id
+
+
+def test_every_fixture_bundle_exists_and_passes_the_feature_spec_check() -> None:
+    from anomaly_detection.registry import load_verified_feature_spec, resolve_project_path
+
+    entries = load_model_registry(FIXTURE_STATE / "model_registry.json")
+
+    assert entries
+    for entry in entries:
+        # Repo-relative paths to the real, immutable bundles.
+        assert not Path(entry.artifact_path).is_absolute(), entry.model_version
+        assert resolve_project_path(entry.artifact_path).is_file(), entry.model_version
+        assert load_verified_feature_spec(entry).feature_names, entry.model_version

@@ -12,8 +12,10 @@ from fastapi.testclient import TestClient
 
 from anomaly_detection.online_inference import OnlineInferenceService
 from api.main import app, state
+from tests.conftest import FIXTURE_REGISTRY_PATH
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+# Used only to locate the registry inside the per-test mirror (whose content is the fixture).
 REAL_REGISTRY_PATH = REPO_ROOT / "artifacts" / "models" / "_registry" / "model_registry.json"
 
 
@@ -175,9 +177,10 @@ def test_rollback_endpoint_dry_run_rejects_incompatible_targets_without_mutation
     isolate_repo_state: Path,
     admin_headers: dict[str, str],
 ) -> None:
-    # The real registry has no compatible rollback target for the active model
-    # (v001 is retired and has different feature_names), so the dry run must refuse.
-    registry_models = json.loads(REAL_REGISTRY_PATH.read_text(encoding="utf-8"))["models"]
+    # The fixture registry has no compatible rollback target for the active v004 (v001 and
+    # v003 are retired, v005 is rolled_back, v002 is a single model), so the dry run must
+    # refuse.
+    registry_models = json.loads(FIXTURE_REGISTRY_PATH.read_text(encoding="utf-8"))["models"]
     other_versions = [
         model["model_version"]
         for model in registry_models
