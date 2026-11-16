@@ -147,6 +147,33 @@ def test_ci_gate_list_mirrors_the_workflow_steps() -> None:
     assert sorted(match.group(1).replace("`", "") for match in named) == sorted(steps)
 
 
+CI_RUN_URL = re.compile(
+    r"https://github\.com/HimanshuLabs/ML-Pipeline-Anomaly-Detection/actions/runs/\d+"
+)
+# Replaced by the first-run record (F6); the section must not fall back to it.
+CI_PENDING_PHRASES = (
+    "the latest *ML Platform Validation* run in the repository's Actions tab",
+    "pending",
+    "after the first GitHub run",
+)
+
+
+def _ci_evidence_problems(readme: str) -> list[str]:
+    section = readme.split("\n## CI/CD validation\n", 1)[1].split("\n## ", 1)[0]
+    problems = [f"pending wording: {phrase!r}" for phrase in CI_PENDING_PHRASES
+                if phrase.lower() in section.lower()]
+    if not CI_RUN_URL.search(section):
+        problems.append("no GitHub Actions run URL of this repository")
+    # The sha is not checked against git history: CI checks out a shallow clone.
+    if not re.search(r"commit `[0-9a-f]{7,40}`", section):
+        problems.append("no commit sha (7+ hex characters) named")
+    return problems
+
+
+def test_ci_section_records_the_first_ci_run() -> None:
+    assert _ci_evidence_problems(_text()) == []
+
+
 def test_local_runbook_wraps_docker_run_in_shell_functions() -> None:
     runbook = _section("Local runbook")
 
