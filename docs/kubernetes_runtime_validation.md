@@ -183,11 +183,11 @@ print(json.load(urllib.request.urlopen(request)))'
 ## 7. Promote v005, then a real rollback to v004, on every replica
 
 The seeded registry has v004 active and v005 `rolled_back`. `registry promote` accepts a
-registered version whatever its status, after the same serving check as always; it
-makes v005 production and archives v004. v004 is then the only compatible rollback
-target: v001 and v003 are retired, and v002 (a single model) is never compatible with the
-segmented v005. One pod changes the shared pointer; every replica follows within one
-poll. The pointer goes 1 (seed) → 2 (promote) → 3 (rollback).
+`rolled_back` version (only a `retired` one needs `--allow-retired`), after the same
+serving check as always; it makes v005 production and archives v004. v004 is then the
+only compatible rollback target: v001 and v003 are retired, and v002 (a single model) is
+never compatible with the segmented v005. One pod changes the shared pointer; every
+replica follows within one poll. The pointer goes 1 (seed) → 2 (promote) → 3 (rollback).
 
 The admin token is read into a shell variable; it never appears on screen or in the
 shell history (the history holds only the command that reads it).
