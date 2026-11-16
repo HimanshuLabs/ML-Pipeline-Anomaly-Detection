@@ -627,13 +627,51 @@ def real_source_snapshot_row(snapshot_metadata: Mapping[str, Any]) -> dict[str, 
     }
 
 
+def real_source_training_dataset_row(snapshot_metadata: Mapping[str, Any]) -> dict[str, Any]:
+    """ml.training_datasets row for a real-source snapshot that carries a training_dataset_id.
+
+    Built only from the bundle's metadata.json training_snapshot_metadata (never the
+    snapshot directory, which is not committed). feature_schema_version is the
+    snapshot's extract label, as in its ml.feature_snapshots row; the model's own
+    label lives in ml.model_registry.
+    """
+
+    sha256 = str(snapshot_metadata["content_sha256"])
+    return {
+        "training_dataset_id": snapshot_metadata["training_dataset_id"],
+        "dataset_name": snapshot_metadata["snapshot_id"],
+        "snapshot_id": snapshot_metadata["snapshot_id"],
+        "dataset_version": sha256[:12],
+        "feature_schema_version": snapshot_metadata["feature_schema_version"],
+        "train_row_count": int(snapshot_metadata["row_count"]),
+        "validation_row_count": 0,
+        "test_row_count": 0,
+        "feature_columns": json.dumps(list(snapshot_metadata.get("feature_columns") or [])),
+        "label_column": None,
+        "dataset_path": None,
+        "data_quality_status": snapshot_metadata.get("data_quality_status") or "pending",
+        "created_at": snapshot_metadata.get("created_at"),
+        "created_by": REAL_SOURCE_SNAPSHOT_WRITER,
+        "notes": f"content_sha256={sha256}",
+    }
+
+
 def snapshot_rows_for_training_metadata(
     snapshot_metadata: Mapping[str, Any],
 ) -> list[tuple[str, dict[str, Any]]]:
-    """Snapshot (and training dataset) rows from metadata.json training_snapshot_metadata."""
+    """Snapshot (and training dataset) rows from metadata.json training_snapshot_metadata.
+
+    In FK order: ml.feature_snapshots, then ml.training_datasets. Real-source
+    metadata without a training_dataset_id (v002-v004) gives the snapshot row only.
+    """
 
     if snapshot_metadata.get("snapshot_type") == "real_source_extract":
-        return [("ml.feature_snapshots", real_source_snapshot_row(snapshot_metadata))]
+        rows = [("ml.feature_snapshots", real_source_snapshot_row(snapshot_metadata))]
+        if snapshot_metadata.get("training_dataset_id"):
+            rows.append(
+                ("ml.training_datasets", real_source_training_dataset_row(snapshot_metadata))
+            )
+        return rows
 
     from anomaly_detection.training_snapshot import (
         TrainingSnapshotMetadata,

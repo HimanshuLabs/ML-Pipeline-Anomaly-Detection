@@ -38,11 +38,18 @@ from anomaly_detection.registry import (
     RegistryError,
     ensure_database_initialized,
     load_registry_state,
+    load_verified_feature_spec,
     read_bundle_paths,
     register_model_from_artifacts,
 )
-from anomaly_detection.segmented_model import SegmentedIsolationForest, score_distribution
-from anomaly_detection.source_extract import SEGMENT_FEATURE_COLUMNS
+from anomaly_detection.segmented_model import (
+    FeatureSpec,
+    SegmentedIsolationForest,
+    feature_spec_for,
+    feature_spec_from_metadata,
+    score_distribution,
+)
+from anomaly_detection.source_extract import SEGMENT_FEATURE_COLUMNS, content_sha256
 from anomaly_detection.source_extract import load_config as load_source_extract_config
 from anomaly_detection.tracking import TrackingError, training_run
 from anomaly_detection.training import (
@@ -181,13 +188,12 @@ def snapshot_refusal_reasons(
     return reasons
 
 
-def build_evaluation_report(
-    *,
-    artifact: ModelArtifactMetadata,
+def _score_snapshot(
+    metadata_path: str | Path,
     snapshot_frame: pd.DataFrame,
     snapshot_metadata: dict[str, Any],
-) -> dict[str, Any]:
-    """Anomaly rate and score distribution of the trained model, overall and per entity type."""
+) -> tuple[pd.DataFrame, np.ndarray, np.ndarray, np.ndarray]:
+    """(feature matrix, entity types, scores, is_anomaly) of one bundle on a snapshot."""
 
     if "entity_type" not in snapshot_frame.columns:
         raise RetrainError("Snapshot features have no entity_type column.")
@@ -196,7 +202,7 @@ def build_evaluation_report(
         snapshot_frame,
         snapshot_metadata=snapshot_metadata,
     )
-    model = load_trained_model(read_bundle_paths(artifact.metadata_path)["model_path"])
+    model = load_trained_model(read_bundle_paths(metadata_path)["model_path"])
     entity_types = snapshot_frame["entity_type"].astype(str).to_numpy()
     # A segmented model routes each row by entity_type to its own segment.
     scoring_input = (
@@ -206,6 +212,161 @@ def build_evaluation_report(
     )
     scores = np.asarray(model.decision_function(scoring_input), dtype=float)
     is_anomaly = np.asarray(model.predict(scoring_input)) == -1
+    return feature_matrix, entity_types, scores, is_anomaly
+
+
+def _expected_feature_spec(
+    snapshot_frame: pd.DataFrame, snapshot_metadata: dict[str, Any]
+) -> FeatureSpec:
+    """The segment spec training will produce from this snapshot (as training resolves it)."""
+
+    present = sorted(set(snapshot_frame["entity_type"].astype(str)))
+    segments = {
+        t: list(SEGMENT_FEATURE_COLUMNS[t]) for t in present if t in SEGMENT_FEATURE_COLUMNS
+    }
+    names = [
+        str(name)
+        for name in snapshot_metadata.get("feature_columns") or []
+        if any(name in features for features in segments.values())
+    ]
+    return feature_spec_for(names, segments)
+
+
+def resolve_comparison_entry(
+    compare_with: str,
+    *,
+    entries: list[ModelRegistryEntry],
+    model_name: str,
+    expected_spec: FeatureSpec,
+) -> ModelRegistryEntry:
+    """The registered version to compare with; refused unless it has the same segment spec.
+
+    Same segment spec is what makes the two versions rollback targets of each other.
+    """
+
+    entry = next(
+        (e for e in entries if e.model_name == model_name and e.model_version == compare_with),
+        None,
+    )
+    if entry is None:
+        raise RetrainError(f"--compare-with {compare_with} is not registered for {model_name}")
+    try:
+        previous_spec = load_verified_feature_spec(entry)
+    except RegistryError as exc:
+        raise RetrainError(f"--compare-with {compare_with} cannot be loaded: {exc}") from exc
+    difference = previous_spec.difference(expected_spec)
+    if difference is not None:
+        raise RetrainError(
+            f"--compare-with {compare_with}: its segment spec is not the new model's "
+            f"({difference}); a rollback between them would be refused"
+        )
+    return entry
+
+
+def _snapshot_sha256(snapshot_metadata: dict[str, Any], training_root: str | Path) -> str | None:
+    """content_sha256 of a model's training snapshot: from its metadata, else its directory."""
+
+    recorded = snapshot_metadata.get("content_sha256")
+    if recorded:
+        return str(recorded)
+    snapshot_id = snapshot_metadata.get("snapshot_id")
+    root = Path(training_root)
+    if not snapshot_id or not root.is_dir():
+        return None
+    matches = sorted(root.rglob(f"snapshot_id={snapshot_id}/features.parquet"))
+    return content_sha256(read_training_snapshot(matches[-1])) if matches else None
+
+
+def _flag_comparison(
+    keys: np.ndarray, previous: np.ndarray, new: np.ndarray
+) -> dict[str, Any]:
+    rows = int(len(keys))
+    flagged_previous = set(keys[previous].tolist())
+    flagged_new = set(keys[new].tolist())
+    both = flagged_previous & flagged_new
+    union = flagged_previous | flagged_new
+    return {
+        "row_count": rows,
+        "previous_flag_rate": float(previous.mean()) if rows else None,
+        "new_flag_rate": float(new.mean()) if rows else None,
+        "flagged_previous": len(flagged_previous),
+        "flagged_new": len(flagged_new),
+        "flagged_both": len(both),
+        "jaccard": len(both) / len(union) if union else None,
+    }
+
+
+def build_comparison(
+    *,
+    previous_entry: ModelRegistryEntry,
+    artifact: ModelArtifactMetadata,
+    snapshot_frame: pd.DataFrame,
+    snapshot_metadata: dict[str, Any],
+    training_root: str | Path,
+) -> dict[str, Any]:
+    """Score the new snapshot with the previous and the new version and compare the flags.
+
+    Evidence only (no gate): flag rates, and the Jaccard overlap of flagged entities
+    (entity_type|entity_id), overall and per entity type.
+    """
+
+    new_spec = feature_spec_from_metadata(artifact.to_dict())
+    difference = load_verified_feature_spec(previous_entry).difference(new_spec)
+    if difference is not None:
+        raise RetrainError(
+            f"{artifact.model_version} and {previous_entry.model_version}: segment spec "
+            f"differs ({difference}); the bundle is written but not registered"
+        )
+
+    previous_metadata = json.loads(
+        read_bundle_paths(previous_entry.metadata_path)["metadata_path"].read_text(
+            encoding="utf-8"
+        )
+    )
+    previous_snapshot = previous_metadata.get("training_snapshot_metadata") or {}
+    _, entity_types, _, previous_flags = _score_snapshot(
+        previous_entry.metadata_path, snapshot_frame, snapshot_metadata
+    )
+    _, _, _, new_flags = _score_snapshot(artifact.metadata_path, snapshot_frame, snapshot_metadata)
+    keys = np.asarray(
+        [
+            f"{t}|{e}"
+            for t, e in zip(entity_types, snapshot_frame["entity_id"].astype(str), strict=True)
+        ]
+    )
+
+    return {
+        "previous_model_version": previous_entry.model_version,
+        "new_model_version": artifact.model_version,
+        "segment_spec_equal": True,
+        "scored_snapshot_id": snapshot_metadata.get("snapshot_id"),
+        "new_snapshot_content_sha256": snapshot_metadata.get("content_sha256")
+        or content_sha256(snapshot_frame),
+        "previous_snapshot_id": previous_snapshot.get("snapshot_id"),
+        "previous_snapshot_content_sha256": _snapshot_sha256(previous_snapshot, training_root),
+        "overall": _flag_comparison(keys, previous_flags, new_flags),
+        "entity_types": {
+            entity_type: _flag_comparison(
+                keys[entity_types == entity_type],
+                previous_flags[entity_types == entity_type],
+                new_flags[entity_types == entity_type],
+            )
+            for entity_type in sorted(set(entity_types))
+        },
+    }
+
+
+def build_evaluation_report(
+    *,
+    artifact: ModelArtifactMetadata,
+    snapshot_frame: pd.DataFrame,
+    snapshot_metadata: dict[str, Any],
+) -> dict[str, Any]:
+    """Anomaly rate and score distribution of the trained model, overall and per entity type."""
+
+    feature_matrix, entity_types, scores, is_anomaly = _score_snapshot(
+        artifact.metadata_path, snapshot_frame, snapshot_metadata
+    )
 
     present = sorted(set(entity_types))
     unexpected = [t for t in present if t not in EXPECTED_ENTITY_TYPES]
@@ -258,8 +419,13 @@ def retrain(
     artifact_root: str | Path | None = None,
     registry_path: str | Path = DEFAULT_REGISTRY_PATH,
     source_extract_config_path: str | Path = DEFAULT_SOURCE_EXTRACT_CONFIG_PATH,
+    compare_with: str | None = None,
 ) -> RetrainResult:
-    """Train a candidate from a real-source snapshot, evaluate it, and register it."""
+    """Train a candidate from a real-source snapshot, evaluate it, and register it.
+
+    compare_with: a registered version with the same segment spec (refused before
+    training otherwise); evaluation_report.json then gets a "comparison" section.
+    """
 
     if not re.fullmatch(r"v\d+", model_version):
         raise RetrainError(f"model version must look like v003; got {model_version!r}")
@@ -294,6 +460,17 @@ def retrain(
         )
 
     features_path = snapshot_dir / "features.parquet"
+    snapshot_frame = read_training_snapshot(features_path)
+    previous_entry = None
+    if compare_with is not None:
+        # Before training: the version to compare with must be rollback-compatible.
+        previous_entry = resolve_comparison_entry(
+            compare_with,
+            entries=state.entries,
+            model_name=config.model_name,
+            expected_spec=_expected_feature_spec(snapshot_frame, snapshot_metadata),
+        )
+
     # Strict tracking (PROJECT4_MLFLOW_REQUIRED) refuses here, before any file is written.
     with training_run(
         entrypoint="retrain", model_version=model_version, model_name=config.model_name
@@ -310,9 +487,17 @@ def retrain(
 
         report = build_evaluation_report(
             artifact=artifact,
-            snapshot_frame=read_training_snapshot(features_path),
+            snapshot_frame=snapshot_frame,
             snapshot_metadata=snapshot_metadata,
         )
+        if previous_entry is not None:
+            report["comparison"] = build_comparison(
+                previous_entry=previous_entry,
+                artifact=artifact,
+                snapshot_frame=snapshot_frame,
+                snapshot_metadata=snapshot_metadata,
+                training_root=training_root,
+            )
         bundle_paths = read_bundle_paths(artifact.metadata_path)
         report_path = bundle_paths["artifact_dir"] / EVALUATION_REPORT_NAME
         with report_path.open("w", encoding="utf-8") as file:
@@ -389,6 +574,19 @@ def print_summary(result: RetrainResult) -> None:
         f"active_model_version={result.active_model_version_after} "
         f"(before: {result.active_model_version_before})"
     )
+    comparison = report.get("comparison")
+    if comparison:
+        print(
+            f"compared with {comparison['previous_model_version']} on this snapshot "
+            "(flag rates previous -> new, Jaccard of flagged entities):"
+        )
+        groups = {"overall": comparison["overall"], **comparison["entity_types"]}
+        for group, stats in groups.items():
+            print(
+                f"  {group:<14}{_format(stats['previous_flag_rate'], '.4f'):>8} -> "
+                f"{_format(stats['new_flag_rate'], '.4f'):<8}"
+                f"jaccard={_format(stats['jaccard'], '.3f')}"
+            )
     print(f"artifact_dir={result.artifact.artifact_dir}")
     print(f"evaluation_report={result.evaluation_report_path}")
     print(f"mlflow_run_id={result.artifact.mlflow_run_id}")
@@ -408,6 +606,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--training-root", default=str(DEFAULT_TRAINING_ROOT))
     parser.add_argument("--config", default=str(DEFAULT_MODEL_CONFIG_PATH))
     parser.add_argument("--artifact-root", default=None, help="Optional artifact root override.")
+    parser.add_argument(
+        "--compare-with",
+        default=None,
+        help="A registered version with the same segment spec (e.g. the active one): "
+        "evaluation_report.json then compares its flags with the new model's.",
+    )
     return parser.parse_args(argv)
 
 
@@ -424,6 +628,7 @@ def main(argv: list[str] | None = None) -> int:
             training_root=args.training_root,
             config_path=args.config,
             artifact_root=args.artifact_root,
+            compare_with=args.compare_with,
         )
     except (RetrainError, TrainingError, RegistryError, TrackingError) as exc:
         print(f"REFUSED: {exc}", file=sys.stderr)

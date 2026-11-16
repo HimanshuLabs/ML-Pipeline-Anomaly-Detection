@@ -152,6 +152,16 @@ nor in the shell history:
     read -rs PROJECT1_POSTGRES_PASSWORD && export PROJECT1_POSTGRES_PASSWORD
     read -rs PROJECT23_POSTGRES_PASSWORD && export PROJECT23_POSTGRES_PASSWORD
 
+The extract is read-only against both sources. Every source session is opened with
+`-c default_transaction_read_only=on -c statement_timeout=120000` (only the source
+engines; Project 4's own database engine is unchanged), and before each table is read
+the extract checks `SHOW transaction_read_only` is `on` and refuses otherwise, before any
+row is read. It issues only `SELECT *` on the configured tables and on
+`warehouse.dim_customer` (now listed in the snapshot's `source_tables`). No DDL, no
+temporary tables, no writes. It runs on the host network against 127.0.0.1:5433 and
+127.0.0.1:5434, so the sources never listen beyond loopback. Never pass `--env-file .env`
+to it: only the two source passwords, by name.
+
 Generate a real-source snapshot. `-e NAME` without a value passes each variable from the
 environment, so the passwords never appear on a command line:
 
@@ -160,9 +170,17 @@ environment, so the passwords never appear on a command line:
       -v "$PWD":/app -w /app --entrypoint "" project4-anomaly-tools:local \
       python -m anomaly_detection.source_extract --config configs/source_extract.yaml --output-root data/features/training
 
-Train a candidate from it (never promotes):
+The snapshot's `metadata.json` records `content_sha256` (the data, rows sorted by every
+column in a fixed order, `extracted_at` excluded; `features.parquet` is written in the same
+order) and, when it passed validation, `training_dataset_id`
+(`uuid5` of `project4.training_dataset|<snapshot_id>|<content_sha256>|<feature_set_fingerprint>`).
+Re-extracting unchanged sources gives the same `content_sha256` under a new
+`snapshot_id`, and so a new `training_dataset_id`.
 
-    tools python -m anomaly_detection.retrain --snapshot latest --model-version v005
+Train a candidate from it (never promotes), comparing it with the active version on the
+new snapshot:
+
+    tools python -m anomaly_detection.retrain --snapshot latest --model-version v005 --compare-with v004
 
 Validate:
 

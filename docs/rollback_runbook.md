@@ -114,6 +114,13 @@ Expected result:
 - `audit.rollback_events` and `logs/alerts/rollback_events.jsonl` each get one event.
 - `model_rollback_total` increments.
 
+The compose API does not mount the repository's `configs/` or registry, so its file
+mirror is written inside its own container. Bring the repository's
+`configs/active_model.yaml` and `model_registry.json` back in line with the database
+(batch scoring reads the pointer file); `mirror` only reads the database:
+
+    tools python -m anomaly_detection.registry mirror
+
 ## Verify the active model
 
     curl -s http://127.0.0.1:8014/model/active    # model_version is the target

@@ -1005,6 +1005,25 @@ def register_model_from_artifacts(
     Returns:
         Registered model entry.
     """
+    entry = _entry_from_bundle(
+        metadata_path=metadata_path,
+        status=status,
+        approved_for_prod=approved_for_prod,
+        notes=notes,
+    )
+
+    return _add_entry(entry, registry_path=registry_path, replace_existing=replace_existing)
+
+
+def _entry_from_bundle(
+    *,
+    metadata_path: str | Path,
+    status: str,
+    approved_for_prod: bool,
+    notes: str | None,
+) -> ModelRegistryEntry:
+    """The registry entry a trained bundle's metadata.json describes (nothing is written)."""
+
     _validate_status(status)
 
     if approved_for_prod and status != "production":
@@ -1037,7 +1056,7 @@ def register_model_from_artifacts(
     bundle_paths = read_bundle_paths(metadata_path, artifact_metadata)
     baseline_stats = _read_json(bundle_paths["baseline_stats_path"])
 
-    entry = _build_entry_from_artifact_metadata(
+    return _build_entry_from_artifact_metadata(
         artifact_metadata=artifact_metadata,
         bundle_paths=bundle_paths,
         baseline_stats=baseline_stats,
@@ -1046,7 +1065,130 @@ def register_model_from_artifacts(
         notes=notes,
     )
 
-    return _add_entry(entry, registry_path=registry_path, replace_existing=replace_existing)
+
+# Set by the registry over a version's life; every other field comes from the bundle.
+_LIFECYCLE_FIELDS = frozenset(
+    {"status", "approved_for_prod", "promoted_at_utc", "archived_at_utc", "created_at_utc", "notes"}
+)
+REGISTER_NOTES = "Registered as candidate by `registry register`. Not promoted."
+
+
+def register_bundle(
+    *,
+    metadata_path: str | Path,
+    notes: str | None = None,
+    registry_path: str | Path = DEFAULT_REGISTRY_PATH,
+    active_model_path: str | Path = DEFAULT_ACTIVE_MODEL_PATH,
+) -> tuple[ModelRegistryEntry, bool]:
+    """Register a trained bundle as a candidate; (entry, True when something was written).
+
+    The serving check runs first. Then, in the store's one commit (Postgres: one
+    transaction), the bundle's snapshot and training dataset rows are inserted if
+    absent, in FK order, before the registry row. Re-registering the same bundle
+    changes nothing; a different bundle under a registered version is refused.
+    Only the tables project4_app may write are touched. Never promotes.
+    """
+
+    entry = _entry_from_bundle(
+        metadata_path=metadata_path,
+        status=ModelStatus.CANDIDATE.value,
+        approved_for_prod=False,
+        notes=notes or REGISTER_NOTES,
+    )
+    verify_servable(entry)
+
+    state = load_registry_state(
+        registry_path=registry_path,
+        active_model_path=active_model_path,
+        model_name=entry.model_name,
+    )
+    ensure_database_initialized(state, entry.model_name)
+    existing = next((e for e in state.entries if _entry_key(e) == _entry_key(entry)), None)
+    if existing is not None:
+        differing = sorted(
+            name
+            for name in _ENTRY_FIELD_NAMES - _LIFECYCLE_FIELDS
+            if getattr(existing, name) != getattr(entry, name)
+        )
+        if differing:
+            raise RegistryError(
+                f"{entry.model_name} {entry.model_version} is already registered with "
+                f"different content ({', '.join(differing)}); nothing was changed"
+            )
+        return existing, False
+
+    commit_registry_change(
+        state=state,
+        updated_entries=[*state.entries, entry],
+        registry_path=registry_path,
+        active_model_path=active_model_path,
+        updated_by="registration",
+    )
+    return entry, True
+
+
+def mirror_from_database(
+    *,
+    model_name: str | None = None,
+    registry_path: str | Path = DEFAULT_REGISTRY_PATH,
+    active_model_path: str | Path = DEFAULT_ACTIVE_MODEL_PATH,
+) -> RegistryState:
+    """Rewrite the registry JSON and pointer YAML from the database; reads only.
+
+    The files are written exactly as a promote or rollback that left the database
+    in this state writes them (same entries in database order, same pointer notes).
+    Explicit, so it writes even when PROJECT4_REGISTRY_FILE_MIRROR is off.
+    """
+
+    state = load_registry_state(
+        registry_path=registry_path,
+        active_model_path=active_model_path,
+        model_name=model_name,
+    )
+    if state.source != POINTER_SOURCE_POSTGRES:
+        raise RegistryError(
+            "mirror needs the database (PROJECT4_POSTGRES_*); without it the files are the store"
+        )
+    ensure_database_initialized(state)
+
+    database = _database()
+    engine = database.get_engine()
+    try:
+        with engine.connect() as connection:
+            pointer_row = database.read_active_pointer(connection, state.model_name)
+    except Exception as exc:  # noqa: BLE001 - any database failure means "cannot read"
+        raise RegistryStorageError(
+            f"registry database could not be read: {type(exc).__name__}"
+        ) from exc
+    finally:
+        engine.dispose()
+
+    if pointer_row is None or int(pointer_row["pointer_version"]) != state.pointer_version:
+        raise RegistryStorageError(
+            f"the active pointer of {state.model_name} changed while it was read; "
+            "nothing was written, retry"
+        )
+    active_entry = next(
+        (
+            entry
+            for entry in state.entries
+            if entry.model_name == state.model_name
+            and entry.model_version == state.active_model_version
+        ),
+        None,
+    )
+    if active_entry is None:
+        raise RegistryError(
+            f"active model {state.model_name} {state.active_model_version} is not in the registry"
+        )
+
+    save_model_registry(list(state.entries), registry_path)
+    write_active_model_pointer(
+        entry=active_entry,
+        active_model_path=active_model_path,
+        notes=pointer_row.get("notes"),
+    )
+    return state
 
 
 def register_model(
@@ -1554,8 +1696,10 @@ def verify_servable(entry: ModelRegistryEntry) -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     """Registry tools.
 
+    python -m anomaly_detection.registry register --metadata-path <bundle>/metadata.json
     python -m anomaly_detection.registry retire --model-version v003 --notes "..."
     python -m anomaly_detection.registry promote --model-version v004
+    python -m anomaly_detection.registry mirror
 
     Postgres when PROJECT4_POSTGRES_* is configured (with the file mirror), else files.
     """
@@ -1583,9 +1727,54 @@ def main(argv: Sequence[str] | None = None) -> int:
     promote.add_argument("--model-version", required=True)
     promote.add_argument("--notes", default=None)
     promote.add_argument("--model-name", default=None, help="Default: model_config.yaml.")
+    register = commands.add_parser(
+        "register",
+        help="Add a trained bundle as a candidate after a serving check (idempotent; "
+        "never promotes).",
+    )
+    register.add_argument("--metadata-path", required=True, help="The bundle's metadata.json.")
+    register.add_argument("--notes", default=None)
+    mirror = commands.add_parser(
+        "mirror",
+        help="Rewrite the registry JSON and configs/active_model.yaml from the database.",
+    )
+    mirror.add_argument("--model-name", default=None, help="Default: model_config.yaml.")
     args = parser.parse_args(argv)
 
+    if args.command == "register":
+        try:
+            entry, written = register_bundle(metadata_path=args.metadata_path, notes=args.notes)
+            state = load_registry_state(model_name=entry.model_name)
+        except RegistryError as exc:
+            print(f"REFUSED: {exc}", file=sys.stderr)
+            return 1
+        outcome = (
+            "registered"
+            if written
+            else "already registered with the same content; nothing changed"
+        )
+        print(f"OK: {entry.model_name} {entry.model_version} {outcome} status={entry.status}")
+        print(
+            f"registry={state.source} active_model_version={state.active_model_version} "
+            f"pointer_version={state.pointer_version}"
+        )
+        return 0
+
     model_name = args.model_name or default_model_name()
+
+    if args.command == "mirror":
+        try:
+            state = mirror_from_database(model_name=model_name)
+        except RegistryError as exc:
+            print(f"REFUSED: {exc}", file=sys.stderr)
+            return 1
+        print(
+            f"OK: mirrored {len(state.entries)} registry entries and the active pointer "
+            f"({state.model_name} {state.active_model_version}, "
+            f"pointer_version {state.pointer_version}) from the database"
+        )
+        return 0
+
     try:
         if args.command == "retire":
             entry = retire_model_version(

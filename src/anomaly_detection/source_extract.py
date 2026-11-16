@@ -7,9 +7,11 @@ For retraining, Project 4 needs stable historical feature snapshots, not a live 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
+import uuid
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -95,6 +97,8 @@ class SnapshotWriteResult:
     feature_schema_version: str
     snapshot_type: str
     data_quality_status: str = "passed"
+    content_sha256: str | None = None
+    training_dataset_id: str | None = None
 
 
 class SourceExtractionError(RuntimeError):
@@ -147,8 +151,14 @@ def _password_from_env(env_var_name: str) -> str:
     return password
 
 
+# Every session on a Project 1 / Project 2/3 source is read-only on the server side
+# and bounded in time. Only the source engines get these; Project 4's own database
+# engine (database.get_engine) is unchanged.
+SOURCE_SESSION_OPTIONS = "-c default_transaction_read_only=on -c statement_timeout=120000"
+
+
 def build_postgres_engine(source: dict[str, Any]) -> Engine:
-    """Create a SQLAlchemy engine from one configured PostgreSQL source."""
+    """Create a read-only SQLAlchemy engine for one configured upstream source."""
 
     password = quote_plus(_password_from_env(source["password_env_var"]))
     username = quote_plus(str(source["username"]))
@@ -157,14 +167,31 @@ def build_postgres_engine(source: dict[str, Any]) -> Engine:
     database = source["database"]
 
     url = f"postgresql+psycopg2://{username}:{password}@{host}:{port}/{database}"
-    return create_engine(url, pool_pre_ping=True)
+    engine = create_engine(
+        url,
+        pool_pre_ping=True,
+        hide_parameters=True,
+        connect_args={"options": SOURCE_SESSION_OPTIONS},
+    )
+    return engine.execution_options(postgresql_readonly=True)
+
+
+def _require_read_only_session(connection: Any) -> None:
+    """Refuse to read from a session the server does not report as read-only."""
+
+    value = connection.execute(text("SHOW transaction_read_only")).scalar_one()
+    if str(value) != "on":
+        raise SourceExtractionError(
+            f"source session is not read-only (transaction_read_only={value!r}); nothing was read"
+        )
 
 
 def read_table(engine: Engine, schema: str, table: str) -> pd.DataFrame:
-    """Read a PostgreSQL table safely with quoted schema/table names."""
+    """Read a PostgreSQL table with quoted names, on a session proven read-only first."""
 
     query = text(f'SELECT * FROM "{schema}"."{table}"')
     with engine.connect() as connection:
+        _require_read_only_session(connection)
         dataframe = pd.read_sql_query(query, connection)
 
     if dataframe.empty:
@@ -805,10 +832,60 @@ def _source_table_names(config: dict[str, Any]) -> list[str]:
 
     project23 = config["project_2_3"]
     if project23.get("enabled", True):
-        for table_config in project23["tables"].values():
+        for name, table_config in project23["tables"].items():
             tables.append(f'{table_config["schema"]}.{table_config["table"]}')
+            if name == "web_events":
+                # extract_project23_features reads the customer dimension for web events too.
+                dimension = table_config.get("customer_dimension_table", DEFAULT_CUSTOMER_DIMENSION)
+                tables.append(f'{table_config["schema"]}.{dimension}')
 
     return tables
+
+
+# --- deterministic snapshot content -------------------------------------------------
+#
+# Only the web_customer rows are provably unique per (entity_type, entity_id) (a
+# groupby); the other types rely on upstream keys. So rows are ordered by every
+# column, in this fixed order, which makes the order total whatever the sources do.
+SNAPSHOT_LEADING_COLUMNS = (
+    "entity_type",
+    "entity_id",
+    "source_project",
+    "source_table",
+    "source_event_timestamp",
+)
+# When this run happened, not what was extracted: kept in the file, not in the hash.
+SNAPSHOT_RUN_COLUMNS = ("extracted_at",)
+TRAINING_DATASET_ID_NAMESPACE = "project4.training_dataset"
+
+
+def _snapshot_column_order(frame: pd.DataFrame) -> list[str]:
+    known = [*SNAPSHOT_LEADING_COLUMNS, *MODEL_FEATURE_COLUMNS, *SNAPSHOT_RUN_COLUMNS]
+    present = [column for column in known if column in frame.columns]
+    return present + sorted(str(column) for column in frame.columns if column not in known)
+
+
+def sort_feature_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    """The frame in a deterministic row order (every column, fixed order, stable sort)."""
+
+    return frame.sort_values(
+        by=_snapshot_column_order(frame), kind="mergesort", na_position="last"
+    ).reset_index(drop=True)
+
+
+def content_sha256(frame: pd.DataFrame) -> str:
+    """sha256 of the data: rows sorted, fixed column order, stable CSV, run columns left out."""
+
+    columns = [c for c in _snapshot_column_order(frame) if c not in SNAPSHOT_RUN_COLUMNS]
+    stable_csv = sort_feature_frame(frame).loc[:, columns].to_csv(index=False, lineterminator="\n")
+    return hashlib.sha256(stable_csv.encode("utf-8")).hexdigest()
+
+
+def training_dataset_id_for(snapshot_id: str, sha256: str, fingerprint: str) -> str:
+    """Deterministic training_dataset_id of one snapshot's data and feature set."""
+
+    key = "|".join([TRAINING_DATASET_ID_NAMESPACE, snapshot_id, sha256, fingerprint])
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, key))
 
 
 def write_snapshot(
@@ -840,6 +917,13 @@ def write_snapshot(
         configured_root = Path(config["output"]["root"])
         root = configured_root if configured_root.is_absolute() else PROJECT_ROOT / configured_root
     snapshot_path = root / f"snapshot_date={snapshot_date}" / f"snapshot_id={snapshot_id}"
+
+    # One row order for the hash and the parquet file, whatever order the sources returned.
+    # Before the directory exists, so a sort or hash failure leaves nothing behind.
+    dataframe = sort_feature_frame(dataframe)
+    sha256 = content_sha256(dataframe)
+    fingerprint = feature_set_fingerprint(MODEL_FEATURE_COLUMNS)
+
     snapshot_path.mkdir(parents=True, exist_ok=False)
 
     features_path = snapshot_path / "features.parquet"
@@ -855,6 +939,10 @@ def write_snapshot(
             snapshot_id,
             "; ".join(validation.errors),
         )
+
+    training_dataset_id = (
+        training_dataset_id_for(snapshot_id, sha256, fingerprint) if validation.is_valid else None
+    )
 
     source_projects = []
     if config["project_1"].get("enabled", True):
@@ -877,7 +965,10 @@ def write_snapshot(
         ],
         "entity_type_counts": dataframe["entity_type"].value_counts().to_dict(),
         "feature_columns": MODEL_FEATURE_COLUMNS,
-        "feature_set_fingerprint": feature_set_fingerprint(MODEL_FEATURE_COLUMNS),
+        "feature_set_fingerprint": fingerprint,
+        "content_sha256": sha256,
+        # Only a trainable snapshot is a training dataset.
+        "training_dataset_id": training_dataset_id,
         "data_quality_status": data_quality_status,
         "trainable": validation.is_valid,
         "validation_errors": list(validation.errors),
@@ -903,6 +994,8 @@ def write_snapshot(
         feature_schema_version=config["feature_schema_version"],
         snapshot_type=config["snapshot_type"],
         data_quality_status=data_quality_status,
+        content_sha256=sha256,
+        training_dataset_id=training_dataset_id,
     )
 
 
@@ -948,6 +1041,8 @@ def main() -> None:
     print(f"feature_schema_version={result.feature_schema_version}")
     print(f"data_quality_status={result.data_quality_status}")
     print(f"row_count={result.row_count}")
+    print(f"content_sha256={result.content_sha256}")
+    print(f"training_dataset_id={result.training_dataset_id}")
     print(f"features_path={result.features_path}")
     print(f"metadata_path={result.metadata_path}")
 
