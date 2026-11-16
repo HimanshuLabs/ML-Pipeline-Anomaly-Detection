@@ -86,20 +86,28 @@ docker exec project4-local-control-plane crictl images | grep -E 'project4|postg
 The app password goes into `project4-app-db`; the seed job gives the same value to the
 `project4_app` role, so they always match.
 
+No value is on the command line of `kubectl`, where `ps` would show it: `printf` (a shell
+builtin) writes `KEY=value` lines, reusing its `'%s=%s\n'` format for each key and value
+pair, and each secret is created from stdin (`--from-env-file=/dev/stdin`). The generated
+passwords and token come from `openssl rand`, whose output is never an argument either.
+
 ```bash
 kubectl --kubeconfig "$KCFG" --context kind-project4-local apply -f k8s/namespace.yaml
-kubectl --kubeconfig "$KCFG" --context kind-project4-local -n project4-ml create secret generic project4-app-db \
-  --from-literal=PROJECT4_POSTGRES_HOST=project4-postgres \
-  --from-literal=PROJECT4_POSTGRES_PORT=5432 \
-  --from-literal=PROJECT4_POSTGRES_DB=project4_ml \
-  --from-literal=PROJECT4_POSTGRES_USER=project4_app \
-  --from-literal=PROJECT4_POSTGRES_PASSWORD="$(openssl rand -hex 24)"
-kubectl --kubeconfig "$KCFG" --context kind-project4-local -n project4-ml create secret generic project4-postgres-owner \
-  --from-literal=POSTGRES_USER=project4_owner \
-  --from-literal=POSTGRES_PASSWORD="$(openssl rand -hex 24)" \
-  --from-literal=POSTGRES_DB=project4_ml
-kubectl --kubeconfig "$KCFG" --context kind-project4-local -n project4-ml create secret generic project4-admin \
-  --from-literal=admin-token="$(openssl rand -hex 32)"
+printf '%s=%s\n' \
+  PROJECT4_POSTGRES_HOST project4-postgres \
+  PROJECT4_POSTGRES_PORT 5432 \
+  PROJECT4_POSTGRES_DB project4_ml \
+  PROJECT4_POSTGRES_USER project4_app \
+  PROJECT4_POSTGRES_PASSWORD "$(openssl rand -hex 24)" \
+  | kubectl --kubeconfig "$KCFG" --context kind-project4-local -n project4-ml create secret generic project4-app-db --from-env-file=/dev/stdin
+printf '%s=%s\n' \
+  POSTGRES_USER project4_owner \
+  POSTGRES_PASSWORD "$(openssl rand -hex 24)" \
+  POSTGRES_DB project4_ml \
+  | kubectl --kubeconfig "$KCFG" --context kind-project4-local -n project4-ml create secret generic project4-postgres-owner --from-env-file=/dev/stdin
+printf '%s=%s\n' \
+  admin-token "$(openssl rand -hex 32)" \
+  | kubectl --kubeconfig "$KCFG" --context kind-project4-local -n project4-ml create secret generic project4-admin --from-env-file=/dev/stdin
 ```
 
 ## 5. Apply, wait for Postgres, seed
@@ -190,7 +198,8 @@ never compatible with the segmented v005. One pod changes the shared pointer; ev
 replica follows within one poll. The pointer goes 1 (seed) → 2 (promote) → 3 (rollback).
 
 The admin token is read into a shell variable; it never appears on screen or in the
-shell history (the history holds only the command that reads it).
+shell history (the history holds only the command that reads it), nor in any process's
+arguments: `printf` is a shell builtin and curl reads the header from stdin (`-H @-`).
 
 ```bash
 POD="$(kubectl --kubeconfig "$KCFG" --context kind-project4-local -n project4-ml get pods -l app.kubernetes.io/name=project4-anomaly-api -o jsonpath='{.items[0].metadata.name}')"
@@ -210,9 +219,9 @@ kubectl --kubeconfig "$KCFG" --context kind-project4-local -n project4-ml port-f
 PF_8016_PID=$!
 sleep 3
 ADMIN_TOKEN="$(kubectl --kubeconfig "$KCFG" --context kind-project4-local -n project4-ml get secret project4-admin -o jsonpath='{.data.admin-token}' | base64 -d)"
-curl -s -X POST http://127.0.0.1:8016/admin/rollback -H "X-Admin-Token: $ADMIN_TOKEN" -H 'Content-Type: application/json' -d '{"dry_run": true, "rollback_reason": "runbook dry run", "triggered_by": "runbook"}'
+printf 'X-Admin-Token: %s\n' "$ADMIN_TOKEN" | curl -s -X POST http://127.0.0.1:8016/admin/rollback -H @- -H 'Content-Type: application/json' -d '{"dry_run": true, "rollback_reason": "runbook dry run", "triggered_by": "runbook"}'
 # expected: "status":"validated", "from_model_version":"v005", "to_model_version":"v004", "validation_status":"dry_run_validated"
-curl -s -X POST http://127.0.0.1:8016/admin/rollback -H "X-Admin-Token: $ADMIN_TOKEN" -H 'Content-Type: application/json' -d '{"dry_run": false, "rollback_reason": "runbook: real rollback", "triggered_by": "runbook"}'
+printf 'X-Admin-Token: %s\n' "$ADMIN_TOKEN" | curl -s -X POST http://127.0.0.1:8016/admin/rollback -H @- -H 'Content-Type: application/json' -d '{"dry_run": false, "rollback_reason": "runbook: real rollback", "triggered_by": "runbook"}'
 # expected: "status":"applied", "action_taken":true, "active_model_version":"v004"
 unset ADMIN_TOKEN
 sleep 35

@@ -480,12 +480,13 @@ docker compose up -d anomaly-api
 ```
 
 Call an admin endpoint by reading the token into a variable (never onto the screen) and
-unsetting it afterwards:
+unsetting it afterwards. `printf` is a shell builtin and curl reads the header from stdin
+(`-H @-`), so the token never appears in any process's arguments (`ps`):
 
 ```bash
 ADMIN_TOKEN="$(grep '^PROJECT4_ADMIN_TOKEN=' .env | cut -d= -f2-)"
-curl -s -X POST http://127.0.0.1:8014/admin/rollback \
-  -H "X-Admin-Token: $ADMIN_TOKEN" -H 'Content-Type: application/json' \
+printf 'X-Admin-Token: %s\n' "$ADMIN_TOKEN" | curl -s -X POST http://127.0.0.1:8014/admin/rollback \
+  -H @- -H 'Content-Type: application/json' \
   -d '{"dry_run": true, "rollback_reason": "manual check", "triggered_by": "operator"}'
 unset ADMIN_TOKEN
 ```
