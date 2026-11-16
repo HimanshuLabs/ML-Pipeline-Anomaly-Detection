@@ -115,8 +115,37 @@
       "training_dataset_id": null,
       "training_finished_at_utc": "2026-11-15T02:06:45.795166+00:00",
       "training_started_at_utc": "2026-11-15T02:06:41.822030+00:00"
+    },
+    {
+      "algorithm": "IsolationForest",
+      "approved_for_prod": false,
+      "archived_at_utc": null,
+      "artifact_dir": "artifacts/models/isolation_forest/model_version=v005",
+      "artifact_path": "artifacts/models/isolation_forest/model_version=v005/model.joblib",
+      "baseline_anomaly_rate": 0.05071884984025559,
+      "baseline_f1_proxy": null,
+      "baseline_precision_proxy": null,
+      "baseline_recall_proxy": null,
+      "baseline_stats_path": "artifacts/models/isolation_forest/model_version=v005/baseline_stats.json",
+      "created_at_utc": "2026-11-16T03:54:58.807540+00:00",
+      "feature_schema_path": "artifacts/models/isolation_forest/model_version=v005/feature_schema.json",
+      "feature_schema_version": "feature_schema_v003",
+      "latency_p50_ms": 0.0,
+      "latency_p95_ms": 0.0,
+      "metadata_path": "artifacts/models/isolation_forest/model_version=v005/metadata.json",
+      "model_id": "5f6b82bc-cec4-5052-a2c2-5d810ad1df3e",
+      "model_name": "isolation_forest",
+      "model_version": "v005",
+      "notes": "Candidate retrained from real_source_20261116T035043Z; see evaluation_report.json. Not promoted.",
+      "promoted_at_utc": null,
+      "snapshot_id": "real_source_20261116T035043Z",
+      "status": "candidate",
+      "threshold_used": null,
+      "training_dataset_id": "64e7a3c0-bd07-5f74-95f5-71cc9e494e1b",
+      "training_finished_at_utc": "2026-11-16T03:54:56.202775+00:00",
+      "training_started_at_utc": "2026-11-16T03:54:52.321257+00:00"
     }
   ],
   "registry_backend": "local_json",
-  "updated_at_utc": "2026-11-15T02:47:08.232629+00:00"
+  "updated_at_utc": "2026-11-16T03:54:58.863285+00:00"
 }
