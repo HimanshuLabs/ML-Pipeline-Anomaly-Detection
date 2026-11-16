@@ -210,10 +210,26 @@ makes it `production` after a serving check and archives the previous production
 version; `registry retire` takes a non-active version out of use (files are kept); a
 rollback marks the version it leaves `rolled_back`.
 
+Promote rules: a `rolled_back` version is promoted as any other. A `retired` version is
+refused before the serving check, and nothing is written, unless
+`registry promote --allow-retired --notes "why"` is given; `--allow-retired` without a
+note is refused too. The same rule holds in the library: `promote_model_version` and
+`promote_model` move a retired version to any other status only with
+`allow_retired=True`; retiring it again only replaces its note. Rollback never selects a
+retired (or `rolled_back`) version: its targets must be `archived`.
+`register_model_from_artifacts` refuses a version that is already registered unless
+`replace_existing=True` is passed.
+
 New versions (stage 14c-4 onwards) store their bundle paths in `metadata.json` relative
 to the repository root. v001–v004 keep the absolute paths they were written with
 (`/home/...` for v001/v002, `/app/...` for v003/v004); registration resolves them to the
 files next to the `metadata.json` being read, wherever the bundle is.
+
+New snapshots record `source_paths` as `<config project key>/<schema>.<table>` (for
+example `project_1/public.user_features`), one entry per table in `source_tables`; the
+`training_snapshot_metadata` of v002–v005 keeps the older home-directory form and is not
+rewritten. Nothing reads `source_paths`: the database rows, the integration views and
+the MLflow params use other fields.
 
 ---
 
@@ -263,8 +279,6 @@ served version.
   0.924 overall (campaign, customer, product and web_customer 1.000; user 0.905;
   funnel_day 0.843). Same data, rows in a different order (v004's snapshot predates the
   sorted extract), so the Isolation Forest subsampler drew different samples.
-- Known gap: `registry promote` accepts a version in any status, including `retired`
-  (v001, v003). Only the serving check gates it; see the README's known limitations.
 
 ---
 

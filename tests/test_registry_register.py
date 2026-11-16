@@ -26,8 +26,8 @@ from tests.test_database import (  # noqa: F401 - pytest fixtures
     postgres_engine,
 )
 
-# Later than every timestamp in the committed registry: archiving a version "now" must
-# not predate its promotion (model_registry_archive_time_chk).
+# Later than every timestamp in the fixture registry the mirror starts from (conftest):
+# archiving a version "now" must not predate its promotion (model_registry_archive_time_chk).
 FROZEN_NOW = "2100-01-01T00:00:00+00:00"
 
 

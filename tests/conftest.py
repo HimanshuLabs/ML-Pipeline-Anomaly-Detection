@@ -1,10 +1,14 @@
 """Shared test isolation for Project 4.
 
 Every test runs against a per-test mirror of the repository's mutable state
-(configs/, the model registry, logs/, data/) instead of the real files. Real
-model artifacts stay read-only inputs. A guard fails any test that changes or
-creates files under the real state directories, and any test in which the API
-silently failed to persist prediction evidence.
+(configs/, the model registry, logs/, data/) instead of the real files. The
+mirror's registry and active pointer come from tests/fixtures/repo_state, not
+from the committed lifecycle state, so committing a promote, retire or rollback
+cannot change what the tests see; only tests that check the committed files on
+purpose read REAL_*. Real model artifacts stay read-only inputs. A guard fails
+any test that changes or creates files under the real state directories or the
+fixtures, and any test in which the API silently failed to persist prediction
+evidence.
 """
 
 from __future__ import annotations
@@ -24,6 +28,12 @@ import yaml
 REPO_ROOT = Path(__file__).resolve().parents[1]
 REAL_ACTIVE_MODEL_PATH = REPO_ROOT / "configs" / "active_model.yaml"
 REAL_REGISTRY_PATH = REPO_ROOT / "artifacts" / "models" / "_registry" / "model_registry.json"
+# A realistic registry and pointer (v001 retired, v002 archived, v003 retired, v004
+# production, v005 rolled_back) over the real, immutable bundles. They may diverge from
+# the committed files; that is the point.
+FIXTURES_ROOT = REPO_ROOT / "tests" / "fixtures"
+FIXTURE_REGISTRY_PATH = FIXTURES_ROOT / "repo_state" / "model_registry.json"
+FIXTURE_ACTIVE_MODEL_PATH = FIXTURES_ROOT / "repo_state" / "active_model.yaml"
 
 # Directories whose contents tests must never write to.
 REDIRECTED_ROOTS = (
@@ -37,6 +47,7 @@ GUARDED_ROOTS = (
     REPO_ROOT / "configs",
     REPO_ROOT / "data",
     REPO_ROOT / "artifacts",
+    FIXTURES_ROOT,
 )
 
 
@@ -94,9 +105,11 @@ def _snapshot_real_state() -> dict[str, tuple[int, int]]:
 
 def _build_mirror(mirror_root: Path) -> None:
     shutil.copytree(REPO_ROOT / "configs", mirror_root / "configs")
+    # The fixture pointer replaces the committed one; the other configs stay real.
+    shutil.copy2(FIXTURE_ACTIVE_MODEL_PATH, mirror_root / "configs" / "active_model.yaml")
     registry_mirror = mirror_root / REAL_REGISTRY_PATH.relative_to(REPO_ROOT)
     registry_mirror.parent.mkdir(parents=True)
-    shutil.copy2(REAL_REGISTRY_PATH, registry_mirror)
+    shutil.copy2(FIXTURE_REGISTRY_PATH, registry_mirror)
     for relative in ("logs/predictions", "logs/alerts", "data/features/training"):
         (mirror_root / relative).mkdir(parents=True)
 
@@ -271,16 +284,16 @@ def admin_headers(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
 
 @pytest.fixture()
 def active_model_pointer() -> dict[str, Any]:
-    """The real active model pointer, read at test time."""
+    """The fixture active model pointer: the one every per-test mirror starts from."""
 
-    payload = yaml.safe_load(REAL_ACTIVE_MODEL_PATH.read_text(encoding="utf-8"))
+    payload = yaml.safe_load(FIXTURE_ACTIVE_MODEL_PATH.read_text(encoding="utf-8"))
     assert isinstance(payload, dict)
     return payload
 
 
 @pytest.fixture()
 def active_model_version(active_model_pointer: dict[str, Any]) -> str:
-    """The active model version from the real pointer."""
+    """The active model version from the fixture pointer."""
 
     return str(active_model_pointer["active_model_version"])
 

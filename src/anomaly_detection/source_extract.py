@@ -823,21 +823,25 @@ def build_unified_feature_dataframe(
     return unified
 
 
-def _source_table_names(config: dict[str, Any]) -> list[str]:
+def _source_tables(config: dict[str, Any]) -> list[tuple[str, str]]:
+    """(config project key, "schema.table") for every table the extract reads, in order.
+
+    Both source_tables and source_paths come from this list, so they always agree.
+    """
     tables = []
 
     project1 = config["project_1"]
     if project1.get("enabled", True):
-        tables.append(f'{project1["schema"]}.{project1["table"]}')
+        tables.append(("project_1", f'{project1["schema"]}.{project1["table"]}'))
 
     project23 = config["project_2_3"]
     if project23.get("enabled", True):
         for name, table_config in project23["tables"].items():
-            tables.append(f'{table_config["schema"]}.{table_config["table"]}')
+            tables.append(("project_2_3", f'{table_config["schema"]}.{table_config["table"]}'))
             if name == "web_events":
                 # extract_project23_features reads the customer dimension for web events too.
                 dimension = table_config.get("customer_dimension_table", DEFAULT_CUSTOMER_DIMENSION)
-                tables.append(f'{table_config["schema"]}.{dimension}')
+                tables.append(("project_2_3", f'{table_config["schema"]}.{dimension}'))
 
     return tables
 
@@ -944,6 +948,7 @@ def write_snapshot(
         training_dataset_id_for(snapshot_id, sha256, fingerprint) if validation.is_valid else None
     )
 
+    source_tables = _source_tables(config)
     source_projects = []
     if config["project_1"].get("enabled", True):
         source_projects.append("project_1")
@@ -958,11 +963,9 @@ def write_snapshot(
         "row_count": int(len(dataframe)),
         "column_count": int(len(dataframe.columns)),
         "source_projects": source_projects,
-        "source_tables": _source_table_names(config),
-        "source_paths": [
-            "~/Desktop/Project-1- Real time suggestions/PostgreSQL/public.user_features",
-            "~/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics/PostgreSQL/marts+warehouse",
-        ],
+        "source_tables": [table for _project, table in source_tables],
+        # "<config project key>/<schema>.<table>": no host, port, database, user or home path.
+        "source_paths": [f"{project}/{table}" for project, table in source_tables],
         "entity_type_counts": dataframe["entity_type"].value_counts().to_dict(),
         "feature_columns": MODEL_FEATURE_COLUMNS,
         "feature_set_fingerprint": fingerprint,

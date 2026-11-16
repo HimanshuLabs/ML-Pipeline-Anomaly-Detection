@@ -339,7 +339,10 @@ def test_rollback_between_compatible_segmented_models_swaps_and_serves(
 
 
 def _real_segmented_entry() -> registry.ModelRegistryEntry | None:
-    """The newest real registry version whose bundle is a segmented model, if any."""
+    """The newest version in the (fixture) registry whose real bundle is segmented, if any.
+
+    The fixture has v005 rolled_back, which promote accepts without --allow-retired.
+    """
 
     segmented = []
     for entry in registry.load_model_registry(registry.DEFAULT_REGISTRY_PATH):
@@ -360,7 +363,7 @@ def test_cli_promotes_a_real_segmented_bundle_and_the_api_serves_every_segment(
     # pass the CLI's serving check, become active, and serve every segment.
     entry = _real_segmented_entry()
     if entry is None:
-        pytest.skip("the real registry has no segmented model")
+        pytest.skip("the fixture registry has no segmented model")
     version = entry.model_version
     segments = _segments(registry.PROJECT_ROOT / entry.metadata_path)
 
