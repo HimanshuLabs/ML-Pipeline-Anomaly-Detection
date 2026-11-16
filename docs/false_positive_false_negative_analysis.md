@@ -23,30 +23,34 @@ Project 4 currently uses an unsupervised Isolation Forest model. The model is tr
 
 That means Project 4 can discuss false-positive and false-negative risk honestly, but it cannot truthfully claim real false-positive rate, false-negative rate, precision, recall, or F1.
 
+Short version: the README's ["Evaluation limits"](../README.md#evaluation-limits) section (why the training anomaly rate is about 5% by construction, and what real precision and recall would need).
+
 This document keeps that line clean.
 
 ---
 
 ## Current model context
 
-Current production model state:
+Production model state on 2026-11-15 (the live state comes from `GET /model/active`):
 
-| Field                 | Value                            |
-| --------------------- | -------------------------------- |
-| Model name            | `isolation_forest`               |
-| Active version        | `v002`                           |
-| Snapshot type         | `real_source_extract`            |
-| Training row count    | `16,750`                         |
-| Feature count         | `51`                             |
-| Baseline anomaly rate | `0.05002985074626866`            |
-| Label availability    | `unlabeled_proxy_metrics`        |
-| Metric type           | `unsupervised_training_baseline` |
+| Field | Value |
+| --- | --- |
+| Model name | `isolation_forest` |
+| Active version | `v004` |
+| Model kind | segmented: one Isolation Forest per entity type, 6 segments (`campaign`, `customer`, `funnel_day`, `product`, `user`, `web_customer`) |
+| Snapshot | `real_source_20261115T010701Z` (`real_source_extract`) |
+| Training row count | `2,504` (37 to 926 per segment) |
+| Feature schema version | `feature_schema_v003` |
+| Feature count | `52` (each segment scores its own subset) |
+| Baseline anomaly rate | `0.0507` overall; `0.050`–`0.054` per segment |
+| Label availability | `unlabeled_proxy_metrics` |
+| Metric type | `unsupervised_training_baseline` |
 
 The active model was trained on a real-source snapshot, but the anomaly labels are not real labels.
 
-The current baseline tells us that the model flagged approximately 5.0% of the training snapshot as anomalous under the active scoring behavior.
+The v004 baseline tells us that each segment's model flagged about 5% (5.0% to 5.4%) of its own training rows as anomalous under the active scoring behavior.
 
-It does not tell us that 5.0% of records were truly bad.
+It does not tell us that 5% of records were truly bad.
 
 That distinction matters.
 
@@ -283,11 +287,11 @@ That is the correct choice.
 
 ## Why the current threshold position is reasonable
 
-The current active model baseline anomaly rate is:
+The active v004 baseline anomaly rate is:
 
-`0.05002985074626866`
+`0.0507` overall, `0.050`–`0.054` per segment
 
-That is approximately 5.0%.
+That is approximately 5% in every segment.
 
 For an unsupervised anomaly detector, anchoring initial threshold behavior to the training anomaly-rate baseline is reasonable because it gives the system a controlled starting point.
 
@@ -710,7 +714,7 @@ Until then, proxy metrics remain the honest boundary.
 Project 4 can honestly claim:
 
 * The platform trains an unsupervised Isolation Forest anomaly model.
-* The active model is versioned as `v002`.
+* The active model is versioned as `v004`, segmented into one Isolation Forest per entity type.
 * The active model was trained from a real-source extraction.
 * The model has baseline anomaly-rate statistics.
 * The model has feature-level baseline statistics.
@@ -904,6 +908,25 @@ Implemented helper functions:
 Documented in:
 
 * `docs/false_positive_false_negative_analysis.md`
+
+---
+
+## History (v002, 2026-06-10 to 2026-11-15)
+
+v002 was the active model from its training on 2026-06-10 until v004 was promoted on 2026-11-15. It is now archived. Its model context, as this document first recorded it:
+
+| Field | Value |
+| --- | --- |
+| Model name | `isolation_forest` |
+| Version | `v002` (single model, `feature_schema_v001`) |
+| Snapshot type | `real_source_extract` |
+| Training row count | `16,750` |
+| Feature count | `51` |
+| Baseline anomaly rate | `0.05002985074626866` |
+| Label availability | `unlabeled_proxy_metrics` |
+| Metric type | `unsupervised_training_baseline` |
+
+v002's baseline meant the single model flagged approximately 5.0% of the whole training snapshot as anomalous. As with v004, that was a training-rate anchor, not a count of truly bad records.
 
 ---
 

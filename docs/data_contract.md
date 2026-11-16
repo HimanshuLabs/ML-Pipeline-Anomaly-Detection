@@ -96,23 +96,24 @@ This keeps training, batch scoring, online inference, prediction logging, and dr
 
 ---
 
-## Current feature schema version
+## Feature schema versions
 
-The current Project 4 feature schema version is:
+Three labels are in use (2026-11-15), all set in configuration:
 
-`feature_schema_v001`
+| Label | Where it is set | What it labels |
+|---|---|---|
+| `feature_schema_v001` | `configs/model_config.yaml` (`features.schema_version`) | The 11-feature contract of this document: rows built by the demo feature builder; models v001 and v002 were trained under it. |
+| `feature_schema_v002` | `configs/source_extract.yaml` (`feature_schema_version`) | Real-source extract snapshots (also model v003). |
+| `feature_schema_v003` | `configs/model_config.yaml` (`features.real_source_schema_version`) | Models trained from real-source snapshots as segmented models: the production model v004. |
 
-Every generated feature row must include:
+This document describes the `feature_schema_v001` contract. Every row generated under it
+must include:
 
 `schema_version = feature_schema_v001`
 
-The schema version is controlled by:
-
-`configs/model_config.yaml`
-
 The validation layer rejects rows where the feature dataframe schema version does not match the expected schema version.
 
-This matters because model versions must be tied to the feature schema used during training. A model trained on `feature_schema_v001` should not silently score a different schema.
+This matters because model versions must be tied to the feature schema used during training. A model trained on one schema should not silently score a different one; the active model's label is in `configs/active_model.yaml` (`feature_schema_version`, `feature_schema_v003` for v004).
 
 ---
 

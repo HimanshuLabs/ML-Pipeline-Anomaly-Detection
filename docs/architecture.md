@@ -1,8 +1,36 @@
+# Architecture
 
+## Current state (2026-11-15)
+
+Project 4 turns upstream data into validated features, trains versioned Isolation Forest
+models, serves them in batch and online, and monitors them.
+
+1. Project 1 writes user-level behavioral features to `public.user_features`.
+2. Project 2/3 writes warehouse and mart outputs to PostgreSQL.
+3. `configs/source_extract.yaml` defines the real source contract.
+4. `src/anomaly_detection/source_extract.py` extracts and normalizes the sources into a
+   frozen real-source training snapshot.
+5. `src/anomaly_detection/retrain.py` (or `training.py`) trains a candidate from the
+   snapshot: one Isolation Forest per entity type (segmented model), with
+   `evaluation_report.json`, and registers it as `candidate`.
+6. `python -m anomaly_detection.registry promote` makes a version `production`; the
+   registry and the shared pointer live in Postgres (`ml.model_registry`,
+   `ml.active_model_pointer`), with the JSON registry and `configs/active_model.yaml` as
+   a file mirror.
+7. The API (compose, or two replicas in Kubernetes) and batch scoring serve the version
+   named by the pointer; every API replica follows a pointer change within one poll.
+8. Prediction, drift, alert, and rollback evidence goes to JSONL and to the
+   `ml`, `monitoring`, and `audit` schemas; Project 5 reads the `integration.*` views.
+
+Active model: `v004` (segmented, `feature_schema_v003`, 52 features in total, baseline
+anomaly rate 0.0507).
 
 <!-- BEGIN REAL_SOURCE_ML_BRIDGE -->
-## Real-source ML bridge
+## History: real-source ML bridge (v002, 2026-06)
 
+The sections below describe the first real-source bridge as it was written, when a
+single model (`v002`) was trained and promoted from it. The source tables and the
+design choices still hold; the training and serving steps are now as described above.
 
 ### Real-source ML bridge
 
@@ -65,7 +93,7 @@ Future online inference can consume low-latency feature samples from Project 1 o
 <!-- END REAL_SOURCE_ML_BRIDGE -->
 
 <!-- BASELINE_METRICS_CLOSURE_START -->
-## Baseline metrics closure
+## History: baseline metrics closure (v002)
 
 The production architecture now has a verified baseline reference for `v002`.
 

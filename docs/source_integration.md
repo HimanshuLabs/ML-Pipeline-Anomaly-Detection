@@ -19,7 +19,34 @@ This fixes the earlier gap where the model training path existed, but the real u
 | `src/anomaly_detection/source_extract.py` | Extracts, transforms, normalizes, and writes a real-source Project 4 training snapshot. |
 | `tests/test_source_extract.py` | Validates source transforms, feature normalization, web-event aggregation, and snapshot metadata writing. |
 
+## Current snapshot (2026-11-15)
+
+The production model v004 was trained from this real-source snapshot:
+
+| Field | Value |
+|---|---|
+| Snapshot ID | `real_source_20261115T010701Z` |
+| Snapshot type | `real_source_extract` |
+| Extract label (`source_extract.yaml`) | `feature_schema_v002` |
+| Model feature label (v004) | `feature_schema_v003` (segmented spec, `model_config.yaml`) |
+| Row count | `2,504` |
+| Column count | `58` |
+| Data quality status | `passed` |
+
+| Entity type | Rows |
+|---|---:|
+| `funnel_day` | `926` |
+| `customer` | `497` |
+| `web_customer` | `497` |
+| `user` | `400` |
+| `product` | `147` |
+| `campaign` | `37` |
+
+Each entity type trains its own Isolation Forest (one segment per type).
+
 ## Source systems
+
+The row counts below are from the first extract (2026-06-10).
 
 ### Project 1
 
@@ -42,7 +69,7 @@ This fixes the earlier gap where the model training path existed, but the real u
 | `marts.mart_product_sales` | product | `148` |
 | `warehouse.fact_web_events` | aggregated web customer | `500` |
 
-## Real-source snapshot
+## History: first real-source snapshot (2026-06-10)
 
 | Field | Value |
 |---|---|
@@ -95,36 +122,48 @@ For training, the correct dependency is a reproducible frozen snapshot:
 
 Kafka replay is useful for streaming recovery, online samples, and future inference/drift monitoring. It is not the right primitive for deterministic model retraining.
 
-## v002 production model
+## History: v002, the first real-source model
+
+v002 was production from 2026-06-10 until v004 was promoted on 2026-11-15; it is now
+`archived`.
 
 | Field | Value |
 |---|---|
 | Model | `isolation_forest` |
 | Version | `v002` |
-| Status | `production` |
+| Status at the time | `production` |
 | Training snapshot | `real_source_20260610T060738Z` |
 | Training rows | `16,750` |
 | Feature count | `51` |
 | Baseline anomaly rate | `0.05002985074626866` |
 | Label availability | `unlabeled_proxy_metrics` |
 
-`v001` remains the earlier demo-trained baseline and is archived after `v002` promotion.
+`v001` was the earlier demo-trained baseline; it is now `retired`.
 
 ## Reproduction commands
 
-Set credentials:
+Run from the repository root with the `tools()` and `dev()` functions from the README's
+"Local runbook".
 
-    export PROJECT1_POSTGRES_PASSWORD=de_password
-    export PROJECT23_POSTGRES_PASSWORD=project2
+The source passwords are read from the environment variables named in
+`configs/source_extract.yaml`. Enter them without echo, so they appear neither on screen
+nor in the shell history:
 
-Generate real-source snapshot:
+    read -rs PROJECT1_POSTGRES_PASSWORD && export PROJECT1_POSTGRES_PASSWORD
+    read -rs PROJECT23_POSTGRES_PASSWORD && export PROJECT23_POSTGRES_PASSWORD
 
-    PYTHONPATH=src python -m anomaly_detection.source_extract --config configs/source_extract.yaml --output-root data/features/training
+Generate a real-source snapshot. `-e NAME` without a value passes each variable from the
+environment, so the passwords never appear on a command line:
 
-Train v002:
+    docker run --rm --network host --user "$(id -u):$(id -g)" -e HOME=/tmp \
+      -e PROJECT1_POSTGRES_PASSWORD -e PROJECT23_POSTGRES_PASSWORD \
+      -v "$PWD":/app -w /app --entrypoint "" project4-anomaly-tools:local \
+      python -m anomaly_detection.source_extract --config configs/source_extract.yaml --output-root data/features/training
 
-    PYTHONPATH=src python -m anomaly_detection.training --snapshot latest --model-version v002
+Train a candidate from it (never promotes):
+
+    tools python -m anomaly_detection.retrain --snapshot latest --model-version v005
 
 Validate:
 
-    PYTHONPATH=src pytest tests/test_training.py tests/test_registry.py tests/test_source_extract.py -q
+    dev env -u PYTHONPATH python -m pytest -p no:cacheprovider -o addopts= -q tests/test_training.py tests/test_registry.py tests/test_source_extract.py
