@@ -12,13 +12,14 @@ import json
 import logging
 import os
 import uuid
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote_plus
 
+import numpy as np
 import pandas as pd
 import yaml
 from sqlalchemy import create_engine, text
@@ -337,6 +338,15 @@ WEB_EVENT_COUNT_FEATURES = (
     "add_to_cart_count",
     "purchase_count",
     "session_count",
+)
+
+WEB_EVENT_ORDER_COLUMNS = (
+    "event_id",
+    "customer_sk",
+    "session_id",
+    "event_type",
+    "event_timestamp",
+    *WEB_EVENT_MEASURES,
 )
 
 ENTITY_TYPE_USER = "user"
@@ -714,6 +724,13 @@ def transform_web_events(
         working[column] = _numeric_column(working, column, WEB_EVENTS_TABLE)
     working["event_type"] = working["event_type"].astype("string")
 
+    # Averages are float sums, so they depend on the order of a customer's events.
+    # A stable sort on the event key (then every other column read) fixes that order,
+    # whatever order the database, or a bucketed read, returned the rows in.
+    working = working.sort_values(
+        by=list(WEB_EVENT_ORDER_COLUMNS), kind="mergesort", na_position="last"
+    ).reset_index(drop=True)
+
     grouped = working.groupby("customer_business_id", dropna=False, sort=True).agg(
         total_events=("event_id", "count"),
         page_view_count=("event_type", lambda values: (values == "page_view").sum()),
@@ -739,6 +756,182 @@ def transform_web_events(
         entity_type=ENTITY_TYPE_WEB_CUSTOMER,
         entity_id=grouped["customer_business_id"],
         event_timestamp=grouped["source_event_timestamp"],
+    )
+
+
+# --- fact_web_events in buckets of business customers ---------------------------------
+#
+# The whole table does not fit in memory at scale (79 lakh rows x 35 columns), so it
+# is read in buckets of BUSINESS customers (dim_customer.customer_id): every SCD2
+# version key (customer_sk) of a customer is in the same bucket, and the sentinel
+# members (customer_sk <= 0, UNKNOWN, INVALID) are all in the first one. Each bucket
+# goes through the unchanged transform_web_events, so the result is the same frame,
+# the same statistics and the same hash as one read of the whole table.
+
+WEB_EVENT_BUCKET_CUSTOMERS = 50_000
+WEB_EVENT_BUCKETS_ENV = "P4_WEB_EVENT_BUCKETS"
+WEB_EVENT_READ_COLUMNS = REQUIRED_SOURCE_COLUMNS[WEB_EVENTS_TABLE]
+
+
+def _business_keys(customer_dimension: pd.DataFrame) -> pd.DataFrame:
+    return customer_dimension[["customer_sk", "customer_id"]].drop_duplicates(
+        subset=["customer_sk"]
+    )
+
+
+def _sentinel_customer_ids(keys: pd.DataFrame) -> set[Any]:
+    """Business ids read with the sentinel members: UNKNOWN, INVALID, NULL, or any sk <= 0."""
+
+    ids = keys["customer_id"]
+    is_sentinel = (
+        ids.isna()
+        | ids.astype("string").isin(SENTINEL_CUSTOMER_IDS)
+        | (pd.to_numeric(keys["customer_sk"], errors="coerce") <= 0)
+    )
+    return set(ids[is_sentinel].tolist())
+
+
+def web_event_bucket_count(customer_dimension: pd.DataFrame, setting: str | None) -> int:
+    """Buckets for fact_web_events: P4_WEB_EVENT_BUCKETS, else one per 50,000 customers."""
+
+    if setting:
+        try:
+            count = int(setting)
+        except ValueError:
+            raise SourceExtractionError(
+                f"{WEB_EVENT_BUCKETS_ENV} must be a whole number, got {setting!r}"
+            ) from None
+        if count < 1:
+            raise SourceExtractionError(f"{WEB_EVENT_BUCKETS_ENV} must be at least 1, got {count}")
+        return count
+
+    keys = _business_keys(customer_dimension)
+    sentinels = _sentinel_customer_ids(keys)
+    customers = keys.loc[~keys["customer_id"].isin(sentinels), "customer_id"].nunique()
+    return max(1, -(-int(customers) // WEB_EVENT_BUCKET_CUSTOMERS))
+
+
+def web_event_buckets(customer_dimension: pd.DataFrame, bucket_count: int) -> list[list[int]]:
+    """customer_sk lists, one per non-empty bucket; together every dimension sk once."""
+
+    keys = _business_keys(customer_dimension)
+    sentinels = _sentinel_customer_ids(keys)
+    is_sentinel = keys["customer_id"].isin(sentinels)
+    customers = sorted(keys.loc[~is_sentinel, "customer_id"].unique().tolist())
+    ranges = [part for part in np.array_split(np.asarray(customers, dtype=object), bucket_count)
+              if len(part)] or [np.asarray([], dtype=object)]
+
+    bucket_of = {customer: index for index, part in enumerate(ranges) for customer in part}
+    buckets: list[list[int]] = [[] for _ in ranges]
+    for sk, customer in zip(keys["customer_sk"], keys["customer_id"], strict=True):
+        buckets[0 if customer in sentinels or pd.isna(customer) else bucket_of[customer]].append(
+            int(sk)
+        )
+    return [bucket for bucket in buckets if bucket]
+
+
+def _unmapped_events_error(unmapped: int) -> SourceExtractionError:
+    return SourceExtractionError(
+        f"{WEB_EVENTS_TABLE} has {unmapped} event(s) whose customer_sk is not in "
+        f"{CUSTOMER_DIMENSION_TABLE}"
+    )
+
+
+def transform_web_events_in_buckets(
+    read_events: Callable[[list[int] | None], pd.DataFrame],
+    count_unmapped: Callable[[], int],
+    customer_dimension: pd.DataFrame,
+    *,
+    report: ExtractionReport | None = None,
+    bucket_count: int = 1,
+) -> pd.DataFrame:
+    """transform_web_events over fact_web_events read whole (one bucket) or in buckets.
+
+    read_events(None) returns every event, read_events(sks) the events of those
+    customer_sk values. With buckets, NULL and unmapped customer_sk values are
+    counted first and refused as transform_web_events refuses them.
+    """
+
+    report = report if report is not None else ExtractionReport()
+    if bucket_count <= 1:
+        events = read_events(None)
+        if events.empty:
+            raise SourceExtractionError(f"Source table returned zero rows: {WEB_EVENTS_TABLE}")
+        return transform_web_events(events, customer_dimension, report=report)
+
+    unmapped = count_unmapped()
+    if unmapped:
+        raise _unmapped_events_error(unmapped)
+
+    frames = []
+    rows = 0
+    for customer_sks in web_event_buckets(customer_dimension, bucket_count):
+        events = read_events(customer_sks)
+        rows += len(events)
+        frames.append(transform_web_events(events, customer_dimension, report=report))
+        LOGGER.info(
+            "Read %s web event(s) of %s customer_sk value(s)", len(events), len(customer_sks)
+        )
+    if not rows:
+        raise SourceExtractionError(f"Source table returned zero rows: {WEB_EVENTS_TABLE}")
+    return pd.concat(frames, ignore_index=True)
+
+
+def read_web_events(
+    engine: Engine,
+    schema: str,
+    table: str,
+    customer_sks: list[int] | None = None,
+) -> pd.DataFrame:
+    """The columns transform_web_events reads, of every event or of these customer_sk values."""
+
+    with engine.connect() as connection:
+        _require_read_only_session(connection)
+        available = pd.read_sql_query(
+            text(f'SELECT * FROM "{schema}"."{table}" LIMIT 0'), connection
+        ).columns
+        _require_columns(pd.DataFrame(columns=available), WEB_EVENTS_TABLE, WEB_EVENT_READ_COLUMNS)
+
+        columns = ", ".join(f'"{column}"' for column in WEB_EVENT_READ_COLUMNS)
+        query = f'SELECT {columns} FROM "{schema}"."{table}"'
+        params: dict[str, Any] = {}
+        if customer_sks is not None:
+            query += ' WHERE "customer_sk" = ANY(:customer_sks)'
+            params["customer_sks"] = [int(sk) for sk in customer_sks]
+        return pd.read_sql_query(text(query), connection, params=params)
+
+
+def count_unmapped_web_events(engine: Engine, schema: str, table: str, dimension: str) -> int:
+    """Events whose customer_sk is NULL or not in the customer dimension."""
+
+    query = text(
+        f'SELECT count(*) FROM "{schema}"."{table}" AS f '
+        f'WHERE f."customer_sk" IS NULL OR NOT EXISTS ('
+        f'SELECT 1 FROM "{schema}"."{dimension}" AS d WHERE d."customer_sk" = f."customer_sk")'
+    )
+    with engine.connect() as connection:
+        _require_read_only_session(connection)
+        return int(connection.execute(query).scalar_one())
+
+
+def extract_web_event_features(
+    engine: Engine,
+    web_config: dict[str, Any],
+    customer_dimension: pd.DataFrame,
+    report: ExtractionReport | None = None,
+) -> pd.DataFrame:
+    """Per business customer web features from fact_web_events, read in buckets at scale."""
+
+    schema, table = web_config["schema"], web_config["table"]
+    dimension = web_config.get("customer_dimension_table", DEFAULT_CUSTOMER_DIMENSION)
+    bucket_count = web_event_bucket_count(customer_dimension, os.getenv(WEB_EVENT_BUCKETS_ENV))
+    LOGGER.info("Reading %s.%s in %s bucket(s)", schema, table, bucket_count)
+    return transform_web_events_in_buckets(
+        lambda customer_sks: read_web_events(engine, schema, table, customer_sks),
+        lambda: count_unmapped_web_events(engine, schema, table, dimension),
+        customer_dimension,
+        report=report,
+        bucket_count=bucket_count,
     )
 
 
@@ -785,7 +978,7 @@ def extract_project23_features(
         transform_campaign_performance(_read("campaign_performance"), report=report),
         transform_marketing_funnel(_read("marketing_funnel"), report=report),
         transform_product_sales(_read("product_sales"), report=report),
-        transform_web_events(_read("web_events"), customer_dimension, report=report),
+        extract_web_event_features(engine, web_config, customer_dimension, report=report),
     ]
 
     output = pd.concat(frames, ignore_index=True)
@@ -877,12 +1070,41 @@ def sort_feature_frame(frame: pd.DataFrame) -> pd.DataFrame:
     ).reset_index(drop=True)
 
 
-def content_sha256(frame: pd.DataFrame) -> str:
-    """sha256 of the data: rows sorted, fixed column order, stable CSV, run columns left out."""
+CONTENT_HASH_CHUNK_ROWS = 100_000
 
+
+def content_sha256(frame: pd.DataFrame, *, chunk_rows: int = CONTENT_HASH_CHUNK_ROWS) -> str:
+    """sha256 of the data: rows sorted, fixed column order, stable CSV, run columns left out.
+
+    The CSV is hashed in chunks of rows, never held whole. The bytes are those of
+    one to_csv of the whole frame because every value is formatted on its own;
+    columns pandas formats per column (datetime, timedelta, categorical) are
+    refused rather than hashed differently.
+    """
+
+    if chunk_rows < 1:
+        raise ValueError(f"chunk_rows must be at least 1, got {chunk_rows}")
     columns = [c for c in _snapshot_column_order(frame) if c not in SNAPSHOT_RUN_COLUMNS]
-    stable_csv = sort_feature_frame(frame).loc[:, columns].to_csv(index=False, lineterminator="\n")
-    return hashlib.sha256(stable_csv.encode("utf-8")).hexdigest()
+    formatted_per_column = [
+        str(column)
+        for column in columns
+        if pd.api.types.is_datetime64_any_dtype(frame[column])
+        or pd.api.types.is_timedelta64_dtype(frame[column])
+        or isinstance(frame[column].dtype, pd.CategoricalDtype)
+    ]
+    if formatted_per_column:
+        raise SourceExtractionError(
+            "content_sha256 cannot stream column(s) pandas formats per column: "
+            + ", ".join(formatted_per_column)
+        )
+
+    ordered = sort_feature_frame(frame).loc[:, columns]
+    digest = hashlib.sha256()
+    digest.update(ordered.iloc[:0].to_csv(index=False, lineterminator="\n").encode("utf-8"))
+    for start in range(0, len(ordered), chunk_rows):
+        chunk = ordered.iloc[start : start + chunk_rows]
+        digest.update(chunk.to_csv(index=False, header=False, lineterminator="\n").encode("utf-8"))
+    return digest.hexdigest()
 
 
 def training_dataset_id_for(snapshot_id: str, sha256: str, fingerprint: str) -> str:

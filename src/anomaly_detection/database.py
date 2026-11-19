@@ -216,10 +216,29 @@ def insert_online_predictions(records: Sequence[Any]) -> int:
     return _insert_rows("ml.online_predictions", [online_prediction_row(r) for r in records])
 
 
-def insert_batch_predictions(records: Sequence[Any]) -> int:
-    """ml.batch_predictions rows for one batch run, in one transaction."""
+BATCH_PREDICTION_INSERT_ROWS = 5_000
 
-    return _insert_rows("ml.batch_predictions", [batch_prediction_row(r) for r in records])
+
+def insert_batch_predictions(records: Sequence[Any]) -> int:
+    """ml.batch_predictions rows for one batch run, in one transaction.
+
+    Rows are mapped and sent in chunks (multi-row INSERTs), so a large run never
+    holds every mapped row at once; a failure in any chunk rolls back the run.
+    """
+
+    if not records:
+        return 0
+    with get_shared_engine().begin() as connection:
+        for start in range(0, len(records), BATCH_PREDICTION_INSERT_ROWS):
+            insert_rows(
+                connection,
+                "ml.batch_predictions",
+                [
+                    batch_prediction_row(record)
+                    for record in records[start : start + BATCH_PREDICTION_INSERT_ROWS]
+                ],
+            )
+    return len(records)
 
 
 def insert_drift_events(events: Sequence[Any]) -> int:
@@ -583,6 +602,29 @@ def insert_row(connection: Connection, table: str, row: Mapping[str, Any]) -> No
         f"VALUES ({', '.join(':' + column for column in columns)})"
     )
     connection.execute(statement, dict(row))
+
+
+def insert_rows(connection: Connection, table: str, rows: Sequence[Mapping[str, Any]]) -> None:
+    """Insert mapped rows with the same columns into a known Project 4 table.
+
+    One executemany of a Core INSERT, which SQLAlchemy sends as multi-row VALUES.
+    """
+
+    from sqlalchemy import column as sql_column
+    from sqlalchemy import insert
+    from sqlalchemy import table as sql_table
+
+    if table not in INSERTABLE_TABLES:
+        raise ValueError(f"not a Project 4 table: {table}")
+    if not rows:
+        return
+    columns = _checked_columns(rows[0])
+    if any(list(row) != columns for row in rows):
+        raise ValueError(f"rows for {table} do not all have the same columns")
+
+    schema, name = table.split(".", 1)
+    target = sql_table(name, *(sql_column(c) for c in columns), schema=schema)
+    connection.execute(insert(target), [dict(row) for row in rows])
 
 
 # --- registry, snapshots, and the shared active pointer -----------------------------

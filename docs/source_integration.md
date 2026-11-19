@@ -167,8 +167,12 @@ The extract is read-only against both sources. Every source session is opened wi
 `-c default_transaction_read_only=on -c statement_timeout=120000` (only the source
 engines; Project 4's own database engine is unchanged), and before each table is read
 the extract checks `SHOW transaction_read_only` is `on` and refuses otherwise, before any
-row is read. It issues only `SELECT *` on the configured tables and on
-`warehouse.dim_customer` (now listed in the snapshot's `source_tables`). No DDL, no
+row is read. It issues only `SELECT`s: `SELECT *` on the configured tables and on
+`warehouse.dim_customer` (now listed in the snapshot's `source_tables`); for
+`warehouse.fact_web_events`, a `SELECT * ... LIMIT 0` column check, then only the 12
+columns it uses, either whole or, at scale, in buckets of business customers
+(`WHERE customer_sk = ANY(...)`, every SCD2 version of a customer in one bucket) after one
+`count(*)` of events whose `customer_sk` is NULL or not in `dim_customer`. No DDL, no
 temporary tables, no writes. It runs on the host network against 127.0.0.1:5433 and
 127.0.0.1:5434, so the sources never listen beyond loopback. Never pass `--env-file .env`
 to it: only the two source passwords, by name.
