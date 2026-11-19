@@ -2100,3 +2100,134 @@ def test_real_source_metadata_with_a_dataset_id_gives_snapshot_then_dataset_row(
     assert dataset["dataset_path"] is None  # bundle metadata only, never the snapshot dir
     assert dataset["created_by"] == database.REAL_SOURCE_SNAPSHOT_WRITER
     assert "c" * 64 in dataset["notes"]
+
+
+# --- 4 lakh round: one transaction across insert chunks, and P5's slice indexes -------------
+
+# Project 5's batch prediction statements (p5-notes stageSB-design/statements.sql, 1-3),
+# verbatim: the indexes below exist so they stay fast as ml.batch_predictions grows.
+P5_LATEST_RUN = (
+    'SELECT "batch_run_id" FROM "integration"."prediction_outputs" WHERE "batch_run_id" IS '
+    'NOT NULL ORDER BY "recorded_at" DESC, "batch_run_id" DESC LIMIT 1;')
+P5_LATEST_RUN_ANOMALY_COUNT = (
+    'SELECT count(*) FROM "integration"."prediction_outputs" WHERE "is_anomaly" IS TRUE AND '
+    '"batch_run_id" = (SELECT "batch_run_id" FROM "integration"."prediction_outputs" WHERE '
+    '"batch_run_id" IS NOT NULL ORDER BY "recorded_at" DESC, "batch_run_id" DESC LIMIT 1);')
+P5_PREDICTION_SLICE = (
+    'SELECT "source_project", "source_system", "source_entity", "source_record_id", '
+    '"event_timestamp", "schema_version", "domain_tag", "recorded_at", "prediction_source", '
+    '"batch_run_id", "model_name", "model_version", "feature_schema_version", '
+    '"dataset_snapshot_id", "entity_type", "entity_id", "anomaly_score", "is_anomaly", '
+    '"threshold_used", "drift_status", "prediction_status", "latency_ms", '
+    '"feature_payload_hash" FROM (SELECT "source_project", "source_system", "source_entity", '
+    '"source_record_id", "event_timestamp", "schema_version", "domain_tag", "recorded_at", '
+    '"prediction_source", "batch_run_id", "model_name", "model_version", '
+    '"feature_schema_version", "dataset_snapshot_id", "entity_type", "entity_id", '
+    '"anomaly_score", "is_anomaly", "threshold_used", "drift_status", "prediction_status", '
+    '"latency_ms", "feature_payload_hash" FROM (SELECT "source_project", "source_system", '
+    '"source_entity", "source_record_id", "event_timestamp", "schema_version", "domain_tag", '
+    '"recorded_at", "prediction_source", "batch_run_id", "model_name", "model_version", '
+    '"feature_schema_version", "dataset_snapshot_id", "entity_type", "entity_id", '
+    '"anomaly_score", "is_anomaly", "threshold_used", "drift_status", "prediction_status", '
+    '"latency_ms", "feature_payload_hash", row_number() OVER (PARTITION BY "entity_type" '
+    'ORDER BY "anomaly_score", "source_record_id" COLLATE "C") AS "slice_rank" FROM '
+    '"integration"."prediction_outputs" WHERE "is_anomaly" IS TRUE AND "batch_run_id" = '
+    '(SELECT "batch_run_id" FROM "integration"."prediction_outputs" WHERE "batch_run_id" IS '
+    'NOT NULL ORDER BY "recorded_at" DESC, "batch_run_id" DESC LIMIT 1)) AS "ranked" ORDER '
+    'BY "slice_rank", "entity_type" COLLATE "C" LIMIT 2000) AS "slice" ORDER BY '
+    '"event_timestamp", "source_record_id";')
+
+P5_SLICE_INDEXES = {
+    "idx_batch_predictions_recorded_run": "ON ml.batch_predictions(created_at DESC, "
+    "batch_run_id DESC);",
+    "idx_batch_predictions_run_anomalies": "ON ml.batch_predictions(batch_run_id) "
+    "WHERE is_anomaly IS TRUE;",
+}
+
+
+def test_prediction_tables_define_the_indexes_p5_slices_need() -> None:
+    sql_text = (database.SQL_DIR / "create_prediction_tables.sql").read_text(encoding="utf-8")
+    flat = " ".join(sql_text.split())
+
+    for name, definition in P5_SLICE_INDEXES.items():
+        assert f"CREATE INDEX IF NOT EXISTS {name} {definition}" in flat
+
+
+def _plan_indexes(connection, statement: str) -> set[str]:
+    from sqlalchemy import text
+
+    plan = connection.execute(text("EXPLAIN (FORMAT JSON) " + statement.rstrip(";"))).scalar_one()
+    found: set[str] = set()
+
+    def _walk(node) -> None:
+        if isinstance(node, dict):
+            if "Index Name" in node:
+                found.add(node["Index Name"])
+            for value in node.values():
+                _walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                _walk(value)
+
+    _walk(plan)
+    return found
+
+
+@pytest.mark.postgres
+def test_p5_batch_prediction_statements_can_use_the_slice_indexes(database_mode) -> None:
+    from sqlalchemy import text
+
+    with database_mode.begin() as connection:
+        connection.execute(text("SET LOCAL enable_seqscan = off"))
+        latest = _plan_indexes(connection, P5_LATEST_RUN)
+        count = _plan_indexes(connection, P5_LATEST_RUN_ANOMALY_COUNT)
+        slice_ = _plan_indexes(connection, P5_PREDICTION_SLICE)
+
+    assert "idx_batch_predictions_recorded_run" in latest
+    for plan in (count, slice_):
+        assert {"idx_batch_predictions_recorded_run",
+                "idx_batch_predictions_run_anomalies"} <= plan
+
+
+@pytest.mark.postgres
+def test_batch_predictions_are_inserted_in_chunks_in_one_transaction(
+    initialized_database,
+    tmp_path: Path,
+    trained_metadata_paths: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import uuid
+    from dataclasses import replace
+
+    import pandas as pd
+
+    from anomaly_detection.batch_inference import run_batch_inference
+
+    _version, feature_names = _serve_own_single_model(trained_metadata_paths)
+    monkeypatch.setattr(database, "BATCH_PREDICTION_INSERT_ROWS", 2)
+    features = pd.DataFrame(
+        [{"entity_id": f"customer_{index}", **dict.fromkeys(feature_names, float(index))}
+         for index in range(5)]
+    )
+
+    predictions = run_batch_inference(features, output_path=tmp_path / "batch.jsonl")
+    run = {"run": predictions[0].batch_run_id}
+
+    assert _count(initialized_database,
+                  "SELECT COUNT(*) FROM ml.batch_predictions WHERE batch_run_id = :run", run) == 5
+    assert _count(
+        initialized_database,
+        "SELECT COUNT(DISTINCT xmin::text) FROM ml.batch_predictions WHERE batch_run_id = :run",
+        run,
+    ) == 1
+
+    # A refused row in the last chunk leaves none of the run's rows behind.
+    failing_run = str(uuid.uuid4())
+    failing = [replace(p, prediction_id=str(uuid.uuid4()), batch_run_id=failing_run)
+               for p in predictions]
+    failing[-1] = replace(failing[-1], prediction_status="not_a_status")
+    with pytest.raises(Exception, match="check constraint"):
+        database.insert_batch_predictions(failing)
+    assert _count(initialized_database,
+                  "SELECT COUNT(*) FROM ml.batch_predictions WHERE batch_run_id = :run",
+                  {"run": failing_run}) == 0

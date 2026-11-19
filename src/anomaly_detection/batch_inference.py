@@ -39,6 +39,8 @@ DEFAULT_ACTIVE_MODEL_PATH = PROJECT_ROOT / "configs" / "active_model.yaml"
 DEFAULT_PREDICTION_LOG_PATH = (
     PROJECT_ROOT / "logs" / "predictions" / "batch_predictions.jsonl"
 )
+# Records normalized and appended to the JSONL sink per chunk.
+BATCH_WRITE_CHUNK_ROWS = 50_000
 
 
 class BatchInferenceError(RuntimeError):
@@ -556,6 +558,41 @@ def _score_segmented_batch(
     )
 
 
+ROW_ID_COLUMNS = ("entity_id", "user_id", "source_record_id", "event_id", "session_id")
+
+
+def _row_values(
+    features: pd.DataFrame,
+    row_feature_names: list[list[str]],
+    entity_key: str,
+):
+    """Each row's values as DataFrame.iterrows() gives them, without a Series per row.
+
+    iterrows() reads one array of the frame's common dtype, so a value can change
+    type (an int64 column in an all-number frame comes back as a float). Each
+    column is converted to that same common dtype, so records do not change.
+    """
+
+    from pandas.core.dtypes.cast import find_common_type
+
+    wanted: dict[str, None] = {}
+    for names in {id(names): names for names in row_feature_names}.values():
+        wanted.update(dict.fromkeys(names))
+    wanted.update(dict.fromkeys((entity_key, *ROW_ID_COLUMNS)))
+    columns = [column for column in wanted if column in features.columns]
+
+    common = find_common_type(list(features.dtypes)) if len(features.columns) else object
+    as_object = not isinstance(common, np.dtype) or common == np.dtype(object)
+    values = {
+        column: (
+            features[column].astype(object) if as_object else features[column].astype(common)
+        ).tolist()
+        for column in columns
+    }
+    for row_number in range(len(features)):
+        yield {column: values[column][row_number] for column in columns}
+
+
 def _build_records(
     features: pd.DataFrame,
     artifacts: ActiveModelArtifacts,
@@ -573,9 +610,10 @@ def _build_records(
     score_timestamp = datetime.now(UTC).isoformat()
     entity_key = str(artifacts.feature_schema.get("entity_key") or "entity_id")
 
+    rows = _row_values(features, row_feature_names, entity_key)
     records: list[BatchPredictionRecord] = []
 
-    for row_number, (_row_index, row) in enumerate(features.iterrows()):
+    for row_number, row in enumerate(rows):
         feature_payload = {
             feature_name: _json_safe(row[feature_name])
             for feature_name in row_feature_names[row_number]
@@ -646,12 +684,31 @@ def write_predictions_jsonl(
     predictions: list[BatchPredictionRecord],
     output_path: Path = DEFAULT_PREDICTION_LOG_PATH,
 ) -> Path:
-    """Persist batch prediction evidence using the shared logging contract."""
+    """Persist batch prediction evidence using the shared logging contract.
 
-    return write_batch_predictions_jsonl(
-        list(predictions),
-        output_path,
-    )
+    Appended in chunks, so the normalized JSON records of a large run are never
+    all in memory at once; the file gets the same lines in the same order.
+    """
+
+    predictions = list(predictions)
+    if not predictions:
+        return write_batch_predictions_jsonl(predictions, output_path)  # refuses, as before
+    for start in range(0, len(predictions), BATCH_WRITE_CHUNK_ROWS):
+        write_batch_predictions_jsonl(
+            predictions[start : start + BATCH_WRITE_CHUNK_ROWS], output_path
+        )
+    return output_path
+
+
+def entity_type_summary(predictions: Sequence[BatchPredictionRecord]) -> dict[str, dict[str, int]]:
+    """Rows and anomalies per entity_type, sorted by entity_type."""
+
+    summary: dict[str, dict[str, int]] = {}
+    for prediction in predictions:
+        counts = summary.setdefault(prediction.entity_type, {"rows": 0, "anomalies": 0})
+        counts["rows"] += 1
+        counts["anomalies"] += int(prediction.is_anomaly)
+    return dict(sorted(summary.items()))
 
 def load_feature_batch(input_path: Path) -> pd.DataFrame:
     """Load a batch feature file from parquet, csv, json, or jsonl."""
@@ -793,8 +850,10 @@ def main() -> None:
         json.dumps(
             {
                 "status": "success",
+                "batch_run_id": predictions[0].batch_run_id if predictions else None,
                 "records_scored": len(predictions),
                 "anomalies_detected": anomaly_count,
+                "entity_types": entity_type_summary(predictions),
                 "output_path": str(args.output_path),
             },
             sort_keys=True,
