@@ -395,8 +395,10 @@ Extraction reads Project 1 (127.0.0.1:5433) and Project 2/3 (127.0.0.1:5434) rea
 Every source session is opened with
 `-c default_transaction_read_only=on -c statement_timeout=120000` (Project 4's own
 database engine is not), and before each table is read the extract checks
-`SHOW transaction_read_only` is `on` and refuses otherwise. It issues only `SELECT *` per
-configured table (plus `warehouse.dim_customer` for web events). It runs as a
+`SHOW transaction_read_only` is `on` and refuses otherwise. It issues only `SELECT`s:
+`SELECT *` per configured table (plus `warehouse.dim_customer` for web events), except
+`warehouse.fact_web_events`, which is read as the 12 columns the extract uses, whole or,
+at scale, in buckets of business customers (see "Scale run" below). It runs as a
 `--network host` container against the sources' loopback ports, so they never need to
 listen beyond 127.0.0.1. The two passwords are read singly from `.env` and passed by
 name; never `--env-file .env`, which would hand the extract every Project 4 secret too:
@@ -435,6 +437,41 @@ logs/predictions/batch_predictions.jsonl
 With `PROJECT4_POSTGRES_*` configured, every batch run is also inserted into
 `ml.batch_predictions` (table contract: `sql/create_prediction_tables.sql`), which the
 drift job reads.
+
+One call scores every entity type in the input under one `batch_run_id` and prints it,
+with rows and anomalies per entity type. Records are appended to the JSONL file in chunks
+of 50,000 and inserted in chunks of 5,000 (multi-row `INSERT`s), all in one database
+transaction, so a failed chunk leaves none of the run's rows.
+
+### Scale run
+
+At P2's 4,00,000 customers a snapshot has about 11.5 lakh rows. The extract reads
+`warehouse.fact_web_events` (about 79 lakh rows) in buckets of business customers, one
+per 50,000 customers (`P4_WEB_EVENT_BUCKETS` overrides the count; at the default size it
+is 1). Every SCD2 version (`customer_sk`) of a customer and every sentinel member is read
+in one bucket, NULL or unknown `customer_sk` values are still refused, and each customer's
+events are sorted by event before averaging, so the snapshot and its `content_sha256` do
+not depend on the bucket count or on the order the database returns rows in.
+`content_sha256` is computed over the CSV in chunks of 100,000 rows: the same hash as
+before, without the whole CSV in memory.
+
+Run day, in this order (`tools()` from "Local runbook"; the extract is the command in
+"Training snapshots", with the source passwords by name):
+
+```bash
+tools python -m anomaly_detection.database apply-schema   # adds the two P5 slice indexes
+# extract: prints row_count and content_sha256; metadata.json has entity_type_counts
+# and, per table, null_fills (browse-only users: avg_event_price / max_event_price)
+tools python -m anomaly_detection.retrain --snapshot latest --model-version v006 --compare-with v004
+tools python -m anomaly_detection.registry promote --model-version v006 --notes "4 lakh round"
+tools python -m anomaly_detection.batch_inference \
+  --input-path data/features/training/snapshot_date=DATE/snapshot_id=SNAPSHOT_ID/features.parquet \
+  --source-project project_4 --source-table real_source_snapshot
+```
+
+retrain prints rows and the anomaly rate per entity type and the v004 -> v006 flag rates;
+its `evaluation_report.json` records both snapshots' `content_sha256`. batch_inference
+prints the `batch_run_id` and rows and anomalies per entity type.
 
 ## Online FastAPI inference
 
@@ -1105,6 +1142,8 @@ Implemented locally, not production-deployed:
 - no real production traffic
 - no verified anomaly labels
 - no real external incident-management integration
+- the drift job reads every batch payload of the last 24 hours into memory at once
+  (about 11.5 lakh rows per batch run at P2's 4,00,000 customers)
 
 These are intentional boundaries. The project is built to prove production ML platform mechanics locally before adding cloud cost or managed services.
 
