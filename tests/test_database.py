@@ -2104,7 +2104,9 @@ def test_real_source_metadata_with_a_dataset_id_gives_snapshot_then_dataset_row(
 
 # --- 4 lakh round: one transaction across insert chunks, and P5's slice indexes -------------
 
-# Project 5's batch prediction statements (p5-notes stageSB-design/statements.sql, 1-3),
+# Project 5's batch prediction statements, as its reader builds them: the latest-run check,
+# the selection count and the round-robin slice of src/project5_ai/sources/project4_reader.py
+# in the AI-Decision-Intelligence-Layer repo,
 # verbatim: the indexes below exist so they stay fast as ml.batch_predictions grows.
 P5_LATEST_RUN = (
     'SELECT "batch_run_id" FROM "integration"."prediction_outputs" WHERE "batch_run_id" IS '
