@@ -93,29 +93,30 @@ rollback to previous stable model
 
 ## Model lifecycle
 
-Registered versions on 2026-11-16:
+Registered versions on 2026-11-20:
 
 | Version | Status | Kind | Feature schema | Why |
 |---|---|---|---|---|
 | `v001` | retired | single | `feature_schema_v001` | First model, trained on a Project 4 demo snapshot to prove training, artifacts, registry, and promotion. |
 | `v002` | archived | single | `feature_schema_v001` | First real-source model (Project 1 + Project 2/3 extracts, 51 features); production until v004. |
 | `v003` | retired | single | `feature_schema_v002` | Superseded: the single model learned the entity type rather than anomalies (see its `evaluation_report.json`). |
-| `v004` | production | segmented | `feature_schema_v003` | One Isolation Forest per entity type (6 segments, 52 features in total). |
+| `v004` | archived | segmented | `feature_schema_v003` | One Isolation Forest per entity type (6 segments, 52 features in total); production until v006. |
 | `v005` | rolled_back | segmented | `feature_schema_v003` | Retrained from a fresh read-only extract (same data as v004); `training_dataset_id` `64e7a3c0-bd07-5f74-95f5-71cc9e494e1b`, MLflow run `93a91a6a69834659befd027b2496b953`. Promoted, then rolled back to v004: the first real rollback (compose and kind). |
+| `v006` | production | segmented | `feature_schema_v003` | Retrained on the snapshot `real_source_20261120T182648Z` (11,85,067 rows, 6 segments, 52 features in total); `training_dataset_id` `646b5b2a-d4fa-5564-b76a-b04ae2e276fe`, MLflow run `a6ff1f0b52094a248618ca1b714e4e52`. Promoted on 2026-11-20, when v004 was archived. |
 
 Current active model:
 
 | Field | Value |
 |---|---|
 | Model name | `isolation_forest` |
-| Active version | `v004` |
+| Active version | `v006` |
 | Model kind | segmented: `campaign`, `customer`, `funnel_day`, `product`, `user`, `web_customer` |
-| Snapshot | `real_source_20261115T010701Z` (`real_source_extract`) |
+| Snapshot | `real_source_20261120T182648Z` (`real_source_extract`) |
 | Feature schema version | `feature_schema_v003` |
 | Feature count | `52` (each segment scores its own subset) |
-| Baseline anomaly rate | `0.0507` |
+| Baseline anomaly rate | `0.0500` |
 | Label availability | `unlabeled_proxy_metrics` |
-| Artifact path | `artifacts/models/isolation_forest/model_version=v004/model.joblib` |
+| Artifact path | `artifacts/models/isolation_forest/model_version=v006/model.joblib` |
 
 The table is a dated snapshot. The live state comes from the API and the registry:
 
