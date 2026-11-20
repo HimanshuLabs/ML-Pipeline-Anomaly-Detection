@@ -90,7 +90,7 @@
     {
       "algorithm": "IsolationForest",
       "approved_for_prod": true,
-      "archived_at_utc": null,
+      "archived_at_utc": "2026-11-20T18:33:49.282787+00:00",
       "artifact_dir": "artifacts/models/isolation_forest/model_version=v004",
       "artifact_path": "artifacts/models/isolation_forest/model_version=v004/model.joblib",
       "baseline_anomaly_rate": 0.05071884984025559,
@@ -110,7 +110,7 @@
       "notes": "Promoted segmented v004 (D5: one IsolationForest per entity type)",
       "promoted_at_utc": "2026-11-16T04:18:54.069261+00:00",
       "snapshot_id": "real_source_20261115T010701Z",
-      "status": "production",
+      "status": "archived",
       "threshold_used": null,
       "training_dataset_id": null,
       "training_finished_at_utc": "2026-11-15T02:06:45.795166+00:00",
@@ -144,8 +144,37 @@
       "training_dataset_id": "64e7a3c0-bd07-5f74-95f5-71cc9e494e1b",
       "training_finished_at_utc": "2026-11-16T03:54:56.202775+00:00",
       "training_started_at_utc": "2026-11-16T03:54:52.321257+00:00"
+    },
+    {
+      "algorithm": "IsolationForest",
+      "approved_for_prod": true,
+      "archived_at_utc": null,
+      "artifact_dir": "artifacts/models/isolation_forest/model_version=v006",
+      "artifact_path": "artifacts/models/isolation_forest/model_version=v006/model.joblib",
+      "baseline_anomaly_rate": 0.05000223616048713,
+      "baseline_f1_proxy": null,
+      "baseline_precision_proxy": null,
+      "baseline_recall_proxy": null,
+      "baseline_stats_path": "artifacts/models/isolation_forest/model_version=v006/baseline_stats.json",
+      "created_at_utc": "2026-11-20T18:31:46.176658+00:00",
+      "feature_schema_path": "artifacts/models/isolation_forest/model_version=v006/feature_schema.json",
+      "feature_schema_version": "feature_schema_v003",
+      "latency_p50_ms": 0.0,
+      "latency_p95_ms": 0.0,
+      "metadata_path": "artifacts/models/isolation_forest/model_version=v006/metadata.json",
+      "model_id": "6c2a4979-8eda-5773-b536-2bb017f5635c",
+      "model_name": "isolation_forest",
+      "model_version": "v006",
+      "notes": "4 lakh round",
+      "promoted_at_utc": "2026-11-20T18:33:49.282787+00:00",
+      "snapshot_id": "real_source_20261120T182648Z",
+      "status": "production",
+      "threshold_used": null,
+      "training_dataset_id": "646b5b2a-d4fa-5564-b76a-b04ae2e276fe",
+      "training_finished_at_utc": "2026-11-20T18:30:52.391550+00:00",
+      "training_started_at_utc": "2026-11-20T18:30:18.656617+00:00"
     }
   ],
   "registry_backend": "local_json",
-  "updated_at_utc": "2026-11-16T04:19:02.460303+00:00"
+  "updated_at_utc": "2026-11-20T18:33:49.548554+00:00"
 }
