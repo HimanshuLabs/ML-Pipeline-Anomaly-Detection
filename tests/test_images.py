@@ -250,3 +250,12 @@ def test_ci_builds_all_three_targets() -> None:
     for target, image in IMAGES.items():
         tag = image.replace(":local", ":ci")
         assert f"docker build -f docker/Dockerfile --target {target} -t {tag} ." in ci
+
+
+def test_compose_postgres_has_a_larger_shared_memory() -> None:
+    compose = yaml.safe_load((REPO_ROOT / "docker-compose.yml").read_text(encoding="utf-8"))
+    postgres = compose["services"]["anomaly-postgres"]
+
+    # Docker's 64 MB /dev/shm is too small for a parallel VACUUM.
+    assert postgres["shm_size"] == "1g"
+    assert "restart" not in postgres

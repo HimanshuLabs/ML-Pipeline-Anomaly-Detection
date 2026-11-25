@@ -883,3 +883,301 @@ def test_a_bundle_trained_from_a_new_snapshot_records_no_home_path(
         serialized = json.dumps(snapshot)
         for marker in HOME_PATH_MARKERS:
             assert marker not in serialized, (version, marker)
+
+
+# --- clean-up: the source statement timeout is a per-source setting ------------------------
+
+
+def _built_session_options(monkeypatch, source: dict) -> str:
+    from anomaly_detection import source_extract
+
+    captured: dict = {}
+    real_create_engine = source_extract.create_engine
+
+    def _capture(url, **kwargs):
+        captured.update(kwargs)
+        return real_create_engine(url, **kwargs)
+
+    monkeypatch.setattr(source_extract, "create_engine", _capture)
+    monkeypatch.setenv("PROJECT4_TEST_SOURCE_PASSWORD", "not-a-real-password")
+    source_extract.build_postgres_engine(source)
+    return captured["connect_args"]["options"]
+
+
+def test_source_statement_timeout_comes_from_the_source_config(monkeypatch) -> None:
+    options = _built_session_options(monkeypatch, _source_config(statement_timeout_ms=300000))
+
+    assert options == "-c default_transaction_read_only=on -c statement_timeout=300000"
+
+
+@pytest.mark.parametrize("value", [0, -1, True, False, "120000", 1.5, None])
+def test_source_statement_timeout_must_be_a_positive_whole_number(monkeypatch, value) -> None:
+    from anomaly_detection import source_extract
+
+    def _must_not_build(*args, **kwargs):
+        raise AssertionError("an engine was built with an invalid statement timeout")
+
+    monkeypatch.setattr(source_extract, "create_engine", _must_not_build)
+    monkeypatch.setenv("PROJECT4_TEST_SOURCE_PASSWORD", "not-a-real-password")
+
+    with pytest.raises(SourceExtractionError, match="statement_timeout_ms"):
+        source_extract.build_postgres_engine(_source_config(statement_timeout_ms=value))
+
+
+def test_shipped_source_config_keeps_the_two_minute_bound() -> None:
+    from anomaly_detection.source_extract import (
+        PROJECT_ROOT,
+        load_config,
+        source_session_options,
+    )
+
+    config = load_config(PROJECT_ROOT / "configs" / "source_extract.yaml")
+
+    for project in ("project_1", "project_2_3"):
+        assert config[project]["statement_timeout_ms"] == 120000
+        assert source_session_options(config[project]) == SOURCE_SESSION_OPTIONS
+
+
+# --- clean-up: dim_customer is read as the two columns the extract uses ------------------
+
+DIMENSION_PROBE = 'SELECT * FROM "warehouse"."dim_customer" LIMIT 0'
+DIMENSION_READ = 'SELECT "customer_sk", "customer_id" FROM "warehouse"."dim_customer"'
+
+
+def _stub_dimension_reads(monkeypatch, *, available, rows) -> list[str]:
+    from anomaly_detection import source_extract
+
+    calls: list[str] = []
+
+    def _read(query, connection):
+        calls.append(str(query))
+        if str(query).endswith("LIMIT 0"):
+            return pd.DataFrame(columns=list(available))
+        return rows
+
+    monkeypatch.setattr(source_extract.pd, "read_sql_query", _read)
+    return calls
+
+
+def test_customer_dimension_is_read_as_its_two_columns(monkeypatch) -> None:
+    from anomaly_detection import source_extract
+
+    dimension = _customer_dimension()
+    calls = _stub_dimension_reads(
+        monkeypatch,
+        available=dimension.columns,
+        rows=dimension[["customer_sk", "customer_id"]],
+    )
+    engine = _ProbeEngine("on")
+
+    frame = source_extract.read_customer_dimension(engine, "warehouse", "dim_customer")
+
+    assert engine.connection.statements == ["SHOW transaction_read_only"]
+    assert calls == [DIMENSION_PROBE, DIMENSION_READ]
+    assert list(frame.columns) == ["customer_sk", "customer_id"]
+
+
+def test_customer_dimension_missing_column_fails_before_any_row_is_read(monkeypatch) -> None:
+    from anomaly_detection import source_extract
+
+    calls = _stub_dimension_reads(
+        monkeypatch, available=["customer_sk", "is_current"], rows=_customer_dimension()
+    )
+
+    with pytest.raises(SourceExtractionError, match="customer_id") as error:
+        source_extract.read_customer_dimension(_ProbeEngine("on"), "warehouse", "dim_customer")
+
+    assert "warehouse.dim_customer" in str(error.value)
+    assert calls == [DIMENSION_PROBE]
+
+
+def test_customer_dimension_read_refuses_a_writable_session(monkeypatch) -> None:
+    from anomaly_detection import source_extract
+
+    dimension = _customer_dimension()
+    calls = _stub_dimension_reads(monkeypatch, available=dimension.columns, rows=dimension)
+    engine = _ProbeEngine("off")
+
+    with pytest.raises(SourceExtractionError, match="not read-only"):
+        source_extract.read_customer_dimension(engine, "warehouse", "dim_customer")
+
+    assert calls == []
+    assert engine.connection.statements == ["SHOW transaction_read_only"]
+
+
+def test_customer_dimension_with_zero_rows_fails_like_read_table(monkeypatch) -> None:
+    import re
+
+    from anomaly_detection import source_extract
+
+    _stub_dimension_reads(
+        monkeypatch,
+        available=["customer_sk", "customer_id"],
+        rows=pd.DataFrame(columns=["customer_sk", "customer_id"]),
+    )
+
+    with pytest.raises(
+        SourceExtractionError,
+        match=re.escape("Source table returned zero rows: warehouse.dim_customer"),
+    ):
+        source_extract.read_customer_dimension(_ProbeEngine("on"), "warehouse", "dim_customer")
+
+
+@pytest.mark.parametrize("bucket_count", [1, 2])
+def test_two_column_dimension_gives_the_same_frame_buckets_and_hash(bucket_count: int) -> None:
+    from anomaly_detection.source_extract import (
+        content_sha256,
+        web_event_bucket_count,
+        web_event_buckets,
+    )
+
+    full = _customer_dimension()
+    two = full[["customer_sk", "customer_id"]]
+    assert set(full.columns) > set(two.columns)  # SCD2 columns the extract never uses
+    events = _web_events()
+    full_report, two_report = ExtractionReport(), ExtractionReport()
+
+    old = transform_web_events(events, full, report=full_report)
+    new = transform_web_events(events, two, report=two_report)
+
+    assert web_event_bucket_count(two, None) == web_event_bucket_count(full, None)
+    assert web_event_buckets(two, bucket_count) == web_event_buckets(full, bucket_count)
+    pd.testing.assert_frame_equal(
+        new.drop(columns=["extracted_at"]), old.drop(columns=["extracted_at"]), check_exact=True
+    )
+    assert two_report.to_metadata() == full_report.to_metadata()
+    assert content_sha256(new) == content_sha256(old)
+
+
+@pytest.mark.postgres
+def test_dimension_column_read_matches_select_star_on_a_real_database(monkeypatch) -> None:
+    import os
+    import uuid
+
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.engine import make_url
+
+    from anomaly_detection import source_extract
+    from anomaly_detection.source_extract import (
+        content_sha256,
+        count_unmapped_web_events,
+        read_customer_dimension,
+        read_table,
+        read_web_events,
+        transform_web_events_in_buckets,
+    )
+
+    url_text = os.environ.get("PROJECT4_TEST_DATABASE_URL")
+    if not url_text:
+        if os.environ.get("PROJECT4_REQUIRE_TEST_DATABASE") == "1":
+            pytest.fail("PROJECT4_REQUIRE_TEST_DATABASE=1 but PROJECT4_TEST_DATABASE_URL is unset")
+        pytest.skip("PROJECT4_TEST_DATABASE_URL is not set")
+    url = make_url(url_text)
+    schema = f"p4test_source_{uuid.uuid4().hex[:12]}"
+    writer = create_engine(url_text, hide_parameters=True)
+    monkeypatch.setenv("PROJECT4_TEST_SOURCE_PASSWORD", url.password or "")
+    reader = source_extract.build_postgres_engine(
+        _source_config(host=url.host, port=url.port, database=url.database, username=url.username)
+    )
+    try:
+        with writer.begin() as connection:
+            connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+            connection.execute(text(
+                f'CREATE TABLE "{schema}".dim_customer (customer_sk integer PRIMARY KEY, '
+                "customer_id text, is_current boolean, valid_from date)"
+            ))
+            connection.execute(text(
+                f'INSERT INTO "{schema}".dim_customer VALUES '
+                "(0, 'UNKNOWN', true, '2026-01-01'), (-1, 'INVALID', true, '2026-01-01'), "
+                "(10, 'C010', true, '2026-01-01'), (11, 'C011', false, '2026-01-01'), "
+                "(12, 'C011', true, '2026-03-01'), (13, 'C013', true, '2026-01-01')"
+            ))
+            connection.execute(text(
+                f'CREATE TABLE "{schema}".fact_web_events (event_id text, session_id text, '
+                "customer_sk integer, event_type text, event_timestamp timestamp, "
+                "engagement_score double precision, purchase_probability double precision, "
+                "cart_abandonment_probability double precision, event_value double precision, "
+                "api_latency_ms double precision, page_load_time_ms double precision, "
+                "fraud_score double precision, time_on_page_sec integer)"
+            ))
+            connection.execute(text(
+                f'INSERT INTO "{schema}".fact_web_events VALUES '
+                "('E1', 'S1', 10, 'page_view', '2026-06-10 10:00', 0.5, 0.1, 0.2, 10, 120, "
+                "900, 0.01, 20), "
+                "('E2', 'S1', 10, 'purchase', '2026-06-10 10:05', 0.9, 0.8, 0.1, 250, 110, "
+                "800, 0.02, 30), "
+                "('E3', 'S2', 11, 'product_view', '2026-02-01 09:00', 0.4, 0.2, 0.3, 40, 130, "
+                "950, 0.03, 15), "
+                "('E4', 'S3', 12, 'add_to_cart', '2026-04-01 12:00', 0.7, 0.5, 0.6, NULL, 100, "
+                "700, 0.04, 25), "
+                "('E5', 'S4', 13, 'page_view', '2026-05-01 08:00', 0.3, 0.1, 0.2, 5, 140, "
+                "1000, 0.05, 10), "
+                "('E6', 'S5', 0, 'page_view', '2026-05-02 08:00', 0.2, 0.1, 0.1, 1, 150, "
+                "1100, 0.06, 5)"
+            ))
+
+        old_dimension = read_table(reader, schema, "dim_customer")
+        new_dimension = read_customer_dimension(reader, schema, "dim_customer")
+        assert {"is_current", "valid_from"} <= set(old_dimension.columns)
+        assert list(new_dimension.columns) == ["customer_sk", "customer_id"]
+
+        for bucket_count in (1, 2):
+            results = []
+            for dimension in (old_dimension, new_dimension):
+                report = ExtractionReport()
+                frame = transform_web_events_in_buckets(
+                    lambda sks: read_web_events(reader, schema, "fact_web_events", sks),
+                    lambda: count_unmapped_web_events(
+                        reader, schema, "fact_web_events", "dim_customer"
+                    ),
+                    dimension,
+                    report=report,
+                    bucket_count=bucket_count,
+                )
+                results.append((frame, report.to_metadata()))
+            (old, old_stats), (new, new_stats) = results
+            pd.testing.assert_frame_equal(
+                new.drop(columns=["extracted_at"]),
+                old.drop(columns=["extracted_at"]),
+                check_exact=True,
+            )
+            assert new_stats == old_stats
+            assert content_sha256(new) == content_sha256(old)
+    finally:
+        reader.dispose()
+        with writer.begin() as connection:
+            connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        writer.dispose()
+
+
+# --- clean-up: snapshot metadata.json is written atomically, with today's bytes ------------
+
+
+class _UnserializableReport(ExtractionReport):
+    def to_metadata(self) -> dict:
+        return {**super().to_metadata(), "zz": object()}
+
+
+def test_a_failed_snapshot_metadata_write_leaves_no_partial_file(tmp_path) -> None:
+    with pytest.raises(TypeError):
+        write_snapshot(
+            _unified_frame_for_hashing(),
+            _snapshot_config(tmp_path),
+            output_root=tmp_path,
+            extraction_report=_UnserializableReport(),
+        )
+
+    (snapshot_dir,) = tmp_path.glob("snapshot_date=*/snapshot_id=*")
+    names = [path.name for path in snapshot_dir.iterdir()]
+    assert "metadata.json" not in names
+    assert not [name for name in names if name.startswith(".metadata.json")]
+
+
+def test_snapshot_metadata_bytes_are_sorted_indented_without_a_final_newline(tmp_path) -> None:
+    result = write_snapshot(
+        _unified_frame_for_hashing(), _snapshot_config(tmp_path), output_root=tmp_path
+    )
+
+    written = result.metadata_path.read_bytes()
+    assert written == json.dumps(json.loads(written), indent=2, sort_keys=True).encode("utf-8")
+    assert written.endswith(b"}")

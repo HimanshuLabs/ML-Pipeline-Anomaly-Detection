@@ -460,3 +460,38 @@ def test_retrain_refuses_to_compare_with_an_unregistered_version(tmp_path: Path)
         )
 
     assert not (tmp_path / "artifacts").exists()
+
+
+# --- clean-up: evaluation_report.json is written atomically, with today's bytes ----------
+
+
+def test_evaluation_report_bytes_match_the_committed_v006_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from anomaly_detection import retrain
+
+    committed_path = (
+        Path(__file__).resolve().parents[1]
+        / "artifacts"
+        / "models"
+        / "isolation_forest"
+        / "model_version=v006"
+        / retrain.EVALUATION_REPORT_NAME
+    )
+    committed = committed_path.read_bytes()  # read only: the bundle is never written
+    # retrain's own write path, fed the committed report instead of a freshly built one.
+    monkeypatch.setattr(
+        retrain, "build_evaluation_report", lambda **_kwargs: json.loads(committed)
+    )
+    snapshot = _write_real_snapshot(tmp_path / "snapshots")
+    new_version = _unregistered_version(registry.DEFAULT_REGISTRY_PATH)
+
+    result = retrain.retrain(
+        snapshot=str(snapshot.snapshot_path),
+        model_version=new_version,
+        artifact_root=tmp_path / "artifacts",
+    )
+
+    assert result.evaluation_report_path.parent.is_relative_to(tmp_path)
+    assert result.evaluation_report_path.read_bytes() == committed

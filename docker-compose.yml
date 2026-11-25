@@ -50,6 +50,8 @@ services:
   anomaly-postgres:
     image: postgres:16.14
     container_name: project4_postgres
+    # Docker's default /dev/shm is 64 MB; a parallel VACUUM needs up to 1 GB.
+    shm_size: "1g"
     ports:
       - "127.0.0.1:5435:5432"
     environment:

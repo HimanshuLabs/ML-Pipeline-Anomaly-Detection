@@ -154,13 +154,27 @@ def _password_from_env(env_var_name: str) -> str:
 
 # Every session on a Project 1 / Project 2/3 source is read-only on the server side
 # and bounded in time. Only the source engines get these; Project 4's own database
-# engine (database.get_engine) is unchanged.
-SOURCE_SESSION_OPTIONS = "-c default_transaction_read_only=on -c statement_timeout=120000"
+# engine (database.get_engine) is unchanged. The bound is the source's
+# statement_timeout_ms in configs/source_extract.yaml, 120 s when it is absent.
+DEFAULT_SOURCE_STATEMENT_TIMEOUT_MS = 120_000
+
+
+def source_session_options(source: dict[str, Any]) -> str:
+    """libpq options of one source session: read-only, every statement bounded in time."""
+
+    value = source.get("statement_timeout_ms", DEFAULT_SOURCE_STATEMENT_TIMEOUT_MS)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise SourceExtractionError(
+            f"statement_timeout_ms must be a whole number of milliseconds, at least 1; "
+            f"got {value!r}"
+        )
+    return f"-c default_transaction_read_only=on -c statement_timeout={value}"
 
 
 def build_postgres_engine(source: dict[str, Any]) -> Engine:
     """Create a read-only SQLAlchemy engine for one configured upstream source."""
 
+    options = source_session_options(source)
     password = quote_plus(_password_from_env(source["password_env_var"]))
     username = quote_plus(str(source["username"]))
     host = source["host"]
@@ -172,7 +186,7 @@ def build_postgres_engine(source: dict[str, Any]) -> Engine:
         url,
         pool_pre_ping=True,
         hide_parameters=True,
-        connect_args={"options": SOURCE_SESSION_OPTIONS},
+        connect_args={"options": options},
     )
     return engine.execution_options(postgresql_readonly=True)
 
@@ -771,6 +785,7 @@ def transform_web_events(
 WEB_EVENT_BUCKET_CUSTOMERS = 50_000
 WEB_EVENT_BUCKETS_ENV = "P4_WEB_EVENT_BUCKETS"
 WEB_EVENT_READ_COLUMNS = REQUIRED_SOURCE_COLUMNS[WEB_EVENTS_TABLE]
+CUSTOMER_DIMENSION_READ_COLUMNS = REQUIRED_SOURCE_COLUMNS[CUSTOMER_DIMENSION_TABLE]
 
 
 def _business_keys(customer_dimension: pd.DataFrame) -> pd.DataFrame:
@@ -901,6 +916,29 @@ def read_web_events(
         return pd.read_sql_query(text(query), connection, params=params)
 
 
+def read_customer_dimension(engine: Engine, schema: str, table: str) -> pd.DataFrame:
+    """customer_sk and customer_id of the customer dimension: the only columns used."""
+
+    with engine.connect() as connection:
+        _require_read_only_session(connection)
+        available = pd.read_sql_query(
+            text(f'SELECT * FROM "{schema}"."{table}" LIMIT 0'), connection
+        ).columns
+        _require_columns(
+            pd.DataFrame(columns=available),
+            CUSTOMER_DIMENSION_TABLE,
+            CUSTOMER_DIMENSION_READ_COLUMNS,
+        )
+        columns = ", ".join(f'"{column}"' for column in CUSTOMER_DIMENSION_READ_COLUMNS)
+        query = text(f'SELECT {columns} FROM "{schema}"."{table}"')
+        dataframe = pd.read_sql_query(query, connection)
+
+    if dataframe.empty:
+        raise SourceExtractionError(f"Source table returned zero rows: {schema}.{table}")
+
+    return dataframe
+
+
 def count_unmapped_web_events(engine: Engine, schema: str, table: str, dimension: str) -> int:
     """Events whose customer_sk is NULL or not in the customer dimension."""
 
@@ -967,7 +1005,7 @@ def extract_project23_features(
         return read_table(engine, table_config["schema"], table_config["table"])
 
     web_config = table_configs["web_events"]
-    customer_dimension = read_table(
+    customer_dimension = read_customer_dimension(
         engine,
         web_config["schema"],
         web_config.get("customer_dimension_table", DEFAULT_CUSTOMER_DIMENSION),
@@ -1129,6 +1167,7 @@ def write_snapshot(
     """
 
     from anomaly_detection.feature_validation import validate_real_source_features
+    from anomaly_detection.registry import _write_bytes_atomic
     from anomaly_detection.training import feature_set_fingerprint
 
     now = datetime.now(UTC)
@@ -1205,8 +1244,10 @@ def write_snapshot(
         ),
     }
 
-    with metadata_path.open("w", encoding="utf-8") as file:
-        json.dump(metadata, file, indent=2, sort_keys=True)
+    # No trailing newline: the bytes stay those of every earlier snapshot.
+    _write_bytes_atomic(
+        metadata_path, json.dumps(metadata, indent=2, sort_keys=True).encode("utf-8")
+    )
 
     LOGGER.info("Wrote real-source snapshot (%s): %s", data_quality_status, snapshot_path)
 

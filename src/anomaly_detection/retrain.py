@@ -36,6 +36,7 @@ from anomaly_detection.registry import (
     DEFAULT_REGISTRY_PATH,
     ModelRegistryEntry,
     RegistryError,
+    _write_bytes_atomic,
     ensure_database_initialized,
     load_registry_state,
     load_verified_feature_spec,
@@ -500,9 +501,8 @@ def retrain(
             )
         bundle_paths = read_bundle_paths(artifact.metadata_path)
         report_path = bundle_paths["artifact_dir"] / EVALUATION_REPORT_NAME
-        with report_path.open("w", encoding="utf-8") as file:
-            json.dump(report, file, indent=2, sort_keys=True)
-            file.write("\n")
+        report_text = json.dumps(report, indent=2, sort_keys=True) + "\n"
+        _write_bytes_atomic(report_path, report_text.encode("utf-8"))
         run.log_evaluation(report=report, report_path=report_path)
 
         entry = register_model_from_artifacts(

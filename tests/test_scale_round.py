@@ -581,3 +581,29 @@ def test_readme_documents_the_scale_run_day_in_order() -> None:
         assert text in batch
     assert "drift job reads every batch payload of the last 24 hours" in _section(
         "Known limitations")
+
+
+# --- clean-up: the batch CLI prints the model version it scored with ------------------------
+
+
+def test_batch_cli_prints_the_model_version_of_the_run(tmp_path, monkeypatch, capsys) -> None:
+    from tests.test_batch_inference import _build_artifact_bundle
+
+    active_path = _build_artifact_bundle(tmp_path)
+    input_path = tmp_path / "features.csv"
+    pd.DataFrame({
+        "entity_id": ["a", "b"], "feature_a": [1.0, 10.0], "feature_b": [2.0, 20.0],
+    }).to_csv(input_path, index=False)
+    from anomaly_detection import database
+
+    monkeypatch.setattr(database, "is_configured", lambda: False)
+    monkeypatch.setattr("sys.argv", [
+        "batch_inference", "--input-path", str(input_path),
+        "--output-path", str(tmp_path / "out.jsonl"), "--active-model-path", str(active_path)])
+
+    batch_inference.main()
+
+    printed = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    written = [json.loads(line) for line in (tmp_path / "out.jsonl").read_text().splitlines()]
+    assert printed["model_version"] == "vtest"
+    assert {w["model_version"] for w in written} == {"vtest"}

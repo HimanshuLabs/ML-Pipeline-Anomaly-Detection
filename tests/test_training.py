@@ -410,3 +410,40 @@ def test_training_allows_schema_label_used_for_identical_feature_names(
     )
 
     assert artifact.feature_schema_version == "feature_schema_v001"
+
+
+# --- clean-up: bundle JSON files are written atomically, with today's bytes --------------
+
+V006_BUNDLE = (
+    Path(__file__).resolve().parents[1]
+    / "artifacts"
+    / "models"
+    / "isolation_forest"
+    / "model_version=v006"
+)
+
+
+def test_bundle_json_write_failure_keeps_the_previous_file(tmp_path: Path) -> None:
+    from anomaly_detection import training
+
+    path = tmp_path / "metadata.json"
+    training._write_json(path, {"model_version": "v999"})
+    before = path.read_bytes()
+
+    with pytest.raises(TypeError):
+        training._write_json(path, {"a": 1, "zz": object()})
+
+    assert path.read_bytes() == before
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["metadata.json"]
+
+
+@pytest.mark.parametrize("name", ["metadata.json", "feature_schema.json", "baseline_stats.json"])
+def test_bundle_json_bytes_match_the_committed_v006_files(tmp_path: Path, name: str) -> None:
+    from anomaly_detection import training
+
+    committed = (V006_BUNDLE / name).read_bytes()  # read only: the bundle is never written
+    path = tmp_path / name
+
+    training._write_json(path, json.loads(committed))
+
+    assert path.read_bytes() == committed

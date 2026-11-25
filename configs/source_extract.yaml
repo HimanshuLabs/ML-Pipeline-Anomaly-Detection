@@ -13,6 +13,8 @@ source_extract:
     database: personalization_db
     username: de_user
     password_env_var: PROJECT1_POSTGRES_PASSWORD
+    # Server-side bound on every statement on this source, in milliseconds (2 min).
+    statement_timeout_ms: 120000
     schema: public
     table: user_features
     entity_key: user_id
@@ -26,6 +28,8 @@ source_extract:
     database: marketing_analytics
     username: project2
     password_env_var: PROJECT23_POSTGRES_PASSWORD
+    # Server-side bound on every statement on this source, in milliseconds (2 min).
+    statement_timeout_ms: 120000
 
     tables:
       customer_360:

@@ -224,11 +224,13 @@ def insert_batch_predictions(records: Sequence[Any]) -> int:
 
     Rows are mapped and sent in chunks (multi-row INSERTs), so a large run never
     holds every mapped row at once; a failure in any chunk rolls back the run.
+    After the commit the table is analyzed, so the planner knows the new run.
     """
 
     if not records:
         return 0
-    with get_shared_engine().begin() as connection:
+    engine = get_shared_engine()
+    with engine.begin() as connection:
         for start in range(0, len(records), BATCH_PREDICTION_INSERT_ROWS):
             insert_rows(
                 connection,
@@ -238,7 +240,25 @@ def insert_batch_predictions(records: Sequence[Any]) -> int:
                     for record in records[start : start + BATCH_PREDICTION_INSERT_ROWS]
                 ],
             )
+    _analyze_batch_predictions(engine)
     return len(records)
+
+
+def _analyze_batch_predictions(engine: Engine) -> None:
+    """Refresh the planner statistics of ml.batch_predictions after a run has committed.
+
+    Its own transaction, after the run's, so the run's rows and their single xmin are
+    unchanged. The rows are already stored, so a failure is logged, not raised.
+    """
+
+    try:
+        with engine.begin() as connection:
+            connection.execute(text("ANALYZE ml.batch_predictions"))
+    except SQLAlchemyError as exc:
+        LOGGER.warning(
+            "ANALYZE ml.batch_predictions failed after the run committed: %s",
+            type(exc).__name__,
+        )
 
 
 def insert_drift_events(events: Sequence[Any]) -> int:

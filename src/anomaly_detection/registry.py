@@ -165,12 +165,9 @@ def _read_json(path: str | Path) -> dict[str, Any]:
 
 
 def _write_json(path: str | Path, payload: dict[str, Any]) -> None:
-    json_path = Path(path)
-    json_path.parent.mkdir(parents=True, exist_ok=True)
-
-    with json_path.open("w", encoding="utf-8") as file:
-        json.dump(payload, file, indent=2, sort_keys=True)
-        file.write("\n")
+    """Write JSON atomically: a failed write leaves the previous file intact."""
+    text = json.dumps(payload, indent=2, sort_keys=True) + "\n"
+    _write_bytes_atomic(path, text.encode("utf-8"))
 
 
 def _write_bytes_atomic(path: str | Path, data: bytes) -> None:

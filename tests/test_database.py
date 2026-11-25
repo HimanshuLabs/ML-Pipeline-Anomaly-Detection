@@ -2233,3 +2233,121 @@ def test_batch_predictions_are_inserted_in_chunks_in_one_transaction(
     assert _count(initialized_database,
                   "SELECT COUNT(*) FROM ml.batch_predictions WHERE batch_run_id = :run",
                   {"run": failing_run}) == 0
+
+
+# --- clean-up: ml.batch_predictions is analyzed after the run commits ----------------------
+
+
+def _batch_predictions_analyze_count(engine) -> int:
+    """Manual ANALYZE count, read in its own transaction with a fresh statistics snapshot."""
+    from sqlalchemy import text
+
+    with engine.connect() as connection:
+        connection.execute(text("SELECT pg_stat_clear_snapshot()"))
+        return connection.execute(
+            text(
+                "SELECT analyze_count FROM pg_stat_user_tables "
+                "WHERE schemaname = 'ml' AND relname = 'batch_predictions'"
+            )
+        ).scalar_one()
+
+
+def _run_rows_md5(engine, run_id: str) -> str:
+    return _count(
+        engine,
+        "SELECT md5(string_agg(p::text, '|' ORDER BY p.source_record_id)) "
+        "FROM integration.prediction_outputs AS p WHERE p.batch_run_id = :run",
+        {"run": run_id},
+    )
+
+
+@pytest.mark.postgres
+def test_batch_insert_analyzes_the_table_after_the_run_commits(
+    initialized_database,
+    tmp_path: Path,
+    trained_metadata_paths: dict[str, Path],
+) -> None:
+    import pandas as pd
+
+    from anomaly_detection.batch_inference import run_batch_inference
+
+    _version, feature_names = _serve_own_single_model(trained_metadata_paths)
+    features = pd.DataFrame(
+        [{"entity_id": f"customer_{index}", **dict.fromkeys(feature_names, float(index))}
+         for index in range(5)]
+    )
+    analyzed_before = _batch_predictions_analyze_count(initialized_database)
+
+    predictions = run_batch_inference(features, output_path=tmp_path / "batch.jsonl")
+    run = {"run": predictions[0].batch_run_id}
+
+    assert _batch_predictions_analyze_count(initialized_database) > analyzed_before
+    assert _count(initialized_database,
+                  "SELECT COUNT(*) FROM ml.batch_predictions WHERE batch_run_id = :run", run) == 5
+    assert _count(
+        initialized_database,
+        "SELECT COUNT(DISTINCT xmin::text) FROM ml.batch_predictions WHERE batch_run_id = :run",
+        run,
+    ) == 1
+    # Statistics only: the rows P5 reads are the same before and after another ANALYZE.
+    rows_before = _run_rows_md5(initialized_database, run["run"])
+    database._analyze_batch_predictions(initialized_database)
+    assert _run_rows_md5(initialized_database, run["run"]) == rows_before
+
+
+class _FakeAnalyzeEngine:
+    """Records statements; the insert succeeds or fails, ANALYZE fails when told to."""
+
+    def __init__(self, *, analyze_fails: bool) -> None:
+        self.statements: list[str] = []
+        self.analyze_fails = analyze_fails
+
+    @contextmanager
+    def begin(self):
+        yield self
+
+    def execute(self, statement) -> None:
+        from sqlalchemy.exc import OperationalError
+
+        self.statements.append(str(statement))
+        if self.analyze_fails and str(statement).startswith("ANALYZE"):
+            raise OperationalError(str(statement), {}, Exception("simulated"))
+
+
+def _fake_batch_insert(monkeypatch: pytest.MonkeyPatch, engine, *, insert_fails: bool) -> None:
+    def _insert_rows(connection, table, rows) -> None:
+        if insert_fails:
+            raise RuntimeError("insert refused")
+        connection.statements.append(f"INSERT {table} {len(rows)}")
+
+    monkeypatch.setattr(database, "get_shared_engine", lambda: engine)
+    monkeypatch.setattr(database, "insert_rows", _insert_rows)
+    monkeypatch.setattr(database, "batch_prediction_row", lambda record: {"record": record})
+
+
+def test_a_failed_analyze_is_logged_and_the_committed_run_is_kept(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    engine = _FakeAnalyzeEngine(analyze_fails=True)
+    _fake_batch_insert(monkeypatch, engine, insert_fails=False)
+    caplog.set_level(logging.WARNING, logger=database.LOGGER.name)
+
+    assert database.insert_batch_predictions(["a", "b"]) == 2
+
+    assert engine.statements == ["INSERT ml.batch_predictions 2", "ANALYZE ml.batch_predictions"]
+    assert any(
+        "ANALYZE ml.batch_predictions failed" in record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+    )
+
+
+def test_analyze_is_not_run_when_the_insert_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    engine = _FakeAnalyzeEngine(analyze_fails=False)
+    _fake_batch_insert(monkeypatch, engine, insert_fails=True)
+
+    with pytest.raises(RuntimeError, match="insert refused"):
+        database.insert_batch_predictions(["a", "b"])
+
+    assert engine.statements == []

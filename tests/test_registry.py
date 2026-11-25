@@ -1225,3 +1225,31 @@ def test_every_fixture_bundle_exists_and_passes_the_feature_spec_check() -> None
         assert not Path(entry.artifact_path).is_absolute(), entry.model_version
         assert resolve_project_path(entry.artifact_path).is_file(), entry.model_version
         assert load_verified_feature_spec(entry).feature_names, entry.model_version
+
+
+# --- clean-up: the registry JSON is written atomically, with today's bytes ---------------
+
+
+def test_registry_json_write_failure_keeps_the_previous_file(tmp_path: Path) -> None:
+    from anomaly_detection import registry
+
+    path = tmp_path / "model_registry.json"
+    registry.save_model_registry(load_model_registry(REAL_REGISTRY_PATH), path)
+    before = path.read_bytes()
+
+    with pytest.raises(TypeError):
+        registry._write_json(path, {"a": 1, "zz": object()})
+
+    assert path.read_bytes() == before
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["model_registry.json"]
+
+
+def test_registry_json_bytes_match_the_committed_registry(tmp_path: Path) -> None:
+    from anomaly_detection import registry
+
+    committed = REAL_REGISTRY_PATH.read_bytes()
+    path = tmp_path / "model_registry.json"
+
+    registry._write_json(path, json.loads(committed))
+
+    assert path.read_bytes() == committed

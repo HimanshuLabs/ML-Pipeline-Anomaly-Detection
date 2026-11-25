@@ -394,12 +394,14 @@ Each real-source snapshot written since stage 15a also records:
 
 Extraction reads Project 1 (127.0.0.1:5433) and Project 2/3 (127.0.0.1:5434) read-only.
 Every source session is opened with
-`-c default_transaction_read_only=on -c statement_timeout=120000` (Project 4's own
-database engine is not), and before each table is read the extract checks
+`-c default_transaction_read_only=on -c statement_timeout=120000` (the timeout is each
+source's `statement_timeout_ms` in `configs/source_extract.yaml`; Project 4's own
+database engine gets neither), and before each table is read the extract checks
 `SHOW transaction_read_only` is `on` and refuses otherwise. It issues only `SELECT`s:
-`SELECT *` per configured table (plus `warehouse.dim_customer` for web events), except
-`warehouse.fact_web_events`, which is read as the 12 columns the extract uses, whole or,
-at scale, in buckets of business customers (see "Scale run" below). It runs as a
+`SELECT *` per configured table, except `warehouse.dim_customer` (read for web events as
+`customer_sk` and `customer_id`) and `warehouse.fact_web_events` (the 12 columns the
+extract uses, whole or, at scale, in buckets of business customers; see "Scale run"
+below). It runs as a
 `--network host` container against the sources' loopback ports, so they never need to
 listen beyond 127.0.0.1. The two passwords are read singly from `.env` and passed by
 name; never `--env-file .env`, which would hand the extract every Project 4 secret too:
@@ -472,7 +474,7 @@ tools python -m anomaly_detection.batch_inference \
 
 retrain prints rows and the anomaly rate per entity type and the v004 -> v006 flag rates;
 its `evaluation_report.json` records both snapshots' `content_sha256`. batch_inference
-prints the `batch_run_id` and rows and anomalies per entity type.
+prints the `batch_run_id`, the `model_version`, and rows and anomalies per entity type.
 
 ## Online FastAPI inference
 

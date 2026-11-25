@@ -851,6 +851,7 @@ def main() -> None:
             {
                 "status": "success",
                 "batch_run_id": predictions[0].batch_run_id if predictions else None,
+                "model_version": predictions[0].model_version if predictions else None,
                 "records_scored": len(predictions),
                 "anomalies_detected": anomaly_count,
                 "entity_types": entity_type_summary(predictions),

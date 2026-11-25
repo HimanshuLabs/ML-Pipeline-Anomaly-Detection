@@ -37,6 +37,7 @@ from anomaly_detection.evaluation import (
 from anomaly_detection.feature_validation import get_model_feature_matrix
 from anomaly_detection.registry import (
     DEFAULT_REGISTRY_PATH,
+    _write_bytes_atomic,
     load_model_registry,
     project_relative_path,
 )
@@ -337,10 +338,9 @@ def _json_default(value: Any) -> Any:
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8") as file:
-        json.dump(payload, file, indent=2, sort_keys=True, default=_json_default)
-        file.write("\n")
+    """Write JSON atomically: a crash leaves the previous file or none, never half of one."""
+    text = json.dumps(payload, indent=2, sort_keys=True, default=_json_default) + "\n"
+    _write_bytes_atomic(path, text.encode("utf-8"))
 
 
 def _load_optional_snapshot_metadata(metadata_path: str | Path | None) -> dict[str, Any]:
