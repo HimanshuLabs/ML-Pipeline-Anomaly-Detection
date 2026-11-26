@@ -30,6 +30,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from anomaly_detection import drift
@@ -42,6 +43,10 @@ SOURCE_BATCH_PREDICTIONS = "batch-predictions"
 SOURCE_INPUT = "input"
 DEFAULT_HOURS = 24.0
 DEFAULT_MIN_ROWS_PER_SEGMENT = 30
+# The batch-predictions window is read this many rows at a time (server-side cursor).
+PAYLOAD_CHUNK_ROWS = 10_000
+# Whole numbers beyond this are not exact in float64; such a window is read in one piece.
+_FLOAT64_EXACT_INT = 2**53
 
 
 class DriftJobError(RuntimeError):
@@ -88,13 +93,121 @@ def _min_rows(threshold_config: dict[str, Any], override: int | None) -> int:
     return value
 
 
+class _OnePieceNeeded(Exception):
+    """A payload value the float64 columns cannot carry exactly (bool, text, huge int)."""
+
+
+def _as_float(value: Any) -> float:
+    if value is None:
+        return np.nan
+    if type(value) is float:
+        return value
+    if type(value) is int and -_FLOAT64_EXACT_INT <= value <= _FLOAT64_EXACT_INT:
+        return float(value)
+    raise _OnePieceNeeded(f"a {type(value).__name__} value")
+
+
+class _SegmentColumns:
+    """One segment's payload values: one float64 array per payload key, built in chunks."""
+
+    def __init__(self) -> None:
+        self.rows = 0
+        self.chunks: dict[str, list[np.ndarray]] = {}
+
+    def add(self, payloads: list[dict[str, Any]], int_rows: dict[str, int]) -> None:
+        keys = dict.fromkeys(key for payload in payloads for key in payload)
+        for key in keys:
+            values = [payload.get(key) for payload in payloads]
+            int_rows[key] = int_rows.get(key, 0) + sum(type(v) is int for v in values)
+            if key not in self.chunks:
+                # A key first seen mid-way is missing (NaN) in the earlier rows.
+                self.chunks[key] = [np.full(self.rows, np.nan)]
+            self.chunks[key].append(
+                np.fromiter(map(_as_float, values), np.float64, len(values))
+            )
+        for key, chunks in self.chunks.items():
+            if key not in keys:
+                chunks.append(np.full(len(payloads), np.nan))
+        self.rows += len(payloads)
+
+    def frame(self, int_keys: frozenset[str]) -> pd.DataFrame:
+        """The columns as pd.DataFrame(all payloads) types them: int64 for a key that is
+        a whole number in every row of the window, else float64. Frees the chunks."""
+
+        columns = {}
+        for key in list(self.chunks):
+            values = np.concatenate(self.chunks.pop(key))
+            columns[key] = values.astype(np.int64) if key in int_keys else values
+        return pd.DataFrame(columns, index=pd.RangeIndex(self.rows))
+
+
+@dataclass(frozen=True)
+class CurrentPayloads:
+    """The batch-predictions window read in chunks, by entity type (key None: one group
+    for a single model)."""
+
+    row_count: int
+    null_entity_type_rows: int
+    groups: dict[str | None, _SegmentColumns]
+    payload_keys: frozenset[str]
+    int_keys: frozenset[str]
+
+    @property
+    def empty(self) -> bool:
+        return self.row_count == 0
+
+    def __len__(self) -> int:
+        return self.row_count
+
+
+def payload_frame(rows: Sequence[dict[str, Any]]) -> pd.DataFrame:
+    """Every payload (plus entity_type) in one frame: the one-piece read."""
+
+    return pd.DataFrame(
+        [{**(row["feature_payload"] or {}), "entity_type": row["entity_type"]} for row in rows]
+    )
+
+
+def _read_payloads_in_chunks(
+    *, model_name: str, model_version: str, since: datetime, by_entity_type: bool
+) -> CurrentPayloads:
+    from anomaly_detection import database
+
+    groups: dict[str | None, _SegmentColumns] = {}
+    int_rows: dict[str, int] = {}
+    row_count = null_rows = 0
+    for rows in database.iter_batch_feature_payloads(
+        model_name=model_name,
+        model_version=model_version,
+        since=since,
+        chunk_rows=PAYLOAD_CHUNK_ROWS,
+    ):
+        by_group: dict[str | None, list[dict[str, Any]]] = {}
+        for row in rows:
+            group = row["entity_type"] if by_entity_type else None
+            if by_entity_type and group is None:
+                null_rows += 1
+                continue
+            by_group.setdefault(group, []).append(row["feature_payload"] or {})
+        for group, payloads in by_group.items():
+            groups.setdefault(group, _SegmentColumns()).add(payloads, int_rows)
+        row_count += len(rows)
+    int_keys = frozenset(key for key, count in int_rows.items() if count == row_count)
+    return CurrentPayloads(row_count, null_rows, groups, frozenset(int_rows), int_keys)
+
+
 def load_batch_prediction_features(
     *,
     model_name: str,
     model_version: str,
     since: datetime,
-) -> pd.DataFrame:
-    """Feature payloads (plus entity_type) of the model's batch predictions since a time."""
+    by_entity_type: bool = True,
+) -> pd.DataFrame | CurrentPayloads:
+    """Feature payloads of the model's batch predictions since a time.
+
+    Read in chunks into per-segment columns (CurrentPayloads). A window holding a value
+    those columns cannot carry exactly is read in one piece into one frame, as before.
+    """
 
     from anomaly_detection import database
 
@@ -103,11 +216,24 @@ def load_batch_prediction_features(
             "--source batch-predictions needs the Project 4 database; "
             "set PROJECT4_POSTGRES_* (or use --input)"
         )
-    rows = database.read_batch_feature_payloads(
-        model_name=model_name, model_version=model_version, since=since
-    )
-    return pd.DataFrame(
-        [{**(row["feature_payload"] or {}), "entity_type": row["entity_type"]} for row in rows]
+    try:
+        return _read_payloads_in_chunks(
+            model_name=model_name,
+            model_version=model_version,
+            since=since,
+            by_entity_type=by_entity_type,
+        )
+    except _OnePieceNeeded as exc:
+        LOGGER.warning(
+            "Batch payloads of %s %s hold %s; reading the window in one piece",
+            model_name,
+            model_version,
+            exc,
+        )
+    return payload_frame(
+        database.read_batch_feature_payloads(
+            model_name=model_name, model_version=model_version, since=since
+        )
     )
 
 
@@ -228,8 +354,88 @@ def _evaluate(
     )
 
 
+def _checked_segment_counts(
+    counts: dict[str, int], segments: dict[str, Any], min_rows: int
+) -> dict[str, str]:
+    """Refuse unknown or too-small segments; returns the segments with no rows."""
+
+    unknown = sorted(set(counts) - set(segments))
+    if unknown:
+        raise DriftJobError(
+            f"current data has entity type(s) the model has no segment for: {unknown}; "
+            f"segments: {sorted(segments)}"
+        )
+    too_few = [f"{t} has {int(n)} rows" for t, n in sorted(counts.items()) if n < min_rows]
+    if too_few:
+        raise DriftJobError(
+            "too few rows to evaluate drift: " + ", ".join(too_few) + f" (minimum {min_rows})"
+        )
+    if not counts:
+        raise DriftJobError("no current rows to evaluate")
+    return {t: "no rows" for t in sorted(segments) if t not in counts}
+
+
+def _group_frame(current: CurrentPayloads, group: str | None, names: list[str]) -> pd.DataFrame:
+    """One group's columns. A feature only other groups carry is all-NaN here, as it is
+    in the rows of this group in the one-piece frame."""
+
+    frame = current.groups.pop(group).frame(current.int_keys)
+    for name in names:
+        if name in current.payload_keys and name not in frame.columns:
+            frame[name] = np.nan
+    return frame
+
+
+def _evaluate_current_payloads(
+    current: CurrentPayloads,
+    *,
+    baseline: dict[str, Any],
+    threshold_config: dict[str, Any],
+    min_rows: int,
+    window: tuple[datetime, datetime],
+    detected_at: str,
+) -> tuple[dict[str | None, SegmentOutcome], dict[str, str]]:
+    segments = baseline.get("segments")
+    common = {
+        "baseline": baseline,
+        "threshold_config": threshold_config,
+        "window": window,
+        "detected_at": detected_at,
+    }
+    if not segments:
+        if len(current) < min_rows:
+            raise DriftJobError(
+                f"too few rows to evaluate drift: {len(current)} (minimum {min_rows})"
+            )
+        names = list(baseline["feature_baselines"])
+        outcome = _evaluate(
+            _feature_frame(_group_frame(current, None, names), names, "the model"),
+            feature_baselines=baseline["feature_baselines"],
+            entity_type=None,
+            **common,
+        )
+        return {None: outcome}, {}
+
+    if current.null_entity_type_rows:
+        raise DriftJobError("current data has rows with a null entity_type")
+    counts = {str(t): group.rows for t, group in current.groups.items()}
+    skipped = _checked_segment_counts(counts, segments, min_rows)
+    outcomes: dict[str | None, SegmentOutcome] = {}
+    for entity_type in sorted(counts):
+        segment_baselines = segments[entity_type]["feature_baselines"]
+        names = list(segment_baselines)
+        frame = _group_frame(current, entity_type, names)
+        outcomes[entity_type] = _evaluate(
+            _feature_frame(frame, names, f"segment {entity_type}"),
+            feature_baselines=segment_baselines,
+            entity_type=entity_type,
+            **common,
+        )
+    return outcomes, skipped
+
+
 def evaluate_active_model_drift(
-    frame: pd.DataFrame,
+    frame: pd.DataFrame | CurrentPayloads,
     *,
     baseline: dict[str, Any],
     threshold_config: dict[str, Any],
@@ -238,6 +444,16 @@ def evaluate_active_model_drift(
     detected_at: str,
 ) -> tuple[dict[str | None, SegmentOutcome], dict[str, str]]:
     """Evaluate current data against the baseline; per segment for a segmented model."""
+
+    if isinstance(frame, CurrentPayloads):
+        return _evaluate_current_payloads(
+            frame,
+            baseline=baseline,
+            threshold_config=threshold_config,
+            min_rows=min_rows,
+            window=window,
+            detected_at=detected_at,
+        )
 
     segments = baseline.get("segments")
     common = {
@@ -269,21 +485,9 @@ def evaluate_active_model_drift(
         raise DriftJobError("current data has rows with a null entity_type")
 
     counts = frame["entity_type"].astype(str).value_counts().sort_index()
-    unknown = sorted(set(counts.index) - set(segments))
-    if unknown:
-        raise DriftJobError(
-            f"current data has entity type(s) the model has no segment for: {unknown}; "
-            f"segments: {sorted(segments)}"
-        )
-    too_few = [f"{t} has {int(n)} rows" for t, n in counts.items() if n < min_rows]
-    if too_few:
-        raise DriftJobError(
-            "too few rows to evaluate drift: " + ", ".join(too_few) + f" (minimum {min_rows})"
-        )
-    if counts.empty:
-        raise DriftJobError("no current rows to evaluate")
-
-    skipped = {t: "no rows" for t in sorted(segments) if t not in counts.index}
+    skipped = _checked_segment_counts(
+        {str(t): int(n) for t, n in counts.items()}, segments, min_rows
+    )
     entity_types = frame["entity_type"].astype(str)
     outcomes: dict[str | None, SegmentOutcome] = {}
     for entity_type in counts.index:
@@ -326,7 +530,10 @@ def run_drift_job(
             raise DriftJobError("--hours must be greater than zero")
         start = end - timedelta(hours=hours)
         frame = load_batch_prediction_features(
-            model_name=model_name, model_version=model_version, since=start
+            model_name=model_name,
+            model_version=model_version,
+            since=start,
+            by_entity_type=bool(baseline.get("segments")),
         )
     elif source == SOURCE_INPUT:
         if input_path is None:

@@ -21,7 +21,7 @@ import os
 import re
 import sys
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, is_dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -308,6 +308,13 @@ def insert_alert_events(events: Sequence[Any]) -> int:
     return _insert_rows("monitoring.alert_events", [alert_event_row(e) for e in events])
 
 
+_BATCH_FEATURE_PAYLOADS_SQL = (
+    "SELECT entity_type, feature_payload FROM ml.batch_predictions "
+    "WHERE model_name = :model_name AND model_version = :model_version "
+    "AND prediction_status = 'success' AND score_timestamp >= :since"
+)
+
+
 def read_batch_feature_payloads(
     *,
     model_name: str,
@@ -318,14 +325,35 @@ def read_batch_feature_payloads(
 
     with get_shared_engine().connect() as connection:
         rows = connection.execute(
-            text(
-                "SELECT entity_type, feature_payload FROM ml.batch_predictions "
-                "WHERE model_name = :model_name AND model_version = :model_version "
-                "AND prediction_status = 'success' AND score_timestamp >= :since"
-            ),
+            text(_BATCH_FEATURE_PAYLOADS_SQL),
             {"model_name": model_name, "model_version": model_version, "since": since},
         ).mappings()
         return [dict(row) for row in rows]
+
+
+def iter_batch_feature_payloads(
+    *,
+    model_name: str,
+    model_version: str,
+    since: datetime,
+    chunk_rows: int,
+) -> Iterator[list[dict[str, Any]]]:
+    """The rows of read_batch_feature_payloads, chunk_rows at a time (server-side cursor).
+
+    cursor_tuple_fraction 1.0 plans the cursor like the one-piece query, so the rows
+    come in the same order.
+    """
+
+    with get_shared_engine().connect() as connection:
+        connection.execute(text("SET LOCAL cursor_tuple_fraction = 1.0"))
+        result = connection.execution_options(
+            stream_results=True, max_row_buffer=chunk_rows
+        ).execute(
+            text(_BATCH_FEATURE_PAYLOADS_SQL),
+            {"model_name": model_name, "model_version": model_version, "since": since},
+        ).mappings()
+        for partition in result.partitions(chunk_rows):
+            yield [dict(row) for row in partition]
 
 
 def read_last_batch_prediction(*, model_name: str) -> tuple[datetime, str] | None:
