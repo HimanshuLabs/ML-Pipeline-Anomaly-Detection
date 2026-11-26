@@ -18,6 +18,7 @@ import platform
 import re
 import shutil
 import sys
+import uuid
 from dataclasses import asdict, dataclass, is_dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -55,8 +56,10 @@ from anomaly_detection.segmented_model import (
 )
 from anomaly_detection.tracking import TrackingError, TrainingRun, training_run
 from anomaly_detection.training_snapshot import (
+    find_latest_snapshot,
     load_training_snapshot_metadata,
     read_training_snapshot,
+    unfinished_snapshots_message,
 )
 
 LOGGER = logging.getLogger(__name__)
@@ -396,18 +399,42 @@ def _prepare_artifact_dir(
     model_version: str,
     overwrite: bool,
 ) -> Path:
+    """The bundle folder this training will publish; refuses an existing one unless overwrite.
+
+    Nothing is created here: the bundle is written beside it and renamed into place whole.
+    """
     artifact_dir = artifact_root / model_name / f"model_version={model_version}"
 
-    if artifact_dir.exists():
-        if not overwrite:
-            raise TrainingError(
-                "Model artifact directory already exists. "
-                f"Use overwrite=True or choose a new model version: {artifact_dir}"
-            )
-        shutil.rmtree(artifact_dir)
-
-    artifact_dir.mkdir(parents=True, exist_ok=True)
+    if artifact_dir.exists() and not overwrite:
+        raise TrainingError(
+            "Model artifact directory already exists. "
+            f"Use overwrite=True or choose a new model version: {artifact_dir}"
+        )
     return artifact_dir
+
+
+def _staging_dir(artifact_dir: Path) -> Path:
+    """A hidden folder beside the bundle; readers only look at model_version=* names."""
+    artifact_dir.parent.mkdir(parents=True, exist_ok=True)
+    staging_dir = artifact_dir.parent / f".{artifact_dir.name}.partial-{uuid.uuid4().hex[:12]}"
+    staging_dir.mkdir()
+    return staging_dir
+
+
+def _publish_bundle(staging_dir: Path, artifact_dir: Path) -> None:
+    """Rename the complete bundle into place; an overwritten bundle is removed only now."""
+    replaced = None
+    if artifact_dir.exists():
+        replaced = artifact_dir.parent / f".{artifact_dir.name}.replaced-{uuid.uuid4().hex[:12]}"
+        artifact_dir.rename(replaced)
+    try:
+        staging_dir.rename(artifact_dir)
+    except BaseException:
+        if replaced is not None:
+            replaced.rename(artifact_dir)
+        raise
+    if replaced is not None:
+        shutil.rmtree(replaced)
 
 
 def _build_model(config: IsolationForestTrainingConfig) -> IsolationForest:
@@ -478,12 +505,14 @@ def resolve_snapshot_paths(
     root = Path(training_root)
 
     if snapshot_value == "latest":
-        metadata_files = sorted(root.glob("snapshot_date=*/snapshot_id=*/metadata.json"))
-        if not metadata_files:
+        latest = find_latest_snapshot(root)
+        if latest.unfinished:
+            raise TrainingError(unfinished_snapshots_message(latest.unfinished))
+        if latest.folder is None:
             raise TrainingError(f"No training snapshot metadata found under: {root}")
 
-        metadata_path = metadata_files[-1]
-        features_path = metadata_path.parent / "features.parquet"
+        metadata_path = latest.folder / "metadata.json"
+        features_path = latest.folder / "features.parquet"
 
         if not features_path.exists():
             raise TrainingError(f"Latest snapshot is missing features.parquet: {features_path}")
@@ -679,8 +708,6 @@ def train_isolation_forest_from_snapshot(
     feature_schema_path = artifact_dir / "feature_schema.json"
     baseline_stats_path = artifact_dir / "baseline_stats.json"
 
-    joblib.dump(model, model_path)
-
     # Describe where the features actually came from: the training snapshot.
     feature_schema_payload = {
         "feature_schema_version": feature_schema_version,
@@ -726,9 +753,18 @@ def train_isolation_forest_from_snapshot(
         mlflow_experiment_id=training_run.experiment_id if training_run else None,
     )
 
-    _write_json(feature_schema_path, feature_schema_payload)
-    _write_json(baseline_stats_path, baseline_stats)
-    _write_json(metadata_path, artifact_metadata.to_dict())
+    # Written beside the bundle and renamed into place whole: a crash never leaves a
+    # half bundle (model.joblib without its metadata) under a model_version= name.
+    staging_dir = _staging_dir(artifact_dir)
+    try:
+        joblib.dump(model, staging_dir / model_path.name)
+        _write_json(staging_dir / feature_schema_path.name, feature_schema_payload)
+        _write_json(staging_dir / baseline_stats_path.name, baseline_stats)
+        _write_json(staging_dir / metadata_path.name, artifact_metadata.to_dict())
+        _publish_bundle(staging_dir, artifact_dir)
+    except BaseException:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise
 
     LOGGER.info("Wrote trained model artifacts to %s", artifact_dir)
 

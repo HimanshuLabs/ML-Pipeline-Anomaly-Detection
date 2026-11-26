@@ -447,3 +447,139 @@ def test_bundle_json_bytes_match_the_committed_v006_files(tmp_path: Path, name: 
     training._write_json(path, json.loads(committed))
 
     assert path.read_bytes() == committed
+
+
+# --- clean-up: 'latest' stops on an unfinished snapshot; bundles are renamed into place -----
+
+
+def _snapshot_folder(
+    root: Path, snapshot_id: str, metadata: dict | str | None, *, date: str = "2026-11-20"
+) -> Path:
+    """A snapshot folder with features.parquet, and metadata.json unless metadata is None."""
+    folder = root / f"snapshot_date={date}" / f"snapshot_id={snapshot_id}"
+    folder.mkdir(parents=True)
+    pd.DataFrame({"value": [1]}).to_parquet(folder / "features.parquet", index=False)
+    if metadata is not None:
+        text = metadata if isinstance(metadata, str) else json.dumps(metadata)
+        (folder / "metadata.json").write_text(text, encoding="utf-8")
+    return folder
+
+
+def test_train_latest_stops_on_a_snapshot_folder_without_metadata(tmp_path: Path) -> None:
+    from anomaly_detection.training import resolve_snapshot_paths
+
+    _snapshot_folder(tmp_path, "real_source_20261119T000000Z",
+                     {"created_at": "2026-11-19T00:00:00+00:00"}, date="2026-11-19")
+    unfinished = _snapshot_folder(tmp_path, "real_source_20261120T000000Z", None)
+
+    with pytest.raises(TrainingError, match="'latest' refused") as error:
+        resolve_snapshot_paths("latest", training_root=tmp_path)
+
+    assert str(unfinished) in str(error.value)
+
+
+def test_latest_stops_on_unreadable_metadata(tmp_path: Path) -> None:
+    from anomaly_detection.retrain import RetrainError, resolve_snapshot_dir
+    from anomaly_detection.training import resolve_snapshot_paths
+
+    _snapshot_folder(
+        tmp_path,
+        "real_source_20261119T000000Z",
+        {"snapshot_type": "real_source_extract", "created_at": "2026-11-19T00:00:00+00:00"},
+        date="2026-11-19",
+    )
+    broken = _snapshot_folder(tmp_path, "real_source_20261120T000000Z", "{")
+
+    with pytest.raises(TrainingError, match="no readable metadata.json") as train_error:
+        resolve_snapshot_paths("latest", training_root=tmp_path)
+    with pytest.raises(RetrainError, match="no readable metadata.json") as retrain_error:
+        resolve_snapshot_dir("latest", tmp_path)
+
+    for error in (train_error, retrain_error):
+        assert str(broken) in str(error.value)
+
+
+def test_train_latest_is_the_newest_recorded_creation_time(tmp_path: Path) -> None:
+    from anomaly_detection.training import resolve_snapshot_paths
+
+    # create_training_snapshot names folders by uuid, so name order is not creation order.
+    older = _snapshot_folder(tmp_path, "ffffffff-0000-5000-8000-000000000000",
+                             {"created_at_utc": "2026-11-19T00:00:00+00:00"})
+    newer = _snapshot_folder(tmp_path, "00000000-0000-5000-8000-000000000000",
+                             {"created_at_utc": "2026-11-20T00:00:00+00:00"})
+    assert sorted([older, newer])[-1] == older
+
+    _features_path, metadata_path = resolve_snapshot_paths("latest", training_root=tmp_path)
+
+    assert metadata_path == newer / "metadata.json"
+
+
+def _train_demo_v001(tmp_path: Path, **kwargs):
+    snapshot = _demo_snapshot(tmp_path)
+    return train_isolation_forest_from_snapshot(
+        features_path=snapshot.features_path,
+        snapshot_metadata_path=snapshot.metadata_path,
+        model_version="v001",
+        artifact_root_override=tmp_path / "artifacts",
+        registry_path=tmp_path / "empty_registry.json",
+        **kwargs,
+    )
+
+
+def _fail_the_metadata_write(monkeypatch: pytest.MonkeyPatch) -> None:
+    from anomaly_detection import training
+
+    real_write = training._write_json
+
+    def _failing(path: Path, payload: dict) -> None:
+        if path.name == "metadata.json":
+            raise OSError("simulated failure while writing metadata.json")
+        real_write(path, payload)
+
+    monkeypatch.setattr(training, "_write_json", _failing)
+
+
+def test_a_failed_bundle_write_leaves_no_bundle_folder(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _fail_the_metadata_write(monkeypatch)
+
+    with pytest.raises(OSError, match="simulated"):
+        _train_demo_v001(tmp_path)
+
+    model_root = tmp_path / "artifacts" / "isolation_forest"
+    assert not (model_root / "model_version=v001").exists()
+    assert not model_root.exists() or list(model_root.iterdir()) == []
+
+
+def test_a_failed_overwrite_keeps_the_previous_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _train_demo_v001(tmp_path)
+    model_root = tmp_path / "artifacts" / "isolation_forest"
+    bundle = model_root / "model_version=v001"
+    before = {path.name: path.read_bytes() for path in bundle.iterdir()}
+    _fail_the_metadata_write(monkeypatch)
+
+    with pytest.raises(OSError, match="simulated"):
+        _train_demo_v001(tmp_path, overwrite=True)
+
+    assert {path.name: path.read_bytes() for path in bundle.iterdir()} == before
+    assert sorted(before) == [
+        "baseline_stats.json", "feature_schema.json", "metadata.json", "model.joblib"
+    ]
+    assert [path.name for path in model_root.iterdir()] == ["model_version=v001"]
+
+
+def test_bundle_metadata_names_the_final_folder(tmp_path: Path) -> None:
+    artifact = _train_demo_v001(tmp_path)
+    bundle = tmp_path / "artifacts" / "isolation_forest" / "model_version=v001"
+
+    recorded = [artifact.artifact_dir, artifact.model_path, artifact.metadata_path,
+                artifact.feature_schema_path, artifact.baseline_stats_path]
+    assert all("model_version=v001" in path for path in recorded)
+    for path in bundle.iterdir():
+        assert b".partial-" not in path.read_bytes(), path.name
+    assert [path.name for path in bundle.parent.iterdir()] == ["model_version=v001"]

@@ -64,7 +64,11 @@ from anomaly_detection.training import (
     load_training_config,
     train_isolation_forest_from_snapshot,
 )
-from anomaly_detection.training_snapshot import read_training_snapshot
+from anomaly_detection.training_snapshot import (
+    find_latest_snapshot,
+    read_training_snapshot,
+    unfinished_snapshots_message,
+)
 
 LOGGER = logging.getLogger(__name__)
 
@@ -111,21 +115,20 @@ def resolve_snapshot_dir(snapshot: str | Path, training_root: str | Path) -> Pat
 
     'latest' is the most recently created real-source snapshot, even a failed
     one, so a failed extraction is refused instead of silently training on an
-    older snapshot.
+    older snapshot. A folder without readable metadata (a crashed or running write)
+    stops 'latest'.
     """
 
     value = str(snapshot)
     root = Path(training_root)
 
     if value == "latest":
-        candidates = []
-        for metadata_path in root.glob("snapshot_date=*/snapshot_id=*/metadata.json"):
-            metadata = _read_metadata(metadata_path) or {}
-            if metadata.get("snapshot_type") == REAL_SOURCE_SNAPSHOT_TYPE:
-                candidates.append((str(metadata.get("created_at") or ""), str(metadata_path)))
-        if not candidates:
+        latest = find_latest_snapshot(root, snapshot_type=REAL_SOURCE_SNAPSHOT_TYPE)
+        if latest.unfinished:
+            raise RetrainError(unfinished_snapshots_message(latest.unfinished))
+        if latest.folder is None:
             raise RetrainError(f"No real-source snapshot found under: {root}")
-        return Path(max(candidates)[1]).parent
+        return latest.folder
 
     path = Path(value)
     if path.is_dir():

@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -227,6 +228,60 @@ def read_training_snapshot(features_path: str | Path) -> pd.DataFrame:
         raise FileNotFoundError(f"Training snapshot features not found: {path}")
 
     return pd.read_parquet(path)
+
+
+@dataclass(frozen=True)
+class LatestSnapshot:
+    """What 'latest' found under a snapshot root."""
+
+    folder: Path | None
+    unfinished: tuple[Path, ...]
+
+
+def _readable_metadata(path: Path) -> dict[str, Any] | None:
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    return loaded if isinstance(loaded, dict) else None
+
+
+def find_latest_snapshot(root: str | Path, *, snapshot_type: str | None = None) -> LatestSnapshot:
+    """The newest snapshot folder under root, and every folder without readable metadata.
+
+    Every snapshot writer creates the folder first and writes metadata.json last, so a
+    folder without a readable metadata.json is a write that crashed or is still running.
+    Newest is the latest recorded creation time (created_at, or created_at_utc), then
+    the folder path. snapshot_type keeps only snapshots of that type.
+    """
+
+    candidates: list[tuple[str, str, Path]] = []
+    unfinished: list[Path] = []
+    for folder in sorted(Path(root).glob("snapshot_date=*/snapshot_id=*")):
+        if not folder.is_dir():
+            continue
+        metadata = _readable_metadata(folder / METADATA_FILENAME)
+        if metadata is None:
+            unfinished.append(folder)
+            continue
+        if snapshot_type is not None and metadata.get("snapshot_type") != snapshot_type:
+            continue
+        created = str(metadata.get("created_at") or metadata.get("created_at_utc") or "")
+        candidates.append((created, str(folder), folder))
+    return LatestSnapshot(
+        folder=max(candidates)[2] if candidates else None, unfinished=tuple(unfinished)
+    )
+
+
+def unfinished_snapshots_message(unfinished: Sequence[Path]) -> str:
+    return (
+        "'latest' refused: these snapshot folders have no readable metadata.json, so a "
+        "snapshot write crashed or is still running: "
+        + ", ".join(str(folder) for folder in unfinished)
+        + ". 'latest' does not skip them, because that would fall back to an older snapshot "
+        "without saying so. Pass --snapshot <snapshot_id> to choose a snapshot, or remove "
+        "the unfinished folder once no extract is running."
+    )
 
 
 def _normalize_feature_frame(

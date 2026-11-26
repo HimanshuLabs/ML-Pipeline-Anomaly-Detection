@@ -495,3 +495,60 @@ def test_evaluation_report_bytes_match_the_committed_v006_report(
 
     assert result.evaluation_report_path.parent.is_relative_to(tmp_path)
     assert result.evaluation_report_path.read_bytes() == committed
+
+
+# --- clean-up: 'latest' stops on an unfinished snapshot write ---------------------------------
+
+
+def _real_source_folder(root: Path, stamp: str, *, metadata: bool = True) -> Path:
+    """A passed real-source snapshot folder named and timed like an extract at stamp."""
+    folder = root / f"snapshot_date={stamp[:4]}-{stamp[4:6]}-{stamp[6:8]}" / (
+        f"snapshot_id=real_source_{stamp}"
+    )
+    folder.mkdir(parents=True)
+    pd.DataFrame({"value": [1]}).to_parquet(folder / "features.parquet", index=False)
+    if metadata:
+        created = (
+            f"{stamp[:4]}-{stamp[4:6]}-{stamp[6:8]}T{stamp[9:11]}:{stamp[11:13]}:"
+            f"{stamp[13:15]}+00:00"
+        )
+        (folder / "metadata.json").write_text(
+            json.dumps(
+                {
+                    "snapshot_id": f"real_source_{stamp}",
+                    "snapshot_type": "real_source_extract",
+                    "data_quality_status": "passed",
+                    "created_at": created,
+                }
+            ),
+            encoding="utf-8",
+        )
+    return folder
+
+
+def test_latest_stops_on_a_snapshot_folder_without_metadata(tmp_path: Path) -> None:
+    from anomaly_detection.retrain import RetrainError, resolve_snapshot_dir
+
+    _real_source_folder(tmp_path, "20261119T120000Z")
+    unfinished = _real_source_folder(tmp_path, "20261120T120000Z", metadata=False)
+
+    with pytest.raises(RetrainError, match="'latest' refused") as error:
+        resolve_snapshot_dir("latest", tmp_path)
+
+    assert str(unfinished) in str(error.value)
+    assert "does not skip them" in str(error.value)
+
+
+def test_latest_is_unchanged_when_every_snapshot_is_complete(tmp_path: Path) -> None:
+    from anomaly_detection.retrain import resolve_snapshot_dir
+    from anomaly_detection.training import resolve_snapshot_paths
+
+    folders = [
+        _real_source_folder(tmp_path, stamp)
+        for stamp in ("20261115T090000Z", "20261118T101500Z", "20261120T182648Z",
+                      "20261117T080000Z")
+    ]
+
+    assert resolve_snapshot_dir("latest", tmp_path) == folders[2]
+    _features_path, metadata_path = resolve_snapshot_paths("latest", training_root=tmp_path)
+    assert metadata_path == folders[2] / "metadata.json"
