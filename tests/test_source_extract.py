@@ -1181,3 +1181,83 @@ def test_snapshot_metadata_bytes_are_sorted_indented_without_a_final_newline(tmp
     written = result.metadata_path.read_bytes()
     assert written == json.dumps(json.loads(written), indent=2, sort_keys=True).encode("utf-8")
     assert written.endswith(b"}")
+
+
+# --- clean-up: the batch lakehouse source sets work_mem for its session ------------------
+
+
+def test_source_work_mem_is_added_after_the_read_only_options(monkeypatch) -> None:
+    options = _built_session_options(monkeypatch, _source_config(work_mem="128MB"))
+
+    assert options == (
+        "-c default_transaction_read_only=on -c statement_timeout=120000 -c work_mem=128MB"
+    )
+
+
+def test_source_without_work_mem_keeps_the_read_only_options_exactly(monkeypatch) -> None:
+    options = _built_session_options(monkeypatch, _source_config())
+
+    assert options == SOURCE_SESSION_OPTIONS
+
+
+@pytest.mark.parametrize("value", ["0MB", "128", "128mb", "1.5GB", 128, True, None, "-1MB", ""])
+def test_source_work_mem_must_be_a_postgres_memory_string(monkeypatch, value) -> None:
+    from anomaly_detection import source_extract
+
+    def _must_not_build(*args, **kwargs):
+        raise AssertionError("an engine was built with an invalid work_mem")
+
+    monkeypatch.setattr(source_extract, "create_engine", _must_not_build)
+    monkeypatch.setenv("PROJECT4_TEST_SOURCE_PASSWORD", "not-a-real-password")
+
+    with pytest.raises(SourceExtractionError, match="work_mem"):
+        source_extract.build_postgres_engine(_source_config(work_mem=value))
+
+
+def test_shipped_source_config_sets_work_mem_on_the_batch_lakehouse_only() -> None:
+    from anomaly_detection.source_extract import (
+        PROJECT_ROOT,
+        load_config,
+        source_session_options,
+    )
+
+    config = load_config(PROJECT_ROOT / "configs" / "source_extract.yaml")
+
+    assert config["project_2_3"]["work_mem"] == "128MB"
+    assert "work_mem" not in config["project_1"]
+    for project in ("project_1", "project_2_3"):
+        assert source_session_options(config[project]) == SOURCE_SESSION_OPTIONS
+
+
+@pytest.mark.postgres
+def test_source_engine_session_has_work_mem_on_a_real_database(monkeypatch) -> None:
+    import os
+
+    from sqlalchemy import text
+    from sqlalchemy.engine import make_url
+
+    from anomaly_detection import source_extract
+
+    url_text = os.environ.get("PROJECT4_TEST_DATABASE_URL")
+    if not url_text:
+        if os.environ.get("PROJECT4_REQUIRE_TEST_DATABASE") == "1":
+            pytest.fail("PROJECT4_REQUIRE_TEST_DATABASE=1 but PROJECT4_TEST_DATABASE_URL is unset")
+        pytest.skip("PROJECT4_TEST_DATABASE_URL is not set")
+    url = make_url(url_text)
+    monkeypatch.setenv("PROJECT4_TEST_SOURCE_PASSWORD", url.password or "")
+    engine = source_extract.build_postgres_engine(
+        _source_config(
+            host=url.host,
+            port=url.port,
+            database=url.database,
+            username=url.username,
+            work_mem="128MB",
+        )
+    )
+    try:
+        with engine.connect() as connection:
+            assert connection.execute(text("SHOW work_mem")).scalar_one() == "128MB"
+            assert connection.execute(text("SHOW statement_timeout")).scalar_one() == "2min"
+            assert connection.execute(text("SHOW transaction_read_only")).scalar_one() == "on"
+    finally:
+        engine.dispose()

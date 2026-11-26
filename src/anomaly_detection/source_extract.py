@@ -11,6 +11,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass, field
@@ -171,10 +172,29 @@ def source_session_options(source: dict[str, Any]) -> str:
     return f"-c default_transaction_read_only=on -c statement_timeout={value}"
 
 
+# Optional per-source work_mem (a Postgres memory string such as 128MB) for the
+# session's sorts and hashes; absent means the server default.
+_WORK_MEM_PATTERN = re.compile(r"[1-9][0-9]*(kB|MB|GB)")
+
+
+def source_session_settings(source: dict[str, Any]) -> str:
+    """Extra libpq options of one source session: work_mem when configured, else ''."""
+
+    if "work_mem" not in source:
+        return ""
+    value = source["work_mem"]
+    if not isinstance(value, str) or not _WORK_MEM_PATTERN.fullmatch(value):
+        raise SourceExtractionError(
+            f"work_mem must be a Postgres memory string such as 128MB (kB, MB or GB); "
+            f"got {value!r}"
+        )
+    return f" -c work_mem={value}"
+
+
 def build_postgres_engine(source: dict[str, Any]) -> Engine:
     """Create a read-only SQLAlchemy engine for one configured upstream source."""
 
-    options = source_session_options(source)
+    options = source_session_options(source) + source_session_settings(source)
     password = quote_plus(_password_from_env(source["password_env_var"]))
     username = quote_plus(str(source["username"]))
     host = source["host"]

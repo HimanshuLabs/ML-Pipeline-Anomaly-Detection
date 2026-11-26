@@ -395,8 +395,9 @@ Each real-source snapshot written since stage 15a also records:
 Extraction reads Project 1 (127.0.0.1:5433) and Project 2/3 (127.0.0.1:5434) read-only.
 Every source session is opened with
 `-c default_transaction_read_only=on -c statement_timeout=120000` (the timeout is each
-source's `statement_timeout_ms` in `configs/source_extract.yaml`; Project 4's own
-database engine gets neither), and before each table is read the extract checks
+source's `statement_timeout_ms` in `configs/source_extract.yaml`; the batch lakehouse
+source also sets `work_mem` (`configs/source_extract.yaml`, 128MB) for its session;
+Project 4's own database engine gets neither), and before each table is read the extract checks
 `SHOW transaction_read_only` is `on` and refuses otherwise. It issues only `SELECT`s:
 `SELECT *` per configured table, except `warehouse.dim_customer` (read for web events as
 `customer_sk` and `customer_id`) and `warehouse.fact_web_events` (the 12 columns the

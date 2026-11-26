@@ -30,6 +30,8 @@ source_extract:
     password_env_var: PROJECT23_POSTGRES_PASSWORD
     # Server-side bound on every statement on this source, in milliseconds (2 min).
     statement_timeout_ms: 120000
+    # Per-session sort/hash memory for the large mart reads (server default 4MB); same output.
+    work_mem: 128MB
 
     tables:
       customer_360:

@@ -165,8 +165,9 @@ nor in the shell history:
 
 The extract is read-only against both sources. Every source session is opened with
 `-c default_transaction_read_only=on -c statement_timeout=120000` (the timeout is each
-source's `statement_timeout_ms` in `configs/source_extract.yaml`; only the source
-engines; Project 4's own database engine is unchanged), and before each table is read
+source's `statement_timeout_ms` in `configs/source_extract.yaml`; the batch lakehouse
+source also sets `work_mem` (`configs/source_extract.yaml`, 128MB) for its session; only
+the source engines; Project 4's own database engine is unchanged), and before each table is read
 the extract checks `SHOW transaction_read_only` is `on` and refuses otherwise, before any
 row is read. It issues only `SELECT`s: `SELECT *` on the configured tables; for
 `warehouse.dim_customer` (listed in the snapshot's `source_tables`), a `SELECT * ...
