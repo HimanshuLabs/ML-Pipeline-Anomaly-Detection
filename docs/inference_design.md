@@ -21,7 +21,7 @@ This keeps Project 4 aligned with the wider platform:
 | Area | Status | Notes |
 |---|---|---|
 | Active production model loading | Implemented | The version named by the shared pointer: `ml.active_model_pointer` in database mode, else `configs/active_model.yaml`. |
-| Production model version | Implemented | `v004` on 2026-11-15: segmented, one Isolation Forest per entity type, `feature_schema_v003`. |
+| Production model version | Implemented | `v007` on 2026-11-26: segmented, one Isolation Forest per entity type, `feature_schema_v003`. |
 | Batch scoring | Implemented | `src/anomaly_detection/batch_inference.py` scores pandas feature batches; segmented models route each row by `entity_type`. |
 | Prediction contract | Implemented | Each record includes model version, entity, score, anomaly flag, threshold, timestamp, feature hash, and feature payload. |
 | JSONL persistence | Implemented | `logs/predictions/batch_predictions.jsonl` and `logs/predictions/online_predictions.jsonl`. |
@@ -65,11 +65,11 @@ Mark anomalies using model prediction output
 Write prediction evidence to JSONL (and ml.batch_predictions in database mode)
 ```
 
-Current active model (2026-11-15):
+Current active model (2026-11-26):
 
 ```text
 model_name: isolation_forest
-model_version: v004
+model_version: v007
 model_kind: segmented (campaign, customer, funnel_day, product, user, web_customer)
 feature_schema_version: feature_schema_v003
 snapshot_type: real_source_extract
@@ -151,7 +151,8 @@ logs/predictions/batch_predictions.jsonl    logs/predictions/online_predictions.
 ml.batch_predictions                        ml.online_predictions                       (database mode)
 ```
 
-A batch run inserts its rows in one transaction. The API writes online evidence as a
+A batch run inserts its rows in one transaction, then runs `ANALYZE ml.batch_predictions`
+in its own transaction (a failed `ANALYZE` is logged; the run is kept). The API writes online evidence as a
 background task after the response, so a persistence failure is counted
 (`prediction_persist_failures_total{sink=...}`) and logged but never fails the request.
 `integration.prediction_outputs` exposes both tables to Project 5.
@@ -328,14 +329,14 @@ pointer: `ml.active_model_pointer` in database mode (`pointer_source: postgres`)
 `PROJECT4_POINTER_POLL_SECONDS` (default 30) and swaps the model in-process when the
 pointer changes.
 
-The active model on 2026-11-15:
+The active model on 2026-11-26:
 
 | Field | Value |
 |---|---|
 | Model name | `isolation_forest` |
-| Active version | `v004` |
+| Active version | `v007` |
 | Model kind | segmented (6 entity types; each request is scored by its `entity_type`'s segment) |
-| Artifact path | `artifacts/models/isolation_forest/model_version=v004/model.joblib` |
+| Artifact path | `artifacts/models/isolation_forest/model_version=v007/model.joblib` |
 | Feature schema version | `feature_schema_v003` |
 | Feature count | `52` in total (each segment scores its own subset) |
 | Snapshot type | `real_source_extract` |
@@ -401,7 +402,7 @@ The full list of metric families is in the README ("Metrics and monitoring").
 |---|---|
 | Drift status | The response carries the latest drift-job status of the request's segment; there is no per-request drift evaluation. |
 | Prediction persistence | JSONL always and `ml.online_predictions` in database mode, written after the response; failures are counted, never returned to the client. |
-| Rollback | `/admin/rollback` supports dry-run and applied rollback through the shared pointer; applied end to end on 2026-11-16 (v005 → v004 in compose and on both kind replicas). v004 is active and has no compatible target today (v005 is `rolled_back`). |
+| Rollback | `/admin/rollback` supports dry-run and applied rollback through the shared pointer; applied end to end on 2026-11-16 (v005 → v004 in compose and on both kind replicas). v007 is active; its rollback target is v006 (dry run 2026-11-26). |
 | Threshold tuning | Uses fallback `0.0`; no version has an explicit threshold artifact yet. |
 | Authentication | One shared admin token for `/admin/*`; no users or roles. Prediction endpoints are open on the local network. |
 

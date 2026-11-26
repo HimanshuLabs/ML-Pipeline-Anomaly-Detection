@@ -225,6 +225,13 @@ to the repository root. v001–v004 keep the absolute paths they were written wi
 (`/home/...` for v001/v002, `/app/...` for v003/v004); registration resolves them to the
 files next to the `metadata.json` being read, wherever the bundle is.
 
+`--snapshot latest` (retrain and train) takes the snapshot with the newest recorded
+creation time, and stops on a snapshot folder without a readable `metadata.json` (an
+unfinished write) instead of taking an older one. A bundle is written to a hidden staging
+folder and renamed into place whole; an overwritten bundle is removed only after the new
+one is in place. The registry JSON, bundle JSON, snapshot `metadata.json` and
+`evaluation_report.json` are written atomically: a failed write leaves the previous file.
+
 New snapshots record `source_paths` as `<config project key>/<schema>.<table>` (for
 example `project_1/public.user_features`), one entry per table in `source_tables`; the
 `training_snapshot_metadata` of v002–v005 keeps the older home-directory form and is not
@@ -244,8 +251,8 @@ in-process, so every replica follows a promote or rollback without a restart.
 Current pointer (`configs/active_model.yaml`, mirroring the database):
 
     model_name: isolation_forest
-    active_model_version: v004
-    artifact_path: artifacts/models/isolation_forest/model_version=v004/model.joblib
+    active_model_version: v007
+    artifact_path: artifacts/models/isolation_forest/model_version=v007/model.joblib
     feature_schema_version: feature_schema_v003
     status: production
 
@@ -253,21 +260,22 @@ The artifact path is stored repo-relative.
 
 ---
 
-## Current model state (2026-11-16)
+## Current model state (2026-11-26)
 
 | Version | Status | Kind | Feature schema | Notes |
 |---|---|---|---|---|
 | `v001` | retired | single | `feature_schema_v001` | Demo snapshot; proved training, artifacts, registry, and promotion. |
 | `v002` | archived | single | `feature_schema_v001` | First real-source model (51 features); production until v004. |
 | `v003` | retired | single | `feature_schema_v002` | Superseded: the single model learned the entity type rather than anomalies. |
-| `v004` | production | segmented | `feature_schema_v003` | One Isolation Forest per entity type (6 segments, 52 features); baseline anomaly rate 0.0507. |
+| `v004` | archived | segmented | `feature_schema_v003` | One Isolation Forest per entity type (6 segments, 52 features); baseline anomaly rate 0.0507; production until v006. |
 | `v005` | rolled_back | segmented | `feature_schema_v003` | Retrained on 2026-11-16 from a fresh read-only extract (`real_source_20261116T035043Z`, same data as v004); `training_dataset_id` `64e7a3c0-bd07-5f74-95f5-71cc9e494e1b`, MLflow run `93a91a6a69834659befd027b2496b953`. Promoted, then rolled back to v004 (the first real rollback). |
+| `v006` | archived | segmented | `feature_schema_v003` | Trained on `real_source_20261120T182648Z` (11,85,067 rows); `training_dataset_id` `646b5b2a-d4fa-5564-b76a-b04ae2e276fe`, MLflow run `a6ff1f0b52094a248618ca1b714e4e52`; baseline anomaly rate 0.0500; production 2026-11-20 until v007. |
+| `v007` | production | segmented | `feature_schema_v003` | Trained on `real_source_20261126T120904Z` (11,85,050 rows); `training_dataset_id` `01191f7a-d246-5873-b5c3-5605fc867761`, MLflow run `906124d6de5a4f078c377eadc933f8f0`; baseline anomaly rate 0.0500. |
 
-v004 is active and has no compatible rollback target: v005 is `rolled_back` (not a
-target), v001 and v003 are retired, and v002 is single while v004 is segmented. Promoting a
-version with v004's segment spec makes v004 its target again. The live state is in
-`ml.model_registry` and `ml.active_model_pointer`, and `GET /model/active` reports the
-served version.
+v007 is active; its rollback target is v006 (dry run
+2026-11-26): the most recently archived version with the same segment spec.
+The live state is in `ml.model_registry` and `ml.active_model_pointer`, and
+`GET /model/active` reports the served version.
 
 ### v005 evidence (stage 15)
 
@@ -380,7 +388,7 @@ This avoids a common MLOps failure mode where the serving layer knows the model 
 
 #### Active production model
 
-The active production anomaly detection model is now `isolation_forest` version `v002`.
+In 2026-06 the active production anomaly detection model was `isolation_forest` version `v002`.
 
 | Field | Value |
 |---|---|
@@ -428,9 +436,9 @@ Those require delayed labels, backtesting labels, or a verified simulated-label 
 <!-- BASELINE_METRICS_CLOSURE_START -->
 ### Baseline metrics closure for v002
 
-The active production model is `isolation_forest` version `v002`.
+In 2026-06 the active production model was `isolation_forest` version `v002`.
 
-`v002` is the first production model trained from real local source extracts from Project 1 and Project 2/3. Its training metadata records `snapshot_type = real_source_extract`, and `configs/active_model.yaml` points production traffic to `v002`.
+`v002` is the first production model trained from real local source extracts from Project 1 and Project 2/3. Its training metadata records `snapshot_type = real_source_extract`, and `configs/active_model.yaml` pointed production traffic to `v002`.
 
 Verified baseline state:
 

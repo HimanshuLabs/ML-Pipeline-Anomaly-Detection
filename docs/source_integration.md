@@ -19,9 +19,33 @@ This fixes the earlier gap where the model training path existed, but the real u
 | `src/anomaly_detection/source_extract.py` | Extracts, transforms, normalizes, and writes a real-source Project 4 training snapshot. |
 | `tests/test_source_extract.py` | Validates source transforms, feature normalization, web-event aggregation, and snapshot metadata writing. |
 
-## Current snapshot (2026-11-15)
+## Current snapshot (2026-11-26)
 
-The production model v004 was trained from this real-source snapshot:
+The production model v007 was trained from this real-source snapshot:
+
+| Field | Value |
+|---|---|
+| Snapshot ID | `real_source_20261126T120904Z` |
+| Snapshot type | `real_source_extract` |
+| Extract label (`source_extract.yaml`) | `feature_schema_v002` |
+| Model feature label (v007) | `feature_schema_v003` (segmented spec, `model_config.yaml`) |
+| Row count | `11,85,050` |
+| Column count | `58` |
+| Data quality status | `passed` |
+| `content_sha256` | `47ac68e6a002f158136c467bc6b6ad4d3120541415ec5d5f60999673891eef1e` |
+
+| Entity type | Rows |
+|---|---:|
+| `customer` | `3,99,997` |
+| `web_customer` | `3,99,784` |
+| `user` | `3,83,965` |
+| `funnel_day` | `1,120` |
+| `product` | `147` |
+| `campaign` | `37` |
+
+## History: v004's snapshot (2026-11-15)
+
+v004 (production until 2026-11-20) was trained from this real-source snapshot:
 
 | Field | Value |
 |---|---|

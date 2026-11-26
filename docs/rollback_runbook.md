@@ -1,6 +1,6 @@
 # Rollback Runbook — Project 4 ML Pipeline & Anomaly Detection
 
-## Current state (2026-11-16)
+## Current state (2026-11-26)
 
 - `POST /admin/rollback` runs a dry run or an applied rollback. It requires the header
   `X-Admin-Token`: without a configured token the API answers **503** (admin disabled),
@@ -20,11 +20,10 @@
   `model_rollback_total`.
 - The first real rollbacks ran on 2026-11-16: v005 → v004 in compose (stage 15d) and in
   the kind cluster on both replicas (stage 15e); see "Observed" below.
-- **v004 is active and has no compatible target today.** v005 is `rolled_back`, which is
-  not a target; v001 and v003 are retired; v002 (single model) is never compatible with
-  the segmented v004. A dry run therefore returns HTTP 400
-  `No compatible rollback target for isolation_forest: …`. Promoting a version with
-  v004's segment spec archives v004 and makes it that version's target again.
+- **v007 is active and its rollback target is v006**, the most
+  recently archived version with the same segment spec (v005 is `rolled_back`, v001 and
+  v003 are retired, v002 is single). The dry run v007 → v006 passed on
+  2026-11-26.
 
 ## Purpose
 

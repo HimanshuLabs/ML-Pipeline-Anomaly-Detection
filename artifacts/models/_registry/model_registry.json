@@ -148,7 +148,7 @@
     {
       "algorithm": "IsolationForest",
       "approved_for_prod": true,
-      "archived_at_utc": null,
+      "archived_at_utc": "2026-11-26T12:11:33.733486+00:00",
       "artifact_dir": "artifacts/models/isolation_forest/model_version=v006",
       "artifact_path": "artifacts/models/isolation_forest/model_version=v006/model.joblib",
       "baseline_anomaly_rate": 0.05000223616048713,
@@ -168,13 +168,42 @@
       "notes": "4 lakh round",
       "promoted_at_utc": "2026-11-20T18:33:49.282787+00:00",
       "snapshot_id": "real_source_20261120T182648Z",
-      "status": "production",
+      "status": "archived",
       "threshold_used": null,
       "training_dataset_id": "646b5b2a-d4fa-5564-b76a-b04ae2e276fe",
       "training_finished_at_utc": "2026-11-20T18:30:52.391550+00:00",
       "training_started_at_utc": "2026-11-20T18:30:18.656617+00:00"
+    },
+    {
+      "algorithm": "IsolationForest",
+      "approved_for_prod": true,
+      "archived_at_utc": null,
+      "artifact_dir": "artifacts/models/isolation_forest/model_version=v007",
+      "artifact_path": "artifacts/models/isolation_forest/model_version=v007/model.joblib",
+      "baseline_anomaly_rate": 0.05000210961562803,
+      "baseline_f1_proxy": null,
+      "baseline_precision_proxy": null,
+      "baseline_recall_proxy": null,
+      "baseline_stats_path": "artifacts/models/isolation_forest/model_version=v007/baseline_stats.json",
+      "created_at_utc": "2026-11-26T12:11:29.637704+00:00",
+      "feature_schema_path": "artifacts/models/isolation_forest/model_version=v007/feature_schema.json",
+      "feature_schema_version": "feature_schema_v003",
+      "latency_p50_ms": 0.0,
+      "latency_p95_ms": 0.0,
+      "metadata_path": "artifacts/models/isolation_forest/model_version=v007/metadata.json",
+      "model_id": "e412377d-2638-56a8-a539-50ec9f81c76c",
+      "model_name": "isolation_forest",
+      "model_version": "v007",
+      "notes": "re-run on the new upstream data",
+      "promoted_at_utc": "2026-11-26T12:11:33.733486+00:00",
+      "snapshot_id": "real_source_20261126T120904Z",
+      "status": "production",
+      "threshold_used": null,
+      "training_dataset_id": "01191f7a-d246-5873-b5c3-5605fc867761",
+      "training_finished_at_utc": "2026-11-26T12:10:35.475234+00:00",
+      "training_started_at_utc": "2026-11-26T12:10:00.767187+00:00"
     }
   ],
   "registry_backend": "local_json",
-  "updated_at_utc": "2026-11-20T18:33:49.548554+00:00"
+  "updated_at_utc": "2026-11-26T12:11:34.000884+00:00"
 }

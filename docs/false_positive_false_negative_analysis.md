@@ -287,9 +287,9 @@ That is the correct choice.
 
 ## Why the current threshold position is reasonable
 
-The active v004 baseline anomaly rate is:
+The active v007 baseline anomaly rate is:
 
-`0.0507` overall, `0.050`–`0.054` per segment
+`0.0500` overall, `0.050`–`0.054` per segment
 
 That is approximately 5% in every segment.
 
@@ -714,7 +714,7 @@ Until then, proxy metrics remain the honest boundary.
 Project 4 can honestly claim:
 
 * The platform trains an unsupervised Isolation Forest anomaly model.
-* The active model is versioned as `v004`, segmented into one Isolation Forest per entity type.
+* The active model is versioned as `v007`, segmented into one Isolation Forest per entity type.
 * The active model was trained from a real-source extraction.
 * The model has baseline anomaly-rate statistics.
 * The model has feature-level baseline statistics.

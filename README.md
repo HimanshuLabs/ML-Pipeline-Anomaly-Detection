@@ -26,6 +26,25 @@ The core system proves:
 - hardened Kubernetes manifests, validated live on a local kind cluster
 - CI/CD validation
 
+## Scale run
+
+Run on 2026-11-26 on the upstream data of
+[Real-time-personalization-pipeline](https://github.com/HimanshuLabs/Real-time-personalization-pipeline)
+and [Batch-Lakehouse-Marketing-Analytics](https://github.com/HimanshuLabs/Batch-Lakehouse-Marketing-Analytics)
+at 3,99,997 customers. Synthetic data, one local machine (16 threads), not production.
+
+| Step | Result | Time |
+|---|---|---|
+| Extract | `real_source_20261126T120904Z`: 11,85,050 rows, 6 entity types | 1058 s |
+| Retrain | `v007`: 6 segments, 52 features, gate 26/26 | 95 s |
+| Promote | `v007` production, `v006` archived | |
+| Batch | `0cbe4b79-5fd9-4628-bb01-b7eeaf918cf7`: 11,85,050 rows, 59,255 anomalies | 562 s |
+| Verify | 14/14 | |
+
+CI runs the default size (about 500 customers), not this run. Checks, counts and hashes:
+[docs/scale_run_evidence.md](docs/scale_run_evidence.md). Procedure: "Running at scale"
+under "Batch inference".
+
 ## System architecture
 
 ```text
@@ -93,7 +112,7 @@ rollback to previous stable model
 
 ## Model lifecycle
 
-Registered versions on 2026-11-20:
+Registered versions on 2026-11-26:
 
 | Version | Status | Kind | Feature schema | Why |
 |---|---|---|---|---|
@@ -102,21 +121,22 @@ Registered versions on 2026-11-20:
 | `v003` | retired | single | `feature_schema_v002` | Superseded: the single model learned the entity type rather than anomalies (see its `evaluation_report.json`). |
 | `v004` | archived | segmented | `feature_schema_v003` | One Isolation Forest per entity type (6 segments, 52 features in total); production until v006. |
 | `v005` | rolled_back | segmented | `feature_schema_v003` | Retrained from a fresh read-only extract (same data as v004); `training_dataset_id` `64e7a3c0-bd07-5f74-95f5-71cc9e494e1b`, MLflow run `93a91a6a69834659befd027b2496b953`. Promoted, then rolled back to v004: the first real rollback (compose and kind). |
-| `v006` | production | segmented | `feature_schema_v003` | Retrained on the snapshot `real_source_20261120T182648Z` (11,85,067 rows, 6 segments, 52 features in total); `training_dataset_id` `646b5b2a-d4fa-5564-b76a-b04ae2e276fe`, MLflow run `a6ff1f0b52094a248618ca1b714e4e52`. Promoted on 2026-11-20, when v004 was archived. |
+| `v006` | archived | segmented | `feature_schema_v003` | Retrained on the snapshot `real_source_20261120T182648Z` (11,85,067 rows, 6 segments, 52 features in total); `training_dataset_id` `646b5b2a-d4fa-5564-b76a-b04ae2e276fe`, MLflow run `a6ff1f0b52094a248618ca1b714e4e52`. Production from 2026-11-20 until v007. |
+| `v007` | production | segmented | `feature_schema_v003` | Retrained on the snapshot `real_source_20261126T120904Z` (11,85,050 rows, 6 segments, 52 features in total); `training_dataset_id` `01191f7a-d246-5873-b5c3-5605fc867761`, MLflow run `906124d6de5a4f078c377eadc933f8f0`. Promoted on 2026-11-26, when v006 was archived. |
 
 Current active model:
 
 | Field | Value |
 |---|---|
 | Model name | `isolation_forest` |
-| Active version | `v006` |
+| Active version | `v007` |
 | Model kind | segmented: `campaign`, `customer`, `funnel_day`, `product`, `user`, `web_customer` |
-| Snapshot | `real_source_20261120T182648Z` (`real_source_extract`) |
+| Snapshot | `real_source_20261126T120904Z` (`real_source_extract`) |
 | Feature schema version | `feature_schema_v003` |
 | Feature count | `52` (each segment scores its own subset) |
 | Baseline anomaly rate | `0.0500` |
 | Label availability | `unlabeled_proxy_metrics` |
-| Artifact path | `artifacts/models/isolation_forest/model_version=v006/model.joblib` |
+| Artifact path | `artifacts/models/isolation_forest/model_version=v007/model.joblib` |
 
 The table is a dated snapshot. The live state comes from the API and the registry:
 
@@ -195,7 +215,14 @@ evaluation_report.json   (versions trained by retrain)
 
 New versions store their bundle paths in `metadata.json` relative to the repository root;
 v001–v004 keep the absolute paths they were written with, and registration finds their
-files next to `metadata.json` wherever the bundle is.
+files next to `metadata.json` wherever the bundle is. v002–v005 also keep their snapshots'
+local source paths in `training_snapshot_metadata`.
+
+`--snapshot latest` takes the snapshot with the newest recorded creation time, and stops
+on a snapshot folder without a readable `metadata.json` (an unfinished write) instead of
+taking an older one. A bundle is written to a hidden staging folder and renamed into
+place whole. The registry JSON, bundle JSON, snapshot `metadata.json` and
+`evaluation_report.json` are written atomically: a failed write leaves the previous file.
 
 ## Experiment tracking (MLflow)
 
@@ -292,8 +319,7 @@ Who connects to the `anomaly-postgres` instance (127.0.0.1:5435), and as what:
 |---|---|---|---|
 | Project 4 API, CLIs and drift job (compose) | `manshu` (the instance owner, a superuser) | `project4_ml` | everything |
 | Project 4 API, registry CLI and drift job (Kubernetes) | `project4_app`, created by `apply-schema` | `project4_ml` | CONNECT; USAGE on `ml`, `monitoring`, `audit`; exactly the table privileges they use (`database.APP_TABLE_PRIVILEGES`); no DDL; LOGIN only when `PROJECT4_APP_PASSWORD` is set |
-| Project 5 today | `manshu`, the same owner role | `project4_ml` | everything (to be replaced by `project5_reader`) |
-| Project 5 (intended) | `project5_reader`, created by `apply-schema` | `project4_ml` | CONNECT plus SELECT on the `integration.*` views only; LOGIN only when `PROJECT4_P5_READER_PASSWORD` is set |
+| [AI-Decision-Intelligence-Layer](https://github.com/HimanshuLabs/AI-Decision-Intelligence-Layer) | `project5_reader`, created by `apply-schema` | `project4_ml` | CONNECT plus SELECT on the `integration.*` views only; LOGIN only when `PROJECT4_P5_READER_PASSWORD` is set |
 | MLflow server | `project4_mlflow` | `project4_mlflow` only | owner of its own database; cannot connect to `project4_ml` once PUBLIC's CONNECT is revoked |
 
 `sql/restrict_project4_ml_connect.sql` revokes CONNECT and TEMPORARY on `project4_ml`
@@ -404,8 +430,9 @@ Project 4's own database engine gets neither), and before each table is read the
 extract uses, whole or, at scale, in buckets of business customers; see "Scale run"
 below). It runs as a
 `--network host` container against the sources' loopback ports, so they never need to
-listen beyond 127.0.0.1. The two passwords are read singly from `.env` and passed by
-name; never `--env-file .env`, which would hand the extract every Project 4 secret too:
+listen beyond 127.0.0.1. The two passwords (set in `.env` by hand; `.env.example` does not
+list them) are read singly from it and passed by name; never `--env-file .env`, which
+would hand the extract every secret of this pipeline too:
 
 ```bash
 PROJECT1_POSTGRES_PASSWORD="$(grep '^PROJECT1_POSTGRES_PASSWORD=' .env | cut -d= -f2-)" \
@@ -449,8 +476,8 @@ transaction, so a failed chunk leaves none of the run's rows.
 
 ### Scale run
 
-At P2's 4,00,000 customers a snapshot has about 11.5 lakh rows. The extract reads
-`warehouse.fact_web_events` (about 79 lakh rows) in buckets of business customers, one
+At the batch lakehouse's 3,99,997 customers a snapshot has 11,85,050 rows. The extract reads
+`warehouse.fact_web_events` (79,18,071 rows) in buckets of business customers, one
 per 50,000 customers (`P4_WEB_EVENT_BUCKETS` overrides the count; at the default size it
 is 1). Every SCD2 version (`customer_sk`) of a customer and every sentinel member is read
 in one bucket, NULL or unknown `customer_sk` values are still refused, and each customer's
@@ -459,7 +486,7 @@ not depend on the bucket count or on the order the database returns rows in.
 `content_sha256` is computed over the CSV in chunks of 100,000 rows: the same hash as
 before, without the whole CSV in memory.
 
-Run day, in this order (`tools()` from "Local runbook"; the extract is the command in
+Run day of v006 (2026-11-20), in this order (`tools()` from "Local runbook"; the extract is the command in
 "Training snapshots", with the source passwords by name):
 
 ```bash
@@ -484,6 +511,35 @@ again on purpose; after a failed database insert, `--resume-run BATCH_RUN_ID` st
 the run from the JSONL sink without scoring again. In database mode a run scores with
 the model of the database pointer (the one the API serves) unless `--active-model-path`
 names a pointer file.
+
+### Running at scale
+
+| Setting | Where | Default size | At 3,99,997 customers |
+|---|---|---|---|
+| `P4_WEB_EVENT_BUCKETS` | extract environment (`-e P4_WEB_EVENT_BUCKETS=<n>` on its `docker run`) | 1 bucket | 8 buckets, one per 50,000 customers, computed when unset |
+| `statement_timeout_ms` | `configs/source_extract.yaml`, per source | 120000 | 120000 |
+| `work_mem` | `configs/source_extract.yaml`, batch lakehouse source | `128MB` | `128MB` |
+| `shm_size` | `docker-compose.yml`, `anomaly-postgres` | `1g` | `1g` |
+
+With these settings the extract reads `marts.mart_customer_360` in 69.9 s and
+`marts.mart_marketing_funnel` in 75.5 s.
+
+Order: apply the schema, extract, retrain against the active version, promote, one batch
+run. After the run commits, batch_inference runs `ANALYZE ml.batch_predictions` in its
+own transaction; a failed `ANALYZE` is logged and the run is kept.
+
+```bash
+tools python -m anomaly_detection.database apply-schema
+# extract: the command in "Training snapshots"
+tools python -m anomaly_detection.retrain --snapshot latest --model-version v007 --compare-with v006
+tools python -m anomaly_detection.registry promote --model-version v007 --notes "re-run on the new upstream data"
+tools python -m anomaly_detection.batch_inference \
+  --input-path data/features/training/snapshot_date=DATE/snapshot_id=SNAPSHOT_ID/features.parquet \
+  --source-project project_4 --source-table real_source_snapshot
+```
+
+2026-11-26: extract 1058 s, retrain 95 s, batch 562 s.
+Evidence: [docs/scale_run_evidence.md](docs/scale_run_evidence.md).
 
 ## Online FastAPI inference
 
@@ -645,11 +701,10 @@ previous stable version. The target must:
 
 Among eligible versions the most recently archived one is chosen. The first real
 rollbacks, v005 → v004, ran on 2026-11-16 in compose and on both replicas of the kind
-cluster (see [the rollback runbook](docs/rollback_runbook.md)). **v004 is active and has no
-compatible target today**: v005 is `rolled_back` (not a target), v001 and v003 are
-retired, and v002 (single) is never compatible with the segmented v004, so a dry run
-returns HTTP 400 `No compatible rollback target for isolation_forest: …` until a version
-with v004's segment spec is promoted.
+cluster (see [the rollback runbook](docs/rollback_runbook.md)). **v007 is active and its
+rollback target is v006**, the most recently archived version with the same segment
+spec (v005 is `rolled_back`, v001 and v003 are retired, v002 is single); the dry run
+v007 → v006 passed on 2026-11-26.
 
 Rollback supports:
 
@@ -727,7 +782,7 @@ Benchmark script:
 scripts/benchmark_latency.py
 ```
 
-Live measurement of the active v004 (2026-11-15): 1,644 `/predict` requests built from
+Live measurement of v004, the active model on 2026-11-15 (none since): 1,644 `/predict` requests built from
 real feature rows, sent through the compose API, read from the Prometheus histogram
 `prediction_latency_ms` (5 ms buckets):
 
@@ -808,7 +863,7 @@ Until then, anomaly-quality discussion remains proxy-based and explicitly labele
 
 The data is unlabeled, so no precision, recall, or F1 can be computed. Isolation Forest
 flags the lowest-scoring `contamination` share of the training rows (0.05), so the
-training anomaly rate (v004: 0.0507 overall, 0.050–0.054 per entity type) is about 5% by
+training anomaly rate (v007: 0.0500 overall, 0.050–0.054 per entity type) is about 5% by
 construction and says nothing about quality. `evaluation_report.json` is computed on the
 training snapshot itself, not on a hold-out set. The only signals are proxy and
 operational ones: score distributions, the anomaly rate over time against that baseline,
@@ -816,6 +871,14 @@ mean/variance drift, and latency. Real quality figures need labelled outcomes fo
 records (human review, incident links, or delayed business labels) collected after
 scoring; precision and recall are then measured on a held-out, later time window at the
 deployed threshold.
+
+Fault injection (`scripts/fault_injection.py`) copies a seeded 1% of each segment's rows
+(at least 5), applies one synthetic fault per feature family, and scores them in memory
+with the active model; it writes only its report. On v007's training snapshot the share
+of synthetic faults flagged was 0.0755 to 0.4075 per segment and fault in `customer`,
+`user` and `web_customer` (3,840 to 4,000 faulted rows each), against a clean flag rate
+of 0.0500. `campaign`, `product` and `funnel_day` (5 to 12 faulted rows) are too small to
+show anything. Per segment and fault: [docs/scale_run_evidence.md](docs/scale_run_evidence.md).
 
 ## Dockerized runtimes
 
@@ -1006,7 +1069,8 @@ before this README record was added, so it validated everything except this para
 
 Each run's job summary lists the pytest totals from the JUnit report, and the
 `pytest-results` artifact holds the report itself. Postgres-marked tests are required in
-CI, so the summary shows 0 skipped.
+CI and never skipped; the one skipped test is the committed-snapshot hash check
+(snapshots are git-ignored).
 
 ## Local runbook
 
@@ -1142,24 +1206,19 @@ docker compose down --remove-orphans
 | `docs/false_positive_false_negative_analysis.md` | Threshold behavior and label limitations |
 | `docs/rollback_runbook.md` | Dry-run and applied rollback procedure |
 | `docs/kubernetes_runtime_validation.md` | Kubernetes runbook on a dedicated kind cluster, and the 2026-11-15 live validation |
+| `docs/scale_run_evidence.md` | Scale run checks, counts and hashes |
 
 ## Known limitations
 
-Implemented locally, not production-deployed:
-
-- a self-hosted Postgres model registry, not a managed one
-- local Prometheus and Grafana configuration
-- local Docker runtime and a local kind cluster
-- local rollback controls
-- administrative endpoints protected by one shared token (no users or roles)
-- no managed cloud deployment
-- no real production traffic
-- no verified anomaly labels
-- no real external incident-management integration
-- the drift job reads every batch payload of the last 24 hours into memory at once
-  (about 11.5 lakh rows per batch run at P2's 4,00,000 customers)
-
-These are intentional boundaries. The project is built to prove production ML platform mechanics locally before adding cloud cost or managed services.
+- Synthetic data, one local machine (16 threads), not production:
+  local Docker runtime and a local kind cluster, no verified anomaly labels.
+- CI proves the code at the default size (about 500 customers) and that the fixes change
+  no output; it does not prove the scale.
+- Security: every service binds to 127.0.0.1 and local passwords live in the git-ignored
+  `.env`; administrative endpoints protected by one shared token (no users or roles).
+- the drift job reads every batch payload of the last 24 hours, in chunks into
+  per-segment columns: peak 0.51 GB at 11.85 lakh rows, inside the 512 MiB limit of its
+  CronJob.
 
 ## Completion definition
 

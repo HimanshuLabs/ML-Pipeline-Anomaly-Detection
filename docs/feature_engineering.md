@@ -97,7 +97,7 @@ Every row it generates includes:
 
     schema_version = feature_schema_v001
 
-The production model (v004) is trained from real-source snapshots instead
+The production model (v007) is trained from real-source snapshots instead
 (`source_extract.py`, extract label `feature_schema_v002`) and carries the model label
 `feature_schema_v003`; see `docs/data_contract.md` ("Feature schema versions") and
 `docs/source_integration.md`.

@@ -1,12 +1,12 @@
 model_name: isolation_forest
-active_model_version: v006
-artifact_path: artifacts/models/isolation_forest/model_version=v006/model.joblib
+active_model_version: v007
+artifact_path: artifacts/models/isolation_forest/model_version=v007/model.joblib
 feature_schema_version: feature_schema_v003
 status: production
-dataset_snapshot_id: real_source_20261120T182648Z
-training_dataset_id: 646b5b2a-d4fa-5564-b76a-b04ae2e276fe
+dataset_snapshot_id: real_source_20261126T120904Z
+training_dataset_id: 01191f7a-d246-5873-b5c3-5605fc867761
 feature_count: 52
-baseline_anomaly_rate: 0.05000223616048713
+baseline_anomaly_rate: 0.05000210961562803
 source_projects:
 - project_1
 - project_2_3
@@ -19,8 +19,8 @@ source_tables:
 - warehouse.fact_web_events
 - warehouse.dim_customer
 snapshot_type: real_source_extract
-last_updated_at: '2026-11-20T18:33:49.551062+00:00'
-updated_at: '2026-11-20T18:33:49.551062+00:00'
-notes: 4 lakh round
+last_updated_at: '2026-11-26T12:11:34.003934+00:00'
+updated_at: '2026-11-26T12:11:34.003934+00:00'
+notes: re-run on the new upstream data
 latency_budget:
   online_prediction_p95_ms: 200

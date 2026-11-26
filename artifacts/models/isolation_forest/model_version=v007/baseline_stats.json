@@ -1,0 +1,1062 @@
+{
+  "baseline_anomaly_rate": 0.05000210961562803,
+  "feature_baselines": {
+    "ad_platform_conversions": {
+      "max": 65343.0,
+      "mean": 0.6992253491413865,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 29693.686626715225
+    },
+    "add_to_cart_count": {
+      "max": 13615.0,
+      "mean": 3.980637103919666,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 20855.064292391864
+    },
+    "attributed_revenue": {
+      "max": 194723866.73,
+      "mean": 1529.2220682502848,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 152857878960.96848
+    },
+    "average_order_value": {
+      "max": 76074.0,
+      "mean": 878.0506268511876,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 4009950.1276221946
+    },
+    "avg_api_latency_ms": {
+      "max": 4989.0,
+      "mean": 846.5683654078363,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 1453228.8209265452
+    },
+    "avg_cart_abandonment_probability": {
+      "max": 0.9998,
+      "mean": 0.3378784754811875,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 0.058482082127412925
+    },
+    "avg_engagement_score": {
+      "max": 38.16,
+      "mean": 6.730025355620442,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 85.8497088259945
+    },
+    "avg_event_price": {
+      "max": 13289.0,
+      "mean": 530.5497867431753,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 1699672.942111306
+    },
+    "avg_event_value": {
+      "max": 38644.36666666667,
+      "mean": 547.7255856408557,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 1096471.9150373412
+    },
+    "avg_fraud_score": {
+      "max": 0.9965,
+      "mean": 0.16866161994593426,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 0.0577114738788628
+    },
+    "avg_page_load_time_ms": {
+      "max": 9994.0,
+      "mean": 1703.3378004575595,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 5879083.950074113
+    },
+    "avg_product_engagement_score": {
+      "max": 0.5027,
+      "mean": 6.201814269440107e-05,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 3.100316297321626e-05
+    },
+    "avg_purchase_probability": {
+      "max": 0.9969,
+      "mean": 0.37752671148755834,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 0.037082510228652804
+    },
+    "budget_remaining": {
+      "max": 105063097.99,
+      "mean": 537.6764762583857,
+      "min": -17769584.32,
+      "missing_count": 0,
+      "variance": 29009163153.354366
+    },
+    "campaign_budget": {
+      "max": 118070093.01,
+      "mean": 1475.4296529935446,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 93410668833.26956
+    },
+    "category_revenue_rank": {
+      "max": 25.0,
+      "mean": 0.0015822117210244294,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 0.026388788112757328
+    },
+    "category_revenue_share_pct": {
+      "max": 20.28,
+      "mean": 0.0005063583815028901,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 0.003971008442335424
+    },
+    "click_through_rate_pct": {
+      "max": 3.69,
+      "mean": 5.191342137462554e-05,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 0.00012716797290098902
+    },
+    "clicks": {
+      "max": 8188426.0,
+      "mean": 68.29563140795747,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 312576111.5828169
+    },
+    "cost_per_click": {
+      "max": 31.39,
+      "mean": 0.0004203280030378465,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 0.007626098548934229
+    },
+    "cost_per_order": {
+      "max": 4537.2815,
+      "mean": 0.04823814632293996,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 106.39289676269486
+    },
+    "customer_conversion_rate_pct": {
+      "max": 100.0,
+      "mean": 14.354421399940929,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 535.5780456903265
+    },
+    "days_since_last_order": {
+      "max": 3650.0,
+      "mean": 74.95904560988988,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 219821.19855310794
+    },
+    "distinct_products_purchased": {
+      "max": 17.0,
+      "mean": 1.09212522678368,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 3.6594484727364627
+    },
+    "funnel_conversion_rate_pct": {
+      "max": 46.54,
+      "mean": 0.03990764946626724,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 1.6851959324021415
+    },
+    "gross_revenue": {
+      "max": 123201.0,
+      "mean": 3203.9658562929835,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 53670396.42496475
+    },
+    "impressions": {
+      "max": 462832193.0,
+      "mean": 3896.8708417366356,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 1029575977749.6515
+    },
+    "inventory_remaining": {
+      "max": 1584800.0,
+      "mean": 95.68811442555166,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 102969715.29228902
+    },
+    "lifetime_value": {
+      "max": 107039.15,
+      "mean": 2652.1303866250364,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 37716694.351865575
+    },
+    "max_event_price": {
+      "max": 13289.0,
+      "mean": 723.4976277962955,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 3133659.2341779573
+    },
+    "never_ordered": {
+      "max": 1.0,
+      "mean": 0.016847390405468125,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 0.016563555841993868
+    },
+    "order_count": {
+      "max": 74661.0,
+      "mean": 2.701790641745074,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 33157.964801400994
+    },
+    "page_view_count": {
+      "max": 18.0,
+      "mean": 1.4606885785409898,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 3.594990201358517
+    },
+    "product_categories_purchased": {
+      "max": 7.0,
+      "mean": 0.8555250833298174,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 2.015150794917428
+    },
+    "product_conversion_rate_pct": {
+      "max": 21.27,
+      "mean": 0.0023472174169866253,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 0.04872921442171169
+    },
+    "product_revenue": {
+      "max": 189992486.95,
+      "mean": 2584.3516947976877,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 161919089656.32452
+    },
+    "product_view_count": {
+      "max": 10567.0,
+      "mean": 4.398879372178389,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 13887.766501760945
+    },
+    "purchase_count": {
+      "max": 9733.0,
+      "mean": 2.819140964516265,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 10636.095401903298
+    },
+    "purchase_event_count": {
+      "max": 79656.0,
+      "mean": 0.6231593603645416,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 25452.14817888811
+    },
+    "purchase_intent_event_count": {
+      "max": 16.0,
+      "mean": 1.0804624277456647,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 3.372421202978436
+    },
+    "repeat_purchase_signal": {
+      "max": 1.0,
+      "mean": 0.27025610733724315,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 0.19721774378416368
+    },
+    "roas": {
+      "max": 4.3968,
+      "mean": 4.442774566473989e-05,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 8.919335564674545e-05
+    },
+    "search_count": {
+      "max": 7.0,
+      "mean": 0.27539091177587444,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 0.3523881905068308
+    },
+    "session_count": {
+      "max": 186916.0,
+      "mean": 14.015822117210245,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 386053.1079594408
+    },
+    "session_to_order_conversion_rate_pct": {
+      "max": 41.54,
+      "mean": 0.0010768997088730435,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 0.0429506840066913
+    },
+    "total_discount_amount": {
+      "max": 28407.15,
+      "mean": 432.04262474157207,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 1427037.8050700496
+    },
+    "total_events": {
+      "max": 9546.0,
+      "mean": 13.88314417113202,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 17653.83715776112
+    },
+    "total_spend": {
+      "max": 93603877.32,
+      "mean": 937.753176735159,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 53749998530.6384
+    },
+    "total_units_purchased": {
+      "max": 32.0,
+      "mean": 1.8066849500021096,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 10.77400602660317
+    },
+    "unique_products_interacted": {
+      "max": 8.0,
+      "mean": 0.5486300156111557,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 0.8516703943549595
+    },
+    "units_sold": {
+      "max": 16259.0,
+      "mean": 1.7800801653938652,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 28033.074376078974
+    },
+    "web_event_count": {
+      "max": 491675.0,
+      "mean": 17.165390489852747,
+      "min": 0.0,
+      "missing_count": 0,
+      "variance": 1335765.926404899
+    }
+  },
+  "feature_schema_version": "feature_schema_v003",
+  "label_availability": "unlabeled_proxy_metrics",
+  "latency_summary": {
+    "latency_max_ms": 0.0,
+    "latency_p50_ms": 0.0,
+    "latency_p95_ms": 0.0
+  },
+  "metric_type": "unsupervised_training_baseline",
+  "model_kind": "segmented_isolation_forest",
+  "model_name": "isolation_forest",
+  "model_version": "v007",
+  "notes": "Isolation Forest is trained without ground-truth anomaly labels in this checkpoint. Precision, recall, false positive rate, and false negative rate are not claimed here. They require delayed labels, backtesting, or simulated labels in later evaluation work.",
+  "prediction_summary": {
+    "anomaly_count": 59255,
+    "anomaly_rate": 0.05000210961562803,
+    "normal_count": 1125795,
+    "row_count": 1185050,
+    "score_max": 0.2828090414193812,
+    "score_mean": 0.10632437388335671,
+    "score_min": -0.20136326396839788,
+    "score_std": 0.05723550895944775
+  },
+  "segments": {
+    "campaign": {
+      "anomaly_count": 2,
+      "anomaly_rate": 0.05405405405405406,
+      "feature_baselines": {
+        "ad_platform_conversions": {
+          "max": 65343.0,
+          "mean": 22395.054054054053,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 449517843.83491606
+        },
+        "attributed_revenue": {
+          "max": 194723866.73,
+          "mean": 48978503.02648648,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 2496971125770414.0
+        },
+        "average_order_value": {
+          "max": 2964.79,
+          "mean": 2371.837297297297,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 885874.0871116143
+        },
+        "avg_engagement_score": {
+          "max": 0.5023,
+          "mean": 0.4320756756756756,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 0.02917367211102995
+        },
+        "avg_purchase_probability": {
+          "max": 0.5025,
+          "mean": 0.43200540540540544,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 0.029163130781592397
+        },
+        "budget_remaining": {
+          "max": 105063097.99,
+          "mean": 17220905.626756757,
+          "min": -17769584.32,
+          "missing_count": 0,
+          "variance": 632566122585938.5
+        },
+        "campaign_budget": {
+          "max": 118070093.01,
+          "mean": 47255619.196756765,
+          "min": 11802109.08,
+          "missing_count": 0,
+          "variance": 758768422642302.1
+        },
+        "click_through_rate_pct": {
+          "max": 3.69,
+          "mean": 1.662702702702703,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 1.3084899926953981
+        },
+        "clicks": {
+          "max": 8188426.0,
+          "mean": 2187398.3243243243,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 5226743934309.516
+        },
+        "cost_per_click": {
+          "max": 31.39,
+          "mean": 13.462424324324324,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 63.02035982184075
+        },
+        "cost_per_order": {
+          "max": 4537.2815,
+          "mean": 1544.9896027027028,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 1020673.6092624065
+        },
+        "impressions": {
+          "max": 462832193.0,
+          "mean": 124810453.8108108,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 1.7398485974412374e+16
+        },
+        "order_count": {
+          "max": 74661.0,
+          "mean": 18703.64864864865,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 365964397.30898464
+        },
+        "purchase_event_count": {
+          "max": 79656.0,
+          "mean": 19958.783783783783,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 416850419.79108834
+        },
+        "roas": {
+          "max": 4.3968,
+          "mean": 1.4229486486486487,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 0.8319989052008765
+        },
+        "session_count": {
+          "max": 186916.0,
+          "mean": 46871.40540540541,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 2298620344.5653763
+        },
+        "session_to_order_conversion_rate_pct": {
+          "max": 41.54,
+          "mean": 34.491351351351355,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 186.024584660336
+        },
+        "total_spend": {
+          "max": 93603877.32,
+          "mean": 30034713.569999997,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 819469436692689.1
+        },
+        "web_event_count": {
+          "max": 491675.0,
+          "mean": 123303.78378378379,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 15922323041.034332
+        }
+      },
+      "row_count": 37,
+      "score_p5": 4.5102810375396984e-17,
+      "score_p50": 0.10333547861960568,
+      "score_p95": 0.15532248805203056
+    },
+    "customer": {
+      "anomaly_count": 20000,
+      "anomaly_rate": 0.05000037500281252,
+      "feature_baselines": {
+        "average_order_value": {
+          "max": 76074.0,
+          "mean": 2600.6270612529593,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 7398207.177402759
+        },
+        "avg_cart_abandonment_probability": {
+          "max": 0.9998,
+          "mean": 0.499808189061418,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 0.005584118487728434
+        },
+        "avg_engagement_score": {
+          "max": 0.9971,
+          "mean": 0.49976201021507655,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 0.005558607216041187
+        },
+        "avg_purchase_probability": {
+          "max": 0.9969,
+          "mean": 0.4997051250384378,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 0.005541589176753004
+        },
+        "customer_conversion_rate_pct": {
+          "max": 100.0,
+          "mean": 42.527086653149894,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 388.62743160596085
+        },
+        "days_since_last_order": {
+          "max": 3650.0,
+          "mean": 222.0772080790606,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 618581.0719794971
+        },
+        "distinct_products_purchased": {
+          "max": 17.0,
+          "mean": 3.2355817668632514,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 3.9063259448069405
+        },
+        "gross_revenue": {
+          "max": 123201.0,
+          "mean": 9492.220536654026,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 99316950.54025799
+        },
+        "lifetime_value": {
+          "max": 107039.15,
+          "mean": 7857.3267166253745,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 70842331.4746512
+        },
+        "never_ordered": {
+          "max": 1.0,
+          "mean": 0.0499128743465576,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 0.04742157932102236
+        },
+        "order_count": {
+          "max": 15.0,
+          "mean": 2.9992249941874563,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 3.003241923684923
+        },
+        "product_categories_purchased": {
+          "max": 7.0,
+          "mean": 2.5346190096425723,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 1.7143175155413026
+        },
+        "purchase_intent_event_count": {
+          "max": 16.0,
+          "mean": 3.201029007717558,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 3.2032991658948027
+        },
+        "repeat_purchase_signal": {
+          "max": 1.0,
+          "mean": 0.8006735050512879,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 0.15959544336017317
+        },
+        "session_count": {
+          "max": 22.0,
+          "mean": 7.523006422548169,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 7.509405154029905
+        },
+        "total_discount_amount": {
+          "max": 28407.15,
+          "mean": 1279.989881049108,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 3142445.6780805495
+        },
+        "total_units_purchased": {
+          "max": 32.0,
+          "mean": 5.352570144276082,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 12.939979775506258
+        },
+        "web_event_count": {
+          "max": 71.0,
+          "mean": 19.79523846428848,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 72.25865496785997
+        }
+      },
+      "row_count": 399997,
+      "score_p5": 2.5123129564460557e-17,
+      "score_p50": 0.1377952984725595,
+      "score_p95": 0.18118894488828788
+    },
+    "funnel_day": {
+      "anomaly_count": 56,
+      "anomaly_rate": 0.05,
+      "feature_baselines": {
+        "add_to_cart_count": {
+          "max": 2157.0,
+          "mean": 922.4107142857143,
+          "min": 367.0,
+          "missing_count": 0,
+          "variance": 107112.10452806122
+        },
+        "avg_cart_abandonment_probability": {
+          "max": 0.5205,
+          "mean": 0.4999825892857143,
+          "min": 0.4834,
+          "missing_count": 0,
+          "variance": 2.2919759367028058e-05
+        },
+        "avg_engagement_score": {
+          "max": 0.5183,
+          "mean": 0.5000446428571429,
+          "min": 0.4824,
+          "missing_count": 0,
+          "variance": 2.4382971301020406e-05
+        },
+        "avg_purchase_probability": {
+          "max": 0.5208,
+          "mean": 0.4999733928571428,
+          "min": 0.4847,
+          "missing_count": 0,
+          "variance": 2.2228702774234695e-05
+        },
+        "funnel_conversion_rate_pct": {
+          "max": 46.54,
+          "mean": 42.2255,
+          "min": 37.19,
+          "missing_count": 0,
+          "variance": 1.7649842142857146
+        },
+        "product_view_count": {
+          "max": 1828.0,
+          "mean": 786.56875,
+          "min": 318.0,
+          "missing_count": 0,
+          "variance": 77681.94348772323
+        },
+        "purchase_count": {
+          "max": 1630.0,
+          "mean": 659.3526785714286,
+          "min": 277.0,
+          "missing_count": 0,
+          "variance": 54678.94793925383
+        },
+        "session_count": {
+          "max": 3712.0,
+          "mean": 1561.4598214285713,
+          "min": 619.0,
+          "missing_count": 0,
+          "variance": 304565.25195711094
+        },
+        "total_events": {
+          "max": 9546.0,
+          "mean": 4073.4285714285716,
+          "min": 1573.0,
+          "missing_count": 0,
+          "variance": 2075053.787755102
+        }
+      },
+      "row_count": 1120,
+      "score_p5": -3.2985157031976964e-17,
+      "score_p50": 0.12639998694794927,
+      "score_p95": 0.17008556894430876
+    },
+    "product": {
+      "anomaly_count": 8,
+      "anomaly_rate": 0.05442176870748299,
+      "feature_baselines": {
+        "add_to_cart_count": {
+          "max": 13615.0,
+          "mean": 12107.231292517006,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 14291975.688000372
+        },
+        "average_order_value": {
+          "max": 12679.0,
+          "mean": 1381.7329931972788,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 3853273.6267855996
+        },
+        "avg_event_price": {
+          "max": 13289.0,
+          "mean": 1749.4761904761904,
+          "min": 169.0,
+          "missing_count": 0,
+          "variance": 5229419.5011337865
+        },
+        "avg_product_engagement_score": {
+          "max": 0.5027,
+          "mean": 0.49996326530612256,
+          "min": 0.4956,
+          "missing_count": 0,
+          "variance": 1.7420519228099519e-06
+        },
+        "category_revenue_rank": {
+          "max": 25.0,
+          "mean": 12.755102040816327,
+          "min": 1.0,
+          "missing_count": 0,
+          "variance": 50.06247396917951
+        },
+        "category_revenue_share_pct": {
+          "max": 20.28,
+          "mean": 4.082040816326531,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 15.351550937109534
+        },
+        "inventory_remaining": {
+          "max": 1584800.0,
+          "mean": 771395.918367347,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 235119164881.29944
+        },
+        "max_event_price": {
+          "max": 12679.0,
+          "mean": 1511.0108843537416,
+          "min": 152.1,
+          "missing_count": 0,
+          "variance": 3860591.8748475173
+        },
+        "order_count": {
+          "max": 10039.0,
+          "mean": 8911.843537414967,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 7745269.737424223
+        },
+        "product_conversion_rate_pct": {
+          "max": 21.27,
+          "mean": 18.92224489795918,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 34.82677387199777
+        },
+        "product_revenue": {
+          "max": 189992486.95,
+          "mean": 20833918.203537416,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 871322899883446.2
+        },
+        "product_view_count": {
+          "max": 10567.0,
+          "mean": 10329.714285714286,
+          "min": 10071.0,
+          "missing_count": 0,
+          "variance": 8566.938775510203
+        },
+        "purchase_count": {
+          "max": 9733.0,
+          "mean": 8645.755102040815,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 7292631.899208662
+        },
+        "session_count": {
+          "max": 46324.0,
+          "mean": 43913.421768707485,
+          "min": 25472.0,
+          "missing_count": 0,
+          "variance": 32599191.699662182
+        },
+        "units_sold": {
+          "max": 16259.0,
+          "mean": 14350.231292517006,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 20086847.15738812
+        },
+        "web_event_count": {
+          "max": 56835.0,
+          "mean": 53480.06802721089,
+          "min": 25605.0,
+          "missing_count": 0,
+          "variance": 74885977.62802537
+        }
+      },
+      "row_count": 147,
+      "score_p5": 1.691355389077387e-17,
+      "score_p50": 0.22646735543601104,
+      "score_p95": 0.27551720478379216
+    },
+    "user": {
+      "anomaly_count": 19199,
+      "anomaly_rate": 0.05000195330303543,
+      "feature_baselines": {
+        "add_to_cart_count": {
+          "max": 5.0,
+          "mean": 0.2898936100946701,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 0.26045924017546485
+        },
+        "avg_engagement_score": {
+          "max": 38.16,
+          "mean": 19.728450640032293,
+          "min": 1.77,
+          "missing_count": 0,
+          "variance": 15.008439288179273
+        },
+        "avg_event_price": {
+          "max": 13287.67,
+          "mean": 1636.7920299506466,
+          "min": 101.42,
+          "missing_count": 0,
+          "variance": 3432276.940759423
+        },
+        "avg_purchase_probability": {
+          "max": 0.6114,
+          "mean": 0.12254134491424998,
+          "min": 0.0254,
+          "missing_count": 0,
+          "variance": 0.006762385514329395
+        },
+        "max_event_price": {
+          "max": 13289.0,
+          "mean": 2232.387705181462,
+          "min": 101.42,
+          "missing_count": 0,
+          "variance": 6301204.853850169
+        },
+        "page_view_count": {
+          "max": 7.0,
+          "mean": 1.1895511309624576,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 0.7014214293944016
+        },
+        "product_view_count": {
+          "max": 21.0,
+          "mean": 3.3455445157761776,
+          "min": 1.0,
+          "missing_count": 0,
+          "variance": 3.853932494577277
+        },
+        "purchase_count": {
+          "max": 4.0,
+          "mean": 0.13287669449038325,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 0.12679445013764443
+        },
+        "search_count": {
+          "max": 7.0,
+          "mean": 0.8499524696261378,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 0.5992429300393805
+        },
+        "session_count": {
+          "max": 8.0,
+          "mean": 1.6999986977979764,
+          "min": 1.0,
+          "missing_count": 0,
+          "variance": 0.7007275402689017
+        },
+        "total_events": {
+          "max": 67.0,
+          "mean": 10.344547029026083,
+          "min": 2.0,
+          "missing_count": 0,
+          "variance": 37.343613338043895
+        },
+        "unique_products_interacted": {
+          "max": 8.0,
+          "mean": 1.6932637089318037,
+          "min": 1.0,
+          "missing_count": 0,
+          "variance": 0.6903853908120586
+        }
+      },
+      "row_count": 383965,
+      "score_p5": 9.684233565076823e-19,
+      "score_p50": 0.14329078811787227,
+      "score_p95": 0.1899138708148319
+    },
+    "web_customer": {
+      "anomaly_count": 19990,
+      "anomaly_rate": 0.050002001080583516,
+      "feature_baselines": {
+        "add_to_cart_count": {
+          "max": 23.0,
+          "mean": 4.485126968563024,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 7.670045737085716
+        },
+        "avg_api_latency_ms": {
+          "max": 4989.0,
+          "mean": 2509.4196901990986,
+          "min": 44.0,
+          "missing_count": 0,
+          "variance": 134906.33631667183
+        },
+        "avg_cart_abandonment_probability": {
+          "max": 0.9998,
+          "mean": 0.500072866020104,
+          "min": 0.0012,
+          "missing_count": 0,
+          "variance": 0.005453940293509843
+        },
+        "avg_engagement_score": {
+          "max": 0.9971,
+          "mean": 0.500026654588488,
+          "min": 0.0005,
+          "missing_count": 0,
+          "variance": 0.005428431302969342
+        },
+        "avg_event_value": {
+          "max": 38644.36666666667,
+          "mean": 1623.5822475729296,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 1503448.4327549178
+        },
+        "avg_fraud_score": {
+          "max": 0.9965,
+          "mean": 0.4999511053892336,
+          "min": 0.0018,
+          "missing_count": 0,
+          "variance": 0.0054412885589834965
+        },
+        "avg_page_load_time_ms": {
+          "max": 9994.0,
+          "mean": 5049.077653013204,
+          "min": 105.0,
+          "missing_count": 0,
+          "variance": 534031.3083344799
+        },
+        "avg_purchase_probability": {
+          "max": 0.9969,
+          "mean": 0.4999698253265037,
+          "min": 0.001,
+          "missing_count": 0,
+          "variance": 0.005411434585410196
+        },
+        "page_view_count": {
+          "max": 18.0,
+          "mean": 3.1873286574750366,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 4.789095535371692
+        },
+        "product_view_count": {
+          "max": 21.0,
+          "mean": 3.824302623416645,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 6.171572250443761
+        },
+        "purchase_count": {
+          "max": 16.0,
+          "mean": 3.2027344766173735,
+          "min": 0.0,
+          "missing_count": 0,
+          "variance": 3.199543680262747
+        },
+        "session_count": {
+          "max": 22.0,
+          "mean": 7.527014587877454,
+          "min": 1.0,
+          "missing_count": 0,
+          "variance": 7.483236553866396
+        },
+        "total_events": {
+          "max": 71.0,
+          "mean": 19.805785123966942,
+          "min": 1.0,
+          "missing_count": 0,
+          "variance": 72.08826861546558
+        }
+      },
+      "row_count": 399784,
+      "score_p5": -5.283442123881583e-17,
+      "score_p50": 0.08051401956087997,
+      "score_p95": 0.11891313230740266
+    }
+  }
+}

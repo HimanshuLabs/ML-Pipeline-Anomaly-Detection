@@ -1,10 +1,11 @@
 # Latency Budget — Project 4 ML Pipeline & Anomaly Detection
 
-## Current state (2026-11-15)
+## Current state (2026-11-26)
 
 - Online inference endpoint: `POST /predict` (and `POST /predict/batch`).
-- Active production model: `v004`, segmented (one Isolation Forest per entity type, 52
-  features in total), served from the shared pointer by `OnlineInferenceService`.
+- Active production model: `v007`, segmented (one Isolation Forest per entity type, 52
+  features in total), served from the shared pointer by `OnlineInferenceService`. The
+  latest measurement is of v004 (2026-11-15).
 - Online prediction latency budget: `p95 < 200 ms`.
 - Prometheus latency metric: `prediction_latency_ms` (histogram, 5 ms buckets).
 - Client-side benchmark script: `scripts/benchmark_latency.py`.

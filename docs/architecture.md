@@ -22,8 +22,8 @@ models, serves them in batch and online, and monitors them.
 8. Prediction, drift, alert, and rollback evidence goes to JSONL and to the
    `ml`, `monitoring`, and `audit` schemas; Project 5 reads the `integration.*` views.
 
-Active model: `v004` (segmented, `feature_schema_v003`, 52 features in total, baseline
-anomaly rate 0.0507).
+Active model: `v007` (segmented, `feature_schema_v003`, 52 features in total,
+baseline anomaly rate 0.0500).
 
 <!-- BEGIN REAL_SOURCE_ML_BRIDGE -->
 ## History: real-source ML bridge (v002, 2026-06)

@@ -104,7 +104,7 @@ Three labels are in use (2026-11-15), all set in configuration:
 |---|---|---|
 | `feature_schema_v001` | `configs/model_config.yaml` (`features.schema_version`) | The 11-feature contract of this document: rows built by the demo feature builder; models v001 and v002 were trained under it. |
 | `feature_schema_v002` | `configs/source_extract.yaml` (`feature_schema_version`) | Real-source extract snapshots (also model v003). |
-| `feature_schema_v003` | `configs/model_config.yaml` (`features.real_source_schema_version`) | Models trained from real-source snapshots as segmented models: the production model v004. |
+| `feature_schema_v003` | `configs/model_config.yaml` (`features.real_source_schema_version`) | Models trained from real-source snapshots as segmented models: v004 to v007 (production: v007). |
 
 This document describes the `feature_schema_v001` contract. Every row generated under it
 must include:

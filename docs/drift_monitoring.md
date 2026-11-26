@@ -8,7 +8,7 @@ The current implementation focuses on lightweight mean and variance drift checks
 
 Are the features being scored now still behaving like the features the model was trained on?
 
-## Current state (2026-11-15)
+## Current state (2026-11-26)
 
 Implemented:
 
@@ -26,15 +26,18 @@ Implemented:
 - The drift job (`python -m anomaly_detection.drift_job --source batch-predictions
   --hours 24`, or `--input <file>`) evaluates the last hours of `ml.batch_predictions`
   for the active version. In Kubernetes it runs hourly (`k8s/cronjob-drift.yaml`).
+  It reads the window in chunks into per-segment columns: peak 0.51 GB at 11,85,050
+  rows, inside the CronJob's 512 MiB limit, with the same drift events as a one-piece
+  read.
 - The API reports the latest drift status of the request's segment in each online
   prediction (`drift_status`), or `not_evaluated` when there is none.
 - Prometheus drift metrics and Grafana panels (see below).
 
-Active model baseline (2026-11-15): `isolation_forest` v004, segmented
+Active model baseline (2026-11-26): `isolation_forest` v007, segmented
 (`campaign`, `customer`, `funnel_day`, `product`, `user`, `web_customer`),
-`feature_schema_v003`, snapshot `real_source_20261115T010701Z`:
+`feature_schema_v003`, snapshot `real_source_20261126T120904Z`:
 
-    artifacts/models/isolation_forest/model_version=v004/baseline_stats.json
+    artifacts/models/isolation_forest/model_version=v007/baseline_stats.json
 
 ## Nothing to evaluate: a stalled pipeline or a quiet one
 
