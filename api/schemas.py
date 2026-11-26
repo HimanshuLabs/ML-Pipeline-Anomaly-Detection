@@ -15,6 +15,10 @@ class HealthResponse(BaseModel):
     active_model_version: str | None
     model_loaded: bool
     pointer_source: str | None = None
+    # Database-pointer mode only (absent otherwise): the version the pointer names, and
+    # "current" or "failed: ..." while an older model keeps serving.
+    pointer_model_version: str | None = None
+    model_reload_status: str | None = None
 
 
 class ActiveModelResponse(BaseModel):

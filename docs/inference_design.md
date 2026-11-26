@@ -348,7 +348,7 @@ The service loads the model once into memory through `OnlineInferenceService`. I
 | Endpoint | Status | Purpose |
 |---|---|---|
 | `GET /livez` | Implemented | Liveness: the process is up (never touches the model). |
-| `GET /health` | Implemented | API health, model-load status, and `pointer_source`. |
+| `GET /health` | Implemented | API health, model-load status, and `pointer_source`; in database mode also `pointer_model_version` and `model_reload_status` (`current`, or `failed: …` while the previous model keeps serving). |
 | `GET /model/active` | Implemented | Returns active model metadata, feature count, baseline anomaly rate, threshold, and load timestamp. |
 | `POST /predict` | Implemented | Scores one feature payload with the active in-memory model; a segmented model needs its `entity_type` (default `user`). |
 | `POST /predict/batch` | Implemented | Scores multiple payloads of one entity type through the same in-memory service. |

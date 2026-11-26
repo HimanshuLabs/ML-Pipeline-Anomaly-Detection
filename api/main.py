@@ -56,6 +56,7 @@ from anomaly_detection.registry import (
     RegistryError,
     database_enabled,
     materialize_active_pointer,
+    read_shared_pointer_model_version,
     read_shared_pointer_version,
     resolve_project_path,
 )
@@ -84,6 +85,7 @@ ROLLBACK_LOCK = threading.Lock()
 
 POINTER_POLL_SECONDS_ENV = "PROJECT4_POINTER_POLL_SECONDS"
 DEFAULT_POINTER_POLL_SECONDS = 30.0
+RELOAD_STATUS_CURRENT = "current"
 
 ADMIN_TOKEN_ENV = "ADMIN_TOKEN"
 MIN_ADMIN_TOKEN_LENGTH = 16
@@ -195,6 +197,10 @@ class AppState:
         self.pointer_version: int | None = None
         self.poller: PointerPoller | None = None
         self.drift_cache = DriftStatusCache()
+        # Database-pointer mode only: the version the pointer names, and "current" or
+        # "failed: ..." for the last reload (None in file mode).
+        self.pointer_model_version: str | None = None
+        self.model_reload_status: str | None = None
 
 
 def refresh_drift_status(holder: AppState) -> None:
@@ -205,6 +211,19 @@ def refresh_drift_status(holder: AppState) -> None:
         return
     info = service.active_model_info()
     holder.drift_cache.refresh(model_name=info.model_name, model_version=info.model_version)
+
+
+def reload_failure_status(pointer_version: int | None, exc: BaseException) -> str:
+    """model_reload_status after a failed load; the class only (/health needs no token)."""
+
+    return f"failed: pointer_version {pointer_version} could not be loaded ({type(exc).__name__})"
+
+
+def _pointer_model_version_or_none(read: Callable[[], str | None]) -> str | None:
+    try:
+        return read()
+    except Exception:  # noqa: BLE001 - /health shows null; the reload error is logged
+        return None
 
 
 def swap_inference_service(
@@ -221,6 +240,12 @@ def swap_inference_service(
     holder.pointer_source = pointer_source
 
     new_info = new_service.active_model_info()
+    if pointer_source == POINTER_SOURCE_POSTGRES:
+        holder.pointer_model_version = new_info.model_version
+        holder.model_reload_status = RELOAD_STATUS_CURRENT
+    else:
+        holder.pointer_model_version = None
+        holder.model_reload_status = None
     replace_active_model_version(
         model_name=new_info.model_name, model_version=new_info.model_version
     )
@@ -266,12 +291,14 @@ class PointerPoller:
         load_service: Callable[
             [], tuple[OnlineInferenceService, int]
         ] = load_service_from_shared_pointer,
+        read_model_version: Callable[[], str | None] = read_shared_pointer_model_version,
         lock: threading.Lock = ROLLBACK_LOCK,
     ) -> None:
         self.holder = holder
         self.interval_seconds = interval_seconds
         self._read_version = read_version
         self._load_service = load_service
+        self._read_model_version = read_model_version
         self._lock = lock
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -303,7 +330,7 @@ class PointerPoller:
 
         try:
             new_service, loaded_version = self._load_service()
-        except Exception:  # noqa: BLE001 - keep the old model
+        except Exception as exc:  # noqa: BLE001 - keep the old model
             record_model_reload(result="failed")
             if self._failed_version != version:
                 logger.error(
@@ -313,6 +340,10 @@ class PointerPoller:
                     exc_info=True,
                 )
                 self._failed_version = version
+                self.holder.pointer_model_version = _pointer_model_version_or_none(
+                    self._read_model_version
+                )
+                self.holder.model_reload_status = reload_failure_status(version, exc)
             return False
 
         with self._lock:
@@ -420,16 +451,18 @@ async def lifespan(app: FastAPI):
         service: OnlineInferenceService | None = None
         pointer_version: int | None = None
         pointer_source = POINTER_SOURCE_FILE
+        startup_failure: Exception | None = None
         if use_database:
             try:
                 service, pointer_version = load_service_from_shared_pointer()
                 pointer_source = POINTER_SOURCE_POSTGRES
-            except Exception:  # noqa: BLE001 - fall back to the file mirror
+            except Exception as exc:  # noqa: BLE001 - fall back to the file mirror
                 logger.warning(
                     "Could not load the model from the shared database pointer; "
                     "starting from the file pointer",
                     exc_info=True,
                 )
+                startup_failure = exc
         if service is None:
             service = OnlineInferenceService()
 
@@ -439,6 +472,11 @@ async def lifespan(app: FastAPI):
             pointer_version=pointer_version,
             pointer_source=pointer_source,
         )
+        if startup_failure is not None:
+            state.pointer_model_version = _pointer_model_version_or_none(
+                read_shared_pointer_model_version
+            )
+            state.model_reload_status = reload_failure_status(None, startup_failure)
         info = service.active_model_info()
         logger.info(
             "Loaded active anomaly model",
@@ -464,6 +502,8 @@ async def lifespan(app: FastAPI):
     if poller is not None:
         poller.stop()
         state.poller = None
+    state.pointer_model_version = None
+    state.model_reload_status = None
 
 
 app = FastAPI(
@@ -480,7 +520,18 @@ def livez() -> dict[str, str]:
     return {"status": "alive"}
 
 
-@app.get("/health", response_model=HealthResponse)
+def _reload_fields() -> dict[str, Any]:
+    """pointer_model_version and model_reload_status, in database-pointer mode only."""
+
+    if state.model_reload_status is None:
+        return {}
+    return {
+        "pointer_model_version": state.pointer_model_version,
+        "model_reload_status": state.model_reload_status,
+    }
+
+
+@app.get("/health", response_model=HealthResponse, response_model_exclude_unset=True)
 def health(response: Response) -> HealthResponse:
     """Readiness: 200 when a model is loaded, 503 when it is not."""
 
@@ -492,6 +543,7 @@ def health(response: Response) -> HealthResponse:
             active_model_version=None,
             model_loaded=False,
             pointer_source=state.pointer_source,
+            **_reload_fields(),
         )
 
     info = state.inference_service.active_model_info()
@@ -501,6 +553,7 @@ def health(response: Response) -> HealthResponse:
         active_model_version=info.model_version,
         model_loaded=True,
         pointer_source=state.pointer_source,
+        **_reload_fields(),
     )
 
 

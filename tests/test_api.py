@@ -1044,3 +1044,110 @@ def test_postgres_persist_failure_is_counted_and_never_returned(
     assert _metric_value("prediction_persist_failures_total", {"sink": "postgres"}) == (
         failures_before + 1
     )
+
+
+# --- clean-up: /health names a failed reload in database-pointer mode -----------------
+
+
+def test_health_reports_a_failed_reload_and_stays_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    import api.main
+    from api.main import PointerPoller
+
+    holder = _holder("v101", pointer_version=1)
+
+    def _broken_load():
+        raise RuntimeError("artifact missing at /some/path/model.joblib")
+
+    failing = PointerPoller(
+        holder,
+        interval_seconds=30,
+        read_version=lambda: 2,
+        load_service=_broken_load,
+        read_model_version=lambda: "v102",
+    )
+    assert failing.poll_once() is False
+    monkeypatch.setattr(api.main, "state", holder)
+
+    response = TestClient(app).get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ok",
+        "service": "project4-online-anomaly-inference",
+        "active_model_version": "v101",
+        "model_loaded": True,
+        "pointer_source": "postgres",
+        "pointer_model_version": "v102",
+        "model_reload_status": "failed: pointer_version 2 could not be loaded (RuntimeError)",
+    }
+
+    working = PointerPoller(
+        holder,
+        interval_seconds=30,
+        read_version=lambda: 2,
+        load_service=lambda: (_FakeService("v102"), 2),
+        read_model_version=lambda: pytest.fail("a successful load reads no pointer name"),
+    )
+    assert working.poll_once() is True
+
+    body = TestClient(app).get("/health").json()
+    assert (body["active_model_version"], body["pointer_model_version"]) == ("v102", "v102")
+    assert body["model_reload_status"] == "current"
+
+
+def test_health_failed_reload_shows_null_when_the_pointer_name_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+
+    import api.main
+    from api.main import PointerPoller
+
+    caplog.set_level(logging.ERROR, logger="api.main")
+    holder = _holder("v101", pointer_version=1)
+
+    def _broken_load():
+        raise RuntimeError("artifact missing")
+
+    def _unreadable_pointer():
+        raise ConnectionError("database unreachable")
+
+    poller = PointerPoller(
+        holder,
+        interval_seconds=30,
+        read_version=lambda: 2,
+        load_service=_broken_load,
+        read_model_version=_unreadable_pointer,
+    )
+    assert poller.poll_once() is False
+    assert poller.poll_once() is False
+    monkeypatch.setattr(api.main, "state", holder)
+
+    body = TestClient(app).get("/health").json()
+
+    assert body["status"] == "ok" and body["active_model_version"] == "v101"
+    assert body["pointer_model_version"] is None
+    assert body["model_reload_status"].startswith("failed: pointer_version 2 ")
+    errors = [record for record in caplog.records if record.levelno == logging.ERROR]
+    assert len(errors) == 1
+
+
+def test_file_mode_health_has_no_reload_fields_after_a_database_mode_holder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(state, "pointer_model_version", "v999")
+    monkeypatch.setattr(state, "model_reload_status", "current")
+    monkeypatch.setattr(state, "inference_service", None)
+
+    with TestClient(app) as client:
+        health = client.get("/health").json()
+
+    assert set(health) == {
+        "status",
+        "service",
+        "active_model_version",
+        "model_loaded",
+        "pointer_source",
+    }
+    assert health["pointer_source"] == "file"

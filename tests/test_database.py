@@ -2626,3 +2626,44 @@ def test_resume_refuses_a_stored_run_and_an_unknown_run(
         assert "Nothing was written" in str(error.value)
     assert output_path.read_bytes() == jsonl_before
     assert _count(initialized_database, "SELECT COUNT(*) FROM ml.batch_predictions") == 4
+
+
+# --- clean-up: /health names the pointer version that failed to load ----------------------
+
+
+@pytest.mark.postgres
+def test_health_names_the_pointer_version_that_failed_to_load(
+    initialized_database,
+    trained_metadata_paths: dict[str, Path],
+) -> None:
+    from anomaly_detection.registry import promote_model_version
+    from api.main import (
+        AppState,
+        PointerPoller,
+        load_service_from_shared_pointer,
+        swap_inference_service,
+    )
+
+    _register_trained(trained_metadata_paths, ["v101", "v102"])
+    promote_model_version(model_name="isolation_forest", model_version="v101")
+    holder = AppState()
+    service, pointer_version = load_service_from_shared_pointer()
+    swap_inference_service(
+        holder, service, pointer_version=pointer_version, pointer_source="postgres"
+    )
+    assert (holder.pointer_model_version, holder.model_reload_status) == ("v101", "current")
+
+    promote_model_version(model_name="isolation_forest", model_version="v102")
+    new_pointer_version = _database_pointer(initialized_database)["pointer_version"]
+
+    def _broken_load():
+        raise FileNotFoundError("model.joblib")
+
+    poller = PointerPoller(holder, interval_seconds=30, load_service=_broken_load)
+    assert poller.poll_once() is False
+
+    assert holder.inference_service.active_model_info().model_version == "v101"
+    assert holder.pointer_model_version == "v102"
+    assert holder.model_reload_status == (
+        f"failed: pointer_version {new_pointer_version} could not be loaded (FileNotFoundError)"
+    )

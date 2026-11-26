@@ -925,6 +925,19 @@ def read_shared_pointer_version(model_name: str | None = None) -> int | None:
         engine.dispose()
 
 
+def read_shared_pointer_model_version(model_name: str | None = None) -> str | None:
+    """model_version the database pointer names (raises when it cannot be read)."""
+
+    database = _database()
+    engine = database.get_engine()
+    try:
+        with engine.connect() as connection:
+            row = database.read_active_pointer(connection, model_name or default_model_name())
+    finally:
+        engine.dispose()
+    return None if row is None else str(row["model_version"])
+
+
 def find_model_entry(
     *,
     model_name: str,

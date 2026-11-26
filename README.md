@@ -494,7 +494,7 @@ Implemented endpoints:
 | Endpoint | Purpose |
 |---|---|
 | `GET /livez` | Liveness: the process is up (never touches the model). |
-| `GET /health` | API health, model-load status, and `pointer_source` (`postgres` or `file`). |
+| `GET /health` | API health, model-load status, and `pointer_source` (`postgres` or `file`); in database mode also `pointer_model_version` and `model_reload_status` (`current`, or `failed: …` while the previous model keeps serving). |
 | `GET /model/active` | Returns active model metadata. |
 | `POST /predict` | Scores one feature payload; a segmented model needs its `entity_type`. |
 | `POST /predict/batch` | Scores multiple payloads of one entity type. |
@@ -509,6 +509,8 @@ The API serves the version named by the shared pointer: `ml.active_model_pointer
 `configs/active_model.yaml` (`pointer_source: file`). It polls the database pointer every
 `PROJECT4_POINTER_POLL_SECONDS` (default 30) and swaps the model in-process, so a promote
 or rollback through any replica reaches every replica without a restart.
+If the new version cannot be loaded, the API keeps serving the previous one, `/health`
+stays `ok` and shows `model_reload_status: failed: …` until a load succeeds.
 
 ### Admin authentication
 
