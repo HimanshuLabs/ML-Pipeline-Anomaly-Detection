@@ -383,3 +383,217 @@ def test_batch_run_fails_naming_the_postgres_sink_after_jsonl_is_written(
     assert "postgres sink (ml.batch_predictions) failed" in message
     assert str(output_path) in message
     assert len(output_path.read_text(encoding="utf-8").splitlines()) == 2
+
+
+# --- clean-up: a repeat batch run is refused before anything is written -------------------
+
+
+def _two_rows() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {"entity_id": "customer_001", "feature_a": 1.0, "feature_b": 2.0},
+            {"entity_id": "customer_002", "feature_a": 3.0, "feature_b": 4.0},
+        ]
+    )
+
+
+def _bundle_of_version(tmp_path: Path, version: str) -> Path:
+    """The dummy bundle under tmp_path/version, relabelled as model version `version`."""
+    active_path = _build_artifact_bundle(tmp_path / version)
+    pointer = yaml.safe_load(active_path.read_text(encoding="utf-8"))
+    model_dir = Path(pointer["artifact_path"]).parent
+    for name in ("metadata.json", "baseline_stats.json"):
+        payload = json.loads((model_dir / name).read_text(encoding="utf-8"))
+        _write_json(model_dir / name, {**payload, "model_version": version})
+    pointer["active_model_version"] = version
+    active_path.write_text(yaml.safe_dump(pointer, sort_keys=True), encoding="utf-8")
+    return active_path
+
+
+def _run_ids(output_path: Path) -> list[str]:
+    lines = output_path.read_text(encoding="utf-8").splitlines()
+    return [json.loads(line)["batch_run_id"] for line in lines]
+
+
+def test_a_repeat_run_is_refused_before_anything_is_written(tmp_path: Path) -> None:
+    from anomaly_detection.batch_inference import BatchRepeatError, run_batch_inference
+
+    active_path = _build_artifact_bundle(tmp_path)
+    output_path = tmp_path / "batch_predictions.jsonl"
+    first = run_batch_inference(_two_rows(), active_model_path=active_path, output_path=output_path)
+    before = output_path.read_bytes()
+
+    with pytest.raises(BatchRepeatError) as error:
+        run_batch_inference(_two_rows(), active_model_path=active_path, output_path=output_path)
+
+    message = str(error.value)
+    assert first[0].batch_run_id in message
+    assert "Nothing was written" in message
+    assert "--allow-repeat" in message
+    assert output_path.read_bytes() == before
+
+
+def test_allow_repeat_scores_again_under_a_new_run_id(tmp_path: Path) -> None:
+    from anomaly_detection.batch_inference import run_batch_inference
+
+    active_path = _build_artifact_bundle(tmp_path)
+    output_path = tmp_path / "batch_predictions.jsonl"
+    first = run_batch_inference(_two_rows(), active_model_path=active_path, output_path=output_path)
+
+    second = run_batch_inference(
+        _two_rows(), active_model_path=active_path, output_path=output_path, allow_repeat=True
+    )
+
+    assert second[0].batch_run_id != first[0].batch_run_id
+    assert [p.anomaly_score for p in second] == [p.anomaly_score for p in first]
+    assert _run_ids(output_path) == [first[0].batch_run_id] * 2 + [second[0].batch_run_id] * 2
+
+
+def test_a_changed_row_or_another_model_is_not_a_repeat(tmp_path: Path) -> None:
+    from anomaly_detection.batch_inference import run_batch_inference
+
+    active_path = _build_artifact_bundle(tmp_path)
+    output_path = tmp_path / "batch_predictions.jsonl"
+    run_batch_inference(_two_rows(), active_model_path=active_path, output_path=output_path)
+
+    changed = _two_rows()
+    changed.loc[1, "feature_b"] = 4.5
+    run_batch_inference(changed, active_model_path=active_path, output_path=output_path)
+    other_model = _bundle_of_version(tmp_path, "vtest2")
+    records = run_batch_inference(
+        _two_rows(), active_model_path=other_model, output_path=output_path
+    )
+
+    assert {record.model_version for record in records} == {"vtest2"}
+    assert len(set(_run_ids(output_path))) == 3
+
+
+def test_an_unreadable_jsonl_line_stops_the_run(tmp_path: Path) -> None:
+    from anomaly_detection.batch_inference import run_batch_inference
+
+    active_path = _build_artifact_bundle(tmp_path)
+    output_path = tmp_path / "batch_predictions.jsonl"
+    output_path.write_text('{"model_name": "isolation_forest", "model_ver\n', encoding="utf-8")
+    before = output_path.read_bytes()
+
+    with pytest.raises(BatchInferenceError) as error:
+        run_batch_inference(_two_rows(), active_model_path=active_path, output_path=output_path)
+
+    message = str(error.value)
+    assert "unreadable line 1" in message
+    assert "Nothing was written" in message
+    assert "killed mid-write" in message
+    assert output_path.read_bytes() == before
+
+
+def test_an_unreadable_database_does_not_stop_the_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+
+    from sqlalchemy.exc import OperationalError
+
+    from anomaly_detection import database
+    from anomaly_detection.batch_inference import run_batch_inference
+
+    def _unreadable(*_args):
+        raise OperationalError("SELECT", {}, Exception("simulated"))
+
+    inserted: list[int] = []
+    monkeypatch.setattr(database, "is_configured", lambda: True)
+    monkeypatch.setattr(database, "batch_run_fingerprints", _unreadable)
+    monkeypatch.setattr(
+        database, "insert_batch_predictions", lambda records: inserted.append(len(records))
+    )
+    caplog.set_level(logging.WARNING, logger="anomaly_detection.batch_inference")
+    active_path = _build_artifact_bundle(tmp_path)
+    output_path = tmp_path / "batch_predictions.jsonl"
+
+    run_batch_inference(_two_rows(), active_model_path=active_path, output_path=output_path)
+
+    assert inserted == [2]
+    assert len(output_path.read_text(encoding="utf-8").splitlines()) == 2
+    assert any(
+        "could not read ml.batch_predictions (OperationalError)" in record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+    )
+
+
+def test_the_second_run_check_logs_lines_read_and_elapsed_seconds(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    import logging
+
+    from anomaly_detection.batch_inference import run_batch_inference
+
+    caplog.set_level(logging.INFO, logger="anomaly_detection.batch_inference")
+    active_path = _build_artifact_bundle(tmp_path)
+    output_path = tmp_path / "batch_predictions.jsonl"
+    run_batch_inference(_two_rows(), active_model_path=active_path, output_path=output_path)
+    run_batch_inference(
+        _two_rows(), active_model_path=_bundle_of_version(tmp_path, "vtest2"),
+        output_path=output_path,
+    )
+
+    [line] = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("Second-run check read")
+    ]
+    assert line.startswith(f"Second-run check read 2 JSONL lines of {output_path}, 0 of them")
+    assert line.endswith(" s")
+
+
+def test_cli_allow_repeat_reaches_the_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from anomaly_detection import batch_inference
+
+    active_path = _build_artifact_bundle(tmp_path)
+    input_path = tmp_path / "features.csv"
+    _two_rows().to_csv(input_path, index=False)
+    output_path = tmp_path / "out.jsonl"
+    monkeypatch.setattr("sys.argv", [
+        "batch_inference", "--input-path", str(input_path), "--output-path", str(output_path),
+        "--active-model-path", str(active_path), "--allow-repeat"])
+
+    batch_inference.main()
+    batch_inference.main()
+
+    assert len(set(_run_ids(output_path))) == 2
+    assert len(_run_ids(output_path)) == 4
+
+
+def test_cli_resume_and_input_path_are_exclusive(tmp_path: Path) -> None:
+    from anomaly_detection.batch_inference import _build_parser
+
+    run_id = "3f2b8f0e-6c1a-4d55-9a57-0f1e2d3c4b5a"
+    with pytest.raises(SystemExit):
+        _build_parser().parse_args(
+            ["--input-path", str(tmp_path / "f.csv"), "--resume-run", run_id]
+        )
+    with pytest.raises(SystemExit):
+        _build_parser().parse_args([])
+
+    args = _build_parser().parse_args(["--resume-run", run_id])
+    assert (args.resume_run, args.input_path, args.allow_repeat) == (run_id, None, False)
+
+
+def test_resume_refuses_file_mode_and_a_malformed_run_id(tmp_path: Path) -> None:
+    from anomaly_detection.batch_inference import resume_batch_run
+
+    output_path = tmp_path / "batch_predictions.jsonl"
+
+    with pytest.raises(BatchInferenceError, match="Not a batch_run_id"):
+        resume_batch_run("not-a-run", output_path=output_path)
+    with pytest.raises(BatchInferenceError) as error:
+        resume_batch_run("3f2b8f0e-6c1a-4d55-9a57-0f1e2d3c4b5a", output_path=output_path)
+
+    assert "not configured" in str(error.value)
+    assert "Nothing was written" in str(error.value)
+    assert not output_path.exists()

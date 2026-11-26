@@ -16,11 +16,12 @@ import json
 import logging
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import UTC, datetime
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import joblib
 import numpy as np
@@ -45,6 +46,10 @@ BATCH_WRITE_CHUNK_ROWS = 50_000
 
 class BatchInferenceError(RuntimeError):
     """Raised when batch inference cannot safely score input records."""
+
+
+class BatchRepeatError(BatchInferenceError):
+    """Raised when a batch run would repeat an earlier run of the same rows and model."""
 
 
 @dataclass(frozen=True)
@@ -306,6 +311,53 @@ def load_active_model_artifacts(
         baseline_stats=baseline_stats,
         feature_schema=feature_schema,
     )
+
+
+def load_batch_model_artifacts(active_model_path: Path | None = None) -> ActiveModelArtifacts:
+    """The model a batch run scores with.
+
+    An explicit pointer file is used as given. Otherwise the active model: in database
+    mode the database pointer (the model the API serves), else configs/active_model.yaml.
+    """
+
+    if active_model_path is not None:
+        return load_active_model_artifacts(active_model_path)
+
+    from anomaly_detection import database, registry
+
+    if not registry.database_enabled():
+        return load_active_model_artifacts(DEFAULT_ACTIVE_MODEL_PATH)
+
+    with TemporaryDirectory(prefix="project4_batch_pointer_") as pointer_dir:
+        pointer_path = Path(pointer_dir) / "active_model.yaml"
+        try:
+            registry.materialize_active_pointer(pointer_path)
+        except (registry.RegistryError, database.DatabaseConfigError) as exc:
+            raise BatchInferenceError(
+                "Batch run refused: the active model could not be read from the registry "
+                f"database ({exc}). Nothing was scored. Fix the database, or pass "
+                "--active-model-path to score with a pointer file on purpose."
+            ) from exc
+        artifacts = load_active_model_artifacts(pointer_path)
+    _warn_when_the_file_pointer_differs(artifacts)
+    return artifacts
+
+
+def _warn_when_the_file_pointer_differs(artifacts: ActiveModelArtifacts) -> None:
+    try:
+        pointer = _read_yaml(DEFAULT_ACTIVE_MODEL_PATH)
+    except (BatchInferenceError, yaml.YAMLError, OSError):
+        return  # no readable file pointer: nothing to compare
+    file_version = str(pointer.get("active_model_version") or "")
+    if file_version != artifacts.model_version:
+        LOGGER.warning(
+            "configs/active_model.yaml names %s but the database pointer names %s; scoring "
+            "with %s, the model the API serves. Refresh the file with: "
+            "python -m anomaly_detection.registry mirror",
+            file_version or "no model",
+            artifacts.model_version,
+            artifacts.model_version,
+        )
 
 
 def get_required_feature_names(artifacts: ActiveModelArtifacts) -> list[str]:
@@ -735,19 +787,232 @@ def load_feature_batch(input_path: Path) -> pd.DataFrame:
     )
 
 
+# --- second-run guard -----------------------------------------------------------------
+#
+# A run repeats an earlier one when the same model (name and version) scored the same
+# rows: the same (entity_type, entity_id, feature_payload_hash) set. Its fingerprint is
+# the row count and the sum of the first 60 bits of each row's sha256; the sum does not
+# depend on row order, so database.batch_run_fingerprints computes it in SQL.
+# Checked after scoring, before the first sink write. Not covered: two runs started at
+# once, and a database unreadable during the check but writable at the insert.
+
+
+def batch_run_row_hash(
+    entity_type: str, entity_id: str, feature_payload_hash: str | None
+) -> int:
+    line = f"{entity_type}\t{entity_id}\t{feature_payload_hash or ''}"
+    return int(hashlib.sha256(line.encode("utf-8")).hexdigest()[:15], 16)
+
+
+def batch_run_fingerprint(predictions: Sequence[BatchPredictionRecord]) -> tuple[int, int]:
+    """(rows, hash sum) of one run; the same for the same rows in any order."""
+
+    return len(predictions), sum(
+        batch_run_row_hash(p.entity_type, p.entity_id, p.feature_payload_hash)
+        for p in predictions
+    )
+
+
+def _jsonl_lines(output_path: Path):
+    """(line number, record) of every JSONL line; an unreadable line stops the run."""
+
+    with output_path.open("r", encoding="utf-8") as file:
+        for number, line in enumerate(file, start=1):
+            if not line.strip():
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError:
+                record = None
+            if not isinstance(record, dict):
+                raise BatchInferenceError(
+                    f"The JSONL sink {output_path} has an unreadable line {number}; the "
+                    "second-run check cannot read it. Nothing was written. A cut last line "
+                    "means a batch run was killed mid-write; that line can be removed once "
+                    "no batch run is running."
+                )
+            yield number, record
+
+
+def _jsonl_runs(
+    output_path: Path, model_name: str, model_version: str
+) -> dict[str, tuple[int, int]]:
+    """Fingerprint of every run of this model in the JSONL sink."""
+
+    if not output_path.exists():
+        return {}
+    started = time.monotonic()
+    lines_read = 0
+    runs: dict[str, list[int]] = {}
+    for _number, record in _jsonl_lines(output_path):
+        lines_read += 1
+        if (record.get("model_name"), record.get("model_version")) != (model_name, model_version):
+            continue
+        totals = runs.setdefault(str(record.get("batch_run_id")), [0, 0])
+        totals[0] += 1
+        totals[1] += batch_run_row_hash(
+            str(record.get("entity_type")),
+            str(record.get("entity_id")),
+            record.get("feature_payload_hash"),
+        )
+    LOGGER.info(
+        "Second-run check read %d JSONL lines of %s, %d of them of %s %s, in %.1f s",
+        lines_read,
+        output_path,
+        sum(totals[0] for totals in runs.values()),
+        model_name,
+        model_version,
+        time.monotonic() - started,
+    )
+    return {run: (totals[0], totals[1]) for run, totals in runs.items()}
+
+
+def _database_runs(model_name: str, model_version: str, rows: int) -> dict[str, int] | None:
+    """Hash sums of this model's runs with this many rows; None when not checked."""
+
+    from sqlalchemy.exc import SQLAlchemyError
+
+    from anomaly_detection import database
+
+    if not database.is_configured():
+        return None
+    try:
+        return database.batch_run_fingerprints(model_name, model_version, rows)
+    except (database.DatabaseConfigError, SQLAlchemyError) as exc:
+        LOGGER.warning(
+            "The second-run check could not read ml.batch_predictions (%s); the run "
+            "continues, and the database insert reports the database if it stays unreachable",
+            type(exc).__name__,
+        )
+        return None
+
+
+def refuse_repeat_run(
+    predictions: Sequence[BatchPredictionRecord],
+    output_path: Path,
+    *,
+    allow_repeat: bool = False,
+) -> None:
+    """Refuse a run whose model already scored the same rows (JSONL sink or database)."""
+
+    if not predictions:
+        return
+    first = predictions[0]
+    rows, total = batch_run_fingerprint(predictions)
+    jsonl_runs = _jsonl_runs(output_path, first.model_name, first.model_version)
+    in_jsonl = sorted(run for run, value in jsonl_runs.items() if value == (rows, total))
+    database_runs = _database_runs(first.model_name, first.model_version, rows)
+    in_database = sorted(run for run, value in (database_runs or {}).items() if value == total)
+    if not in_jsonl and not in_database:
+        return
+
+    where = (
+        f"batch run {', '.join(in_database)} in ml.batch_predictions"
+        if in_database
+        else f"batch run {', '.join(in_jsonl)} in the JSONL sink ({output_path})"
+    )
+    message = (
+        f"Batch run refused: {first.model_name} {first.model_version} already scored these "
+        f"{rows} rows in {where}. Nothing was written. A second run gives the same scores "
+        "under a new batch_run_id, and readers of the latest batch run would switch to it."
+    )
+    orphans = [run for run in in_jsonl if run not in in_database]
+    if database_runs is not None and orphans and not in_database:
+        message += (
+            f" Run {orphans[-1]} is in the JSONL sink but not in ml.batch_predictions (its "
+            f"database insert failed): store it without scoring again with --resume-run "
+            f"{orphans[-1]}."
+        )
+    message += " To score again on purpose, pass --allow-repeat."
+    if allow_repeat:
+        LOGGER.warning("--allow-repeat: %s", message)
+        return
+    raise BatchRepeatError(message)
+
+
+def read_jsonl_batch_run(output_path: Path, batch_run_id: str) -> list[BatchPredictionRecord]:
+    """The records of one batch run, rebuilt from the JSONL sink in file order."""
+
+    if not output_path.exists():
+        raise BatchInferenceError(f"The JSONL sink does not exist: {output_path}")
+    names = [field.name for field in fields(BatchPredictionRecord)]
+    records: list[BatchPredictionRecord] = []
+    for number, record in _jsonl_lines(output_path):
+        if record.get("batch_run_id") != batch_run_id:
+            continue
+        missing = [name for name in names if name not in record]
+        if missing:
+            raise BatchInferenceError(
+                f"JSONL line {number} of batch run {batch_run_id} lacks {', '.join(missing)}; "
+                "it cannot be stored as written. Nothing was written."
+            )
+        records.append(BatchPredictionRecord(**{name: record[name] for name in names}))
+    return records
+
+
+def resume_batch_run(
+    batch_run_id: str,
+    *,
+    output_path: Path = DEFAULT_PREDICTION_LOG_PATH,
+    allow_repeat: bool = False,
+) -> list[BatchPredictionRecord]:
+    """Store a run that reached the JSONL sink but not the database; never scores or appends."""
+
+    from anomaly_detection import database
+
+    try:
+        batch_run_id = str(UUID(batch_run_id))
+    except ValueError:
+        raise BatchInferenceError(f"Not a batch_run_id: {batch_run_id!r}") from None
+    if not database.is_configured():
+        raise BatchInferenceError(
+            "--resume-run stores a JSONL run in ml.batch_predictions, and the database is not "
+            "configured (PROJECT4_POSTGRES_*). Nothing was written."
+        )
+    if database.batch_run_exists(batch_run_id):
+        raise BatchInferenceError(
+            f"Batch run {batch_run_id} is already in ml.batch_predictions; nothing to resume. "
+            "Nothing was written."
+        )
+    records = read_jsonl_batch_run(output_path, batch_run_id)
+    if not records:
+        raise BatchInferenceError(
+            f"Batch run {batch_run_id} is not in the JSONL sink ({output_path}). "
+            "Nothing was written."
+        )
+    first = records[0]
+    rows, total = batch_run_fingerprint(records)
+    repeats = sorted(
+        run
+        for run, value in database.batch_run_fingerprints(
+            first.model_name, first.model_version, rows
+        ).items()
+        if value == total
+    )
+    if repeats and not allow_repeat:
+        raise BatchRepeatError(
+            f"Batch run refused: {first.model_name} {first.model_version} already has these "
+            f"{rows} rows in ml.batch_predictions as batch run {', '.join(repeats)}. "
+            "Nothing was written. To store it anyway, pass --allow-repeat."
+        )
+    _write_batch_predictions_to_database(records, output_path)
+    return records
+
+
 def run_batch_inference(
     features: pd.DataFrame,
     *,
-    active_model_path: Path = DEFAULT_ACTIVE_MODEL_PATH,
+    active_model_path: Path | None = None,
     output_path: Path = DEFAULT_PREDICTION_LOG_PATH,
     entity_type: str = "customer",
     source_project: str | None = None,
     source_table: str | None = None,
     persist_jsonl: bool = True,
+    allow_repeat: bool = False,
 ) -> list[BatchPredictionRecord]:
-    """Load active model, score features, and optionally persist JSONL records."""
+    """Load the model, score features, and (unless a repeat) persist JSONL and database rows."""
 
-    artifacts = load_active_model_artifacts(active_model_path)
+    artifacts = load_batch_model_artifacts(active_model_path)
     predictions = score_feature_batch(
         features,
         artifacts,
@@ -757,6 +1022,7 @@ def run_batch_inference(
     )
 
     if persist_jsonl:
+        refuse_repeat_run(predictions, output_path, allow_repeat=allow_repeat)
         write_predictions_jsonl(predictions, output_path)
         _write_batch_predictions_to_database(predictions, output_path)
 
@@ -791,11 +1057,18 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Score a feature batch with the active anomaly model."
     )
-    parser.add_argument(
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument(
         "--input-path",
-        required=True,
         type=Path,
         help="Path to a parquet/csv/json/jsonl feature batch.",
+    )
+    source.add_argument(
+        "--resume-run",
+        default=None,
+        metavar="BATCH_RUN_ID",
+        help="Store this batch run's records from the JSONL sink in ml.batch_predictions "
+        "without scoring again (after a failed database insert).",
     )
     parser.add_argument(
         "--output-path",
@@ -805,9 +1078,16 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--active-model-path",
-        default=DEFAULT_ACTIVE_MODEL_PATH,
+        default=None,
         type=Path,
-        help="Path to configs/active_model.yaml.",
+        help="Pointer file to score with. Default: the active model (the database pointer "
+        "in database mode, else configs/active_model.yaml).",
+    )
+    parser.add_argument(
+        "--allow-repeat",
+        action="store_true",
+        help="Score (or store) even when the same model already scored the same rows; "
+        "readers of the latest batch run then switch to the new run.",
     )
     parser.add_argument(
         "--entity-type",
@@ -834,16 +1114,22 @@ def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
 
-    feature_batch = load_feature_batch(args.input_path)
-    predictions = run_batch_inference(
-        feature_batch,
-        active_model_path=args.active_model_path,
-        output_path=args.output_path,
-        entity_type=args.entity_type,
-        source_project=args.source_project,
-        source_table=args.source_table,
-        persist_jsonl=True,
-    )
+    if args.resume_run:
+        predictions = resume_batch_run(
+            args.resume_run, output_path=args.output_path, allow_repeat=args.allow_repeat
+        )
+    else:
+        feature_batch = load_feature_batch(args.input_path)
+        predictions = run_batch_inference(
+            feature_batch,
+            active_model_path=args.active_model_path,
+            output_path=args.output_path,
+            entity_type=args.entity_type,
+            source_project=args.source_project,
+            source_table=args.source_table,
+            persist_jsonl=True,
+            allow_repeat=args.allow_repeat,
+        )
 
     anomaly_count = sum(prediction.is_anomaly for prediction in predictions)
     print(

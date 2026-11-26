@@ -2351,3 +2351,278 @@ def test_analyze_is_not_run_when_the_insert_fails(monkeypatch: pytest.MonkeyPatc
         database.insert_batch_predictions(["a", "b"])
 
     assert engine.statements == []
+
+
+# --- clean-up: repeat runs, the database pointer, and resuming a failed insert --------------
+
+
+def _single_model_rows(feature_names: list[str], count: int = 4):
+    import pandas as pd
+
+    return pd.DataFrame(
+        [{"entity_id": f"customer_{index}", **dict.fromkeys(feature_names, float(index))}
+         for index in range(count)]
+    )
+
+
+def _jsonl_line_count(path: Path) -> int:
+    return len(path.read_text(encoding="utf-8").splitlines())
+
+
+@pytest.mark.postgres
+def test_a_repeat_in_the_database_is_refused_even_without_its_jsonl(
+    initialized_database,
+    tmp_path: Path,
+    trained_metadata_paths: dict[str, Path],
+) -> None:
+    from anomaly_detection.batch_inference import BatchRepeatError, run_batch_inference
+
+    _version, feature_names = _serve_own_single_model(trained_metadata_paths)
+    output_path = tmp_path / "batch.jsonl"
+    first = run_batch_inference(_single_model_rows(feature_names), output_path=output_path)
+    output_path.unlink()
+
+    with pytest.raises(BatchRepeatError) as error:
+        run_batch_inference(_single_model_rows(feature_names), output_path=output_path)
+
+    assert f"batch run {first[0].batch_run_id} in ml.batch_predictions" in str(error.value)
+    assert _count(initialized_database, "SELECT COUNT(*) FROM ml.batch_predictions") == 4
+    assert not output_path.exists()
+
+
+@pytest.mark.postgres
+def test_python_and_sql_run_fingerprints_agree(
+    initialized_database,
+    tmp_path: Path,
+    segmented_metadata_paths: dict[str, Path],
+) -> None:
+    from anomaly_detection.batch_inference import (
+        _jsonl_runs,
+        batch_run_fingerprint,
+        run_batch_inference,
+    )
+    from anomaly_detection.registry import promote_model_version, register_model_from_artifacts
+    from tests.test_drift_job import _current_frame
+
+    register_model_from_artifacts(metadata_path=segmented_metadata_paths["v202"])
+    promote_model_version(model_name="isolation_forest", model_version="v202")
+    output_path = tmp_path / "batch.jsonl"
+    records = run_batch_inference(
+        _current_frame(segmented_metadata_paths["v202"].parent), output_path=output_path
+    )
+    rows, total = batch_run_fingerprint(records)
+    run = records[0].batch_run_id
+
+    assert len({record.entity_type for record in records}) > 1
+    assert database.batch_run_fingerprints("isolation_forest", "v202", rows) == {run: total}
+    assert _jsonl_runs(output_path, "isolation_forest", "v202") == {run: (rows, total)}
+    assert database.batch_run_fingerprints("isolation_forest", "v202", rows + 1) == {}
+
+
+@pytest.mark.postgres
+def test_batch_scores_with_the_database_pointer_and_warns_when_the_file_differs(
+    initialized_database,
+    tmp_path: Path,
+    trained_metadata_paths: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from anomaly_detection import registry
+    from anomaly_detection.batch_inference import run_batch_inference
+
+    _register_trained(trained_metadata_paths, ["v101", "v102"])
+    registry.promote_model_version(model_name="isolation_forest", model_version="v101")
+    monkeypatch.setenv(registry.FILE_MIRROR_ENV, "false")
+    registry.promote_model_version(model_name="isolation_forest", model_version="v102")
+    metadata = json.loads(trained_metadata_paths["v102"].read_text(encoding="utf-8"))
+    caplog.set_level(logging.WARNING, logger="anomaly_detection.batch_inference")
+
+    records = run_batch_inference(
+        _single_model_rows(list(metadata["feature_names"])), output_path=tmp_path / "batch.jsonl"
+    )
+
+    assert {record.model_version for record in records} == {"v102"}
+    assert any(
+        "names v101 but the database pointer names v102" in record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+    )
+
+
+@pytest.mark.postgres
+def test_database_pointer_gives_the_same_model_as_the_mirrored_file(
+    initialized_database,
+    trained_metadata_paths: dict[str, Path],
+) -> None:
+    from anomaly_detection import batch_inference
+
+    _version, feature_names = _serve_own_single_model(trained_metadata_paths)
+
+    from_database = batch_inference.load_batch_model_artifacts()
+    from_file = batch_inference.load_active_model_artifacts(
+        batch_inference.DEFAULT_ACTIVE_MODEL_PATH
+    )
+
+    for name in ("model_name", "model_version", "model_path", "feature_schema_version",
+                 "dataset_snapshot_id", "training_dataset_id"):
+        assert getattr(from_database, name) == getattr(from_file, name), name
+    frame = _single_model_rows(feature_names, count=6)
+    scores = [
+        [record.anomaly_score for record in batch_inference.score_feature_batch(
+            frame, artifacts, batch_run_id="run")]
+        for artifacts in (from_database, from_file)
+    ]
+    assert scores[0] == scores[1]
+
+
+@pytest.mark.postgres
+def test_batch_refuses_before_scoring_when_the_database_has_no_pointer(
+    database_mode,
+    tmp_path: Path,
+) -> None:
+    import pandas as pd
+
+    from anomaly_detection.batch_inference import BatchInferenceError, run_batch_inference
+
+    output_path = tmp_path / "batch.jsonl"
+
+    with pytest.raises(BatchInferenceError, match="could not be read from the registry"):
+        run_batch_inference(pd.DataFrame([{"entity_id": "a"}]), output_path=output_path)
+
+    assert not output_path.exists()
+    assert _count(database_mode, "SELECT COUNT(*) FROM ml.batch_predictions") == 0
+
+
+def _run_with_a_failed_insert(monkeypatch, tmp_path, trained_metadata_paths):
+    """A batch run whose database insert fails once: (features, JSONL path, run id)."""
+    from anomaly_detection.batch_inference import BatchInferenceError, run_batch_inference
+
+    _version, feature_names = _serve_own_single_model(trained_metadata_paths)
+    features = _single_model_rows(feature_names)
+    output_path = tmp_path / "batch.jsonl"
+    real_insert = database.insert_batch_predictions
+    calls: list[int] = []
+
+    def _fails_once(records):
+        calls.append(len(records))
+        if len(calls) == 1:
+            raise ConnectionError("database unreachable")
+        return real_insert(records)
+
+    monkeypatch.setattr(database, "insert_batch_predictions", _fails_once)
+    with pytest.raises(BatchInferenceError, match="postgres sink"):
+        run_batch_inference(features, output_path=output_path)
+    [run_id] = {json.loads(line)["batch_run_id"]
+                for line in output_path.read_text(encoding="utf-8").splitlines()}
+    return features, output_path, run_id
+
+
+@pytest.mark.postgres
+def test_a_rerun_after_a_failed_insert_keeps_one_jsonl_copy(
+    initialized_database,
+    tmp_path: Path,
+    trained_metadata_paths: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from anomaly_detection.batch_inference import BatchRepeatError, run_batch_inference
+
+    features, output_path, run_id = _run_with_a_failed_insert(
+        monkeypatch, tmp_path, trained_metadata_paths
+    )
+    assert _count(initialized_database, "SELECT COUNT(*) FROM ml.batch_predictions") == 0
+
+    with pytest.raises(BatchRepeatError) as error:
+        run_batch_inference(features, output_path=output_path)
+
+    assert f"--resume-run {run_id}" in str(error.value)
+    assert _jsonl_line_count(output_path) == 4
+    assert _count(initialized_database, "SELECT COUNT(*) FROM ml.batch_predictions") == 0
+
+
+@pytest.mark.postgres
+def test_resume_run_stores_the_jsonl_records_exactly(
+    initialized_database,
+    tmp_path: Path,
+    trained_metadata_paths: dict[str, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sqlalchemy import text
+
+    from anomaly_detection.batch_inference import (
+        BatchRepeatError,
+        resume_batch_run,
+        run_batch_inference,
+    )
+
+    features, output_path, run_id = _run_with_a_failed_insert(
+        monkeypatch, tmp_path, trained_metadata_paths
+    )
+    jsonl_before = output_path.read_bytes()
+
+    stored = resume_batch_run(run_id, output_path=output_path)
+
+    assert output_path.read_bytes() == jsonl_before
+    written = {
+        line["prediction_id"]: line
+        for line in map(json.loads, jsonl_before.decode("utf-8").splitlines())
+    }
+    assert [record.prediction_id for record in stored] == list(written)
+    with initialized_database.connect() as connection:
+        rows = connection.execute(
+            text(
+                "SELECT prediction_id::text AS prediction_id, anomaly_score, is_anomaly, "
+                "threshold_used, feature_payload_hash, score_timestamp "
+                "FROM ml.batch_predictions WHERE batch_run_id = :run"
+            ),
+            {"run": run_id},
+        ).mappings().all()
+    assert {row["prediction_id"] for row in rows} == set(written)
+    for row in rows:
+        line = written[row["prediction_id"]]
+        assert float(row["anomaly_score"]) == line["anomaly_score"]
+        assert row["is_anomaly"] is line["is_anomaly"]
+        assert float(row["threshold_used"]) == line["threshold_used"]
+        assert row["feature_payload_hash"] == line["feature_payload_hash"]
+        assert row["score_timestamp"] == datetime.fromisoformat(line["score_timestamp"])
+    for column in ("xmin::text", "created_at"):
+        assert _count(
+            initialized_database,
+            f"SELECT COUNT(DISTINCT {column}) FROM ml.batch_predictions WHERE batch_run_id = :run",
+            {"run": run_id},
+        ) == 1
+
+    with pytest.raises(BatchRepeatError, match=f"batch run {run_id} in ml.batch_predictions"):
+        run_batch_inference(features, output_path=output_path)
+    assert output_path.read_bytes() == jsonl_before
+
+
+@pytest.mark.postgres
+def test_resume_refuses_a_stored_run_and_an_unknown_run(
+    initialized_database,
+    tmp_path: Path,
+    trained_metadata_paths: dict[str, Path],
+) -> None:
+    import uuid
+
+    from anomaly_detection.batch_inference import (
+        BatchInferenceError,
+        resume_batch_run,
+        run_batch_inference,
+    )
+
+    _version, feature_names = _serve_own_single_model(trained_metadata_paths)
+    output_path = tmp_path / "batch.jsonl"
+    stored = run_batch_inference(_single_model_rows(feature_names), output_path=output_path)
+    jsonl_before = output_path.read_bytes()
+
+    with pytest.raises(BatchInferenceError) as already:
+        resume_batch_run(stored[0].batch_run_id, output_path=output_path)
+    with pytest.raises(BatchInferenceError) as unknown:
+        resume_batch_run(str(uuid.uuid4()), output_path=output_path)
+
+    assert "already in ml.batch_predictions" in str(already.value)
+    assert "is not in the JSONL sink" in str(unknown.value)
+    for error in (already, unknown):
+        assert "Nothing was written" in str(error.value)
+    assert output_path.read_bytes() == jsonl_before
+    assert _count(initialized_database, "SELECT COUNT(*) FROM ml.batch_predictions") == 4

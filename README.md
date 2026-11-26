@@ -476,6 +476,14 @@ retrain prints rows and the anomaly rate per entity type and the v004 -> v006 fl
 its `evaluation_report.json` records both snapshots' `content_sha256`. batch_inference
 prints the `batch_run_id`, the `model_version`, and rows and anomalies per entity type.
 
+A batch run is refused, before anything is written, when the same model already scored
+the same rows (the JSONL sink, and `ml.batch_predictions` in database mode); a second
+run would only repeat the scores under a new `batch_run_id`. `--allow-repeat` scores
+again on purpose; after a failed database insert, `--resume-run BATCH_RUN_ID` stores
+the run from the JSONL sink without scoring again. In database mode a run scores with
+the model of the database pointer (the one the API serves) unless `--active-model-path`
+names a pointer file.
+
 ## Online FastAPI inference
 
 Online inference serves anomaly scores through FastAPI.

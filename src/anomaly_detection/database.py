@@ -261,6 +261,41 @@ def _analyze_batch_predictions(engine: Engine) -> None:
         )
 
 
+# Per-row hash of batch_inference.batch_run_row_hash, in SQL: the first 60 bits of
+# sha256(entity_type TAB entity_id TAB feature_payload_hash).
+BATCH_RUN_ROW_HASH_SQL = (
+    "('x' || substr(encode(sha256(convert_to(entity_type || E'\\t' || entity_id || E'\\t' "
+    "|| coalesce(feature_payload_hash, ''), 'UTF8')), 'hex'), 1, 15))::bit(60)::bigint"
+)
+
+
+def batch_run_fingerprints(model_name: str, model_version: str, row_count: int) -> dict[str, int]:
+    """batch_run_id -> hash sum, for this model's runs with exactly row_count rows."""
+
+    query = text(
+        "SELECT batch_run_id::text AS batch_run_id, "
+        f"sum({BATCH_RUN_ROW_HASH_SQL})::text AS hash_sum "
+        "FROM ml.batch_predictions "
+        "WHERE model_name = :model_name AND model_version = :model_version "
+        "GROUP BY batch_run_id HAVING count(*) = :row_count"
+    )
+    params = {"model_name": model_name, "model_version": model_version, "row_count": row_count}
+    with get_shared_engine().connect() as connection:
+        rows = connection.execute(query, params).mappings().all()
+    return {row["batch_run_id"]: int(row["hash_sum"]) for row in rows}
+
+
+def batch_run_exists(batch_run_id: str) -> bool:
+    """True when ml.batch_predictions holds any row of this run."""
+
+    query = text(
+        "SELECT EXISTS (SELECT 1 FROM ml.batch_predictions "
+        "WHERE batch_run_id = CAST(:run AS uuid))"
+    )
+    with get_shared_engine().connect() as connection:
+        return bool(connection.execute(query, {"run": batch_run_id}).scalar_one())
+
+
 def insert_drift_events(events: Sequence[Any]) -> int:
     """monitoring.drift_events rows, in one transaction."""
 
