@@ -1,4 +1,4 @@
-"""Prediction evidence logging for Project 4.
+"""Prediction evidence logging for this pipeline.
 
 This module provides the shared local-first persistence contract for anomaly
 prediction evidence.

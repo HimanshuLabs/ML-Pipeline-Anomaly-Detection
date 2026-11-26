@@ -6,7 +6,8 @@ services:
       target: runtime
     image: project4-anomaly-api:local
     ports:
-      # Host-only, like every P4 service; P5 calls it from the host on 127.0.0.1.
+      # Host-only, like every service of this pipeline; the decision-intelligence layer
+      # calls it from the host on 127.0.0.1.
       - "127.0.0.1:${PROJECT4_API_HOST_PORT:-8014}:8004"
     environment:
       PYTHONPATH: /app/src
@@ -43,7 +44,8 @@ services:
       - anomaly_detection.batch_inference
       - --help
 
-  # Project 4's own metadata database (P5 expects 127.0.0.1:5435 / project4_ml / manshu).
+  # This pipeline's own metadata database (the decision-intelligence layer expects
+  # 127.0.0.1:5435 / project4_ml / manshu).
   # No restart policy: start it manually with `docker compose up -d anomaly-postgres`.
   # Without PROJECT4_POSTGRES_PASSWORD in .env only this container refuses to start
   # (the postgres image exits when POSTGRES_PASSWORD is empty); other services are unaffected.
@@ -68,7 +70,8 @@ services:
 
   # Monitoring. No restart policy: start with
   #   docker compose up -d anomaly-api prometheus grafana
-  # Prometheus (127.0.0.1:9094; P5 uses 9095) scrapes anomaly-api:8004 on this network.
+  # Prometheus (127.0.0.1:9094; the decision-intelligence layer uses 9095) scrapes
+  # anomaly-api:8004 on this network.
   prometheus:
     image: prom/prometheus:v3.5.4
     ports:
@@ -79,9 +82,10 @@ services:
     depends_on:
       - anomaly-api
 
-  # Grafana on 127.0.0.1:3004 (P5 contract). The admin password comes from
-  # PROJECT4_GRAFANA_ADMIN_PASSWORD in .env; without it this container refuses to
-  # start (other services are unaffected) instead of falling back to a default.
+  # Grafana on 127.0.0.1:3004 (the decision-intelligence layer's contract). The admin
+  # password comes from PROJECT4_GRAFANA_ADMIN_PASSWORD in .env; without it this
+  # container refuses to start (other services are unaffected) instead of falling back
+  # to a default.
   grafana:
     image: grafana/grafana-oss:13.0.2
     ports:

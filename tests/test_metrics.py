@@ -1,4 +1,4 @@
-"""Tests for Project 4 Prometheus metrics."""
+"""Tests for this pipeline's Prometheus metrics."""
 
 from __future__ import annotations
 

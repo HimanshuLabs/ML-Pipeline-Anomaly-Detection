@@ -1,6 +1,7 @@
--- Project 4: ML Pipeline & Anomaly Detection
--- Read-only integration surface for Project 5 (role project5_reader).
--- Every view exposes the Project 5 source metadata columns first, then business columns.
+-- ML-Pipeline-Anomaly-Detection
+-- Read-only integration surface for the decision-intelligence layer (role project5_reader).
+-- Every view exposes the decision-intelligence layer's source metadata columns first, then
+-- business columns.
 -- Re-runnable: CREATE OR REPLACE keeps the same column list.
 
 CREATE SCHEMA IF NOT EXISTS integration;

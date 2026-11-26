@@ -55,7 +55,8 @@ def test_model_config_training_section_holds_only_keys_the_loader_reads() -> Non
 
 
 def test_unread_settings_template_with_project2_placeholders_does_not_exist() -> None:
-    # configs/database.yaml.example held P2 warehouse placeholders and had no reader;
-    # P4's database settings come only from PROJECT4_POSTGRES_* (database.py).
+    # configs/database.yaml.example held the batch lakehouse's warehouse placeholders and
+    # had no reader; this pipeline's database settings come only from PROJECT4_POSTGRES_*
+    # (database.py).
     assert not (REPO_ROOT / "configs" / "database.yaml.example").exists()
     assert "database.yaml" not in (REPO_ROOT / "README.md").read_text(encoding="utf-8")

@@ -1,4 +1,4 @@
-"""Logging for Project 4 processes: one format, level from LOG_LEVEL, secrets redacted.
+"""Logging for this pipeline's processes: one format, level from LOG_LEVEL, secrets redacted.
 
 configure_logging() is called once at API startup and at the start of every CLI.
 It adds one handler to the root logger, so INFO lines from api.* and
@@ -81,7 +81,7 @@ def _level_from_environment() -> tuple[int, str | None]:
 
 
 def configure_logging(*, stream: IO[str] | None = None) -> logging.Handler:
-    """Configure the root logger once; returns the Project 4 handler.
+    """Configure the root logger once; returns this pipeline's handler.
 
     stream: write there instead of stderr (tests).
     """

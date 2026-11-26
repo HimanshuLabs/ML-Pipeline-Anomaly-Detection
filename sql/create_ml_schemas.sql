@@ -1,4 +1,4 @@
--- Project 4: ML Pipeline & Anomaly Detection
+-- ML-Pipeline-Anomaly-Detection
 -- Schema foundation for ML metadata, monitoring events, and audit history.
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;

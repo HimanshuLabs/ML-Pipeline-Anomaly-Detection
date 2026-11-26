@@ -1,4 +1,4 @@
--- Project 4: ML Pipeline & Anomaly Detection
+-- ML-Pipeline-Anomaly-Detection
 -- Monitoring, alerting, and rollback audit tables.
 
 CREATE TABLE IF NOT EXISTS monitoring.drift_events (

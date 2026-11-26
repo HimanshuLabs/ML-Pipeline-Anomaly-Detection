@@ -2,11 +2,11 @@
 
 ## Current state (2026-11-15)
 
-Project 4 turns upstream data into validated features, trains versioned Isolation Forest
+ML-Pipeline-Anomaly-Detection turns upstream data into validated features, trains versioned Isolation Forest
 models, serves them in batch and online, and monitors them.
 
-1. Project 1 writes user-level behavioral features to `public.user_features`.
-2. Project 2/3 writes warehouse and mart outputs to PostgreSQL.
+1. [Real-time-personalization-pipeline](https://github.com/HimanshuLabs/Real-time-personalization-pipeline) writes user-level behavioral features to `public.user_features`.
+2. [Batch-Lakehouse-Marketing-Analytics](https://github.com/HimanshuLabs/Batch-Lakehouse-Marketing-Analytics) writes warehouse and mart outputs to PostgreSQL.
 3. `configs/source_extract.yaml` defines the real source contract.
 4. `src/anomaly_detection/source_extract.py` extracts and normalizes the sources into a
    frozen real-source training snapshot.
@@ -20,7 +20,7 @@ models, serves them in batch and online, and monitors them.
 7. The API (compose, or two replicas in Kubernetes) and batch scoring serve the version
    named by the pointer; every API replica follows a pointer change within one poll.
 8. Prediction, drift, alert, and rollback evidence goes to JSONL and to the
-   `ml`, `monitoring`, and `audit` schemas; Project 5 reads the `integration.*` views.
+   `ml`, `monitoring`, and `audit` schemas; [AI-Decision-Intelligence-Layer](https://github.com/HimanshuLabs/AI-Decision-Intelligence-Layer) reads the `integration.*` views.
 
 Active model: `v007` (segmented, `feature_schema_v003`, 52 features in total,
 baseline anomaly rate 0.0500).
@@ -34,24 +34,24 @@ design choices still hold; the training and serving steps are now as described a
 
 ### Real-source ML bridge
 
-Project 4 now has a deterministic bridge from upstream data engineering systems into the ML training pipeline.
+This pipeline now has a deterministic bridge from upstream data engineering systems into the ML training pipeline.
 
 Flow:
 
-1. Project 1 writes user-level behavioral features to `public.user_features`.
-2. Project 2/3 writes warehouse and mart outputs to PostgreSQL.
+1. The real-time pipeline writes user-level behavioral features to `public.user_features`.
+2. The batch lakehouse writes warehouse and mart outputs to PostgreSQL.
 3. `configs/source_extract.yaml` defines the real source contract.
 4. `src/anomaly_detection/source_extract.py` extracts and normalizes the sources.
-5. Project 4 writes a frozen real-source training snapshot.
+5. This pipeline writes a frozen real-source training snapshot.
 6. `src/anomaly_detection/training.py` trains Isolation Forest `v002`.
 7. `src/anomaly_detection/registry.py` promotes `v002`.
 8. `configs/active_model.yaml` points production traffic to `v002`.
 
-Project 1 source:
+The real-time pipeline source:
 
 - `public.user_features`
 
-Project 2/3 sources:
+The batch lakehouse sources:
 
 - `marts.mart_customer_360`
 - `marts.mart_campaign_performance`
@@ -61,9 +61,9 @@ Project 2/3 sources:
 
 ### Architecture tradeoff
 
-The source extractor intentionally avoids creating a fake identity join between Project 1 users and Project 2/3 customers.
+The source extractor intentionally avoids creating a fake identity join between the real-time pipeline's users and the batch lakehouse's customers.
 
-The confirmed local outputs do not prove that Project 1 `user_id` and Project 2/3 `customer_id` share the same natural key. A false join would make the project less credible.
+The confirmed local outputs do not prove that the real-time pipeline's `user_id` and the batch lakehouse's `customer_id` share the same natural key. A false join would make the project less credible.
 
 Instead, the model trains on a unified anomaly-feature corpus with explicit lineage columns:
 
@@ -88,7 +88,7 @@ Training path:
 5. model registry promotion
 6. active model pointer update
 
-Future online inference can consume low-latency feature samples from Project 1 or a feature API, but production training remains snapshot-based for reproducibility.
+Future online inference can consume low-latency feature samples from the real-time pipeline or a feature API, but production training remains snapshot-based for reproducibility.
 
 <!-- END REAL_SOURCE_ML_BRIDGE -->
 
@@ -97,7 +97,7 @@ Future online inference can consume low-latency feature samples from Project 1 o
 
 The production architecture now has a verified baseline reference for `v002`.
 
-The active model pointer in `configs/active_model.yaml` references `isolation_forest` version `v002`, trained from real local Project 1 and Project 2/3 extracts. The model artifact folder contains `metadata.json`, `feature_schema.json`, and `baseline_stats.json`.
+The active model pointer in `configs/active_model.yaml` references `isolation_forest` version `v002`, trained from real local extracts of the real-time pipeline and the batch lakehouse. The model artifact folder contains `metadata.json`, `feature_schema.json`, and `baseline_stats.json`.
 
 The baseline layer currently provides:
 

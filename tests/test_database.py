@@ -1,4 +1,4 @@
-"""Tests for the Project 4 PostgreSQL schema, settings, and row mapping.
+"""Tests for this pipeline's PostgreSQL schema, settings, and row mapping.
 
 Unit tests need no database. Tests marked ``postgres`` run only when
 PROJECT4_TEST_DATABASE_URL points at a disposable PostgreSQL database; with
@@ -1152,7 +1152,8 @@ VIEW_DOMAIN_TAGS = {
     "integration.prediction_outputs": "anomaly_predictions",
     "integration.drift_validation_rollback": "ml_observability",
 }
-# integration.drift_validation_rollback columns before stage 11, in order (P5 contract).
+# integration.drift_validation_rollback columns before stage 11, in order (the
+# decision-intelligence layer's contract).
 DRIFT_VALIDATION_ROLLBACK_COLUMNS = (
     "source_project",
     "source_system",
@@ -1469,7 +1470,7 @@ def test_apply_schema_twice_with_reader_password_stays_idempotent(database_mode)
     database.apply_schema(database_mode, reader_password="")
 
 
-# --- stage 13g: CONNECT on the Project 4 database --------------------------------------
+# --- stage 13g: CONNECT on project4_ml -------------------------------------------------
 
 RESTRICT_CONNECT_SQL = REPO_ROOT / "sql" / "restrict_project4_ml_connect.sql"
 CONNECT_READER_PASSWORD = "connect-test-reader-password"
@@ -2102,11 +2103,11 @@ def test_real_source_metadata_with_a_dataset_id_gives_snapshot_then_dataset_row(
     assert "c" * 64 in dataset["notes"]
 
 
-# --- 4 lakh round: one transaction across insert chunks, and P5's slice indexes -------------
+# --- 4 lakh round: one transaction across insert chunks, and the slice indexes -------------
 
-# Project 5's batch prediction statements, as its reader builds them: the latest-run check,
-# the selection count and the round-robin slice of src/project5_ai/sources/project4_reader.py
-# in the AI-Decision-Intelligence-Layer repo,
+# The decision-intelligence layer's batch prediction statements, as its reader builds them:
+# the latest-run check, the selection count and the round-robin slice of
+# src/project5_ai/sources/project4_reader.py in the AI-Decision-Intelligence-Layer repo,
 # verbatim: the indexes below exist so they stay fast as ml.batch_predictions grows.
 P5_LATEST_RUN = (
     'SELECT "batch_run_id" FROM "integration"."prediction_outputs" WHERE "batch_run_id" IS '
@@ -2289,7 +2290,8 @@ def test_batch_insert_analyzes_the_table_after_the_run_commits(
         "SELECT COUNT(DISTINCT xmin::text) FROM ml.batch_predictions WHERE batch_run_id = :run",
         run,
     ) == 1
-    # Statistics only: the rows P5 reads are the same before and after another ANALYZE.
+    # Statistics only: the rows the decision-intelligence layer reads are the same before
+    # and after another ANALYZE.
     rows_before = _run_rows_md5(initialized_database, run["run"])
     database._analyze_batch_predictions(initialized_database)
     assert _run_rows_md5(initialized_database, run["run"]) == rows_before

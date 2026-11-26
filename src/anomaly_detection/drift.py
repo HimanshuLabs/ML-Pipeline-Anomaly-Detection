@@ -1,4 +1,4 @@
-"""Mean/variance drift monitoring for Project 4.
+"""Mean/variance drift monitoring for this pipeline.
 
 This module compares current feature statistics against the approved training
 baseline for the active production model.

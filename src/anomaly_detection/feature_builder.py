@@ -4,8 +4,8 @@ The builder converts raw event-level and warehouse-level inputs into the
 model-ready feature contract used by Isolation Forest training and inference.
 
 Input families:
-- Project 1 event stream / replay exports
-- Project 2/3 warehouse or mart aggregates
+- the real-time pipeline's event stream / replay exports
+- the batch lakehouse's warehouse or mart aggregates
 
 Output:
 - one row per entity_id
@@ -64,7 +64,7 @@ def build_anomaly_features(
         validate_output: When True, validate the generated dataframe.
 
     Returns:
-        A dataframe matching the Project 4 anomaly feature contract.
+        A dataframe matching the anomaly feature contract of this pipeline.
     """
 
     if not isinstance(event_frame, pd.DataFrame):
@@ -379,8 +379,8 @@ def _build_discount_sensitivity(
         .astype(float)
     )
 
-    # Project 1 events store discount as a percent-like field. Model features
-    # use ratio-style numeric values to keep scale stable.
+    # The real-time pipeline's events store discount as a percent-like field. Model
+    # features use ratio-style numeric values to keep scale stable.
     return np.where(discount > 1.0, discount / 100.0, discount).astype(float)
 
 

@@ -1,4 +1,4 @@
-"""Batch anomaly scoring for Project 4.
+"""Batch anomaly scoring for this pipeline.
 
 This module loads the active production anomaly model, scores a batch of
 validated feature rows, and persists prediction evidence to a local JSONL

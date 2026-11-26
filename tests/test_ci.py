@@ -67,7 +67,9 @@ def test_ci_postgres_service_is_the_compose_image_on_a_disposable_port() -> None
     host_port = service["ports"][0].split(":")[0]
 
     assert service["image"] == _compose_postgres_image()
-    assert host_port not in REAL_POSTGRES_PORTS  # never the real P1/P2/P4 database ports
+    # Never the real database ports of the real-time pipeline, the batch lakehouse or this
+    # pipeline.
+    assert host_port not in REAL_POSTGRES_PORTS
     assert host_port == "5547"
 
 

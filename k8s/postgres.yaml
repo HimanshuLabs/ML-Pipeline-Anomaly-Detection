@@ -1,4 +1,4 @@
-# Project 4's database inside the cluster (Kubernetes only; compose keeps its own
+# This pipeline's database inside the cluster (Kubernetes only; compose keeps its own
 # anomaly-postgres on 127.0.0.1:5435, which nothing in the cluster can reach).
 # Same image and tag as compose's anomaly-postgres. The owner role comes from the secret
 # project4-postgres-owner (created outside git; see secret.example.yaml); the API and the

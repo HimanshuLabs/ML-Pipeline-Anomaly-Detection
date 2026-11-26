@@ -1,4 +1,4 @@
-"""Tests for Project 4 alert event generation."""
+"""Tests for the alert event generation of this pipeline."""
 
 from __future__ import annotations
 

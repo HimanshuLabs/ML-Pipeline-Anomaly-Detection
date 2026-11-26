@@ -1,10 +1,10 @@
-# Project 4 Data Contract — Anomaly Detection Feature Dataset
+# ML-Pipeline-Anomaly-Detection Data Contract — Anomaly Detection Feature Dataset
 
 ## Purpose
 
-This document defines the feature input contract for Project 4: ML Pipeline & Anomaly Detection.
+This document defines the feature input contract for ML-Pipeline-Anomaly-Detection.
 
-Project 4 does not train directly on raw Project 1 events or raw Project 2/3 warehouse tables. It first builds a controlled, model-ready feature dataset. This protects the anomaly model from schema drift, null spikes, bad types, impossible values, and silent upstream contract changes.
+This pipeline does not train directly on raw [Real-time-personalization-pipeline](https://github.com/HimanshuLabs/Real-time-personalization-pipeline) events or raw [Batch-Lakehouse-Marketing-Analytics](https://github.com/HimanshuLabs/Batch-Lakehouse-Marketing-Analytics) warehouse tables. It first builds a controlled, model-ready feature dataset. This protects the anomaly model from schema drift, null spikes, bad types, impossible values, and silent upstream contract changes.
 
 The current data contract supports:
 
@@ -23,13 +23,13 @@ This checkpoint is the gate before Isolation Forest training.
 
 ## Source systems
 
-### Project 1 — real-time behavioral source
+### Real-time-personalization-pipeline — real-time behavioral source
 
-Project 1 provides event-level behavioral, commerce, recommendation, engagement, device, latency, and fraud/risk proxy fields.
+The real-time pipeline provides event-level behavioral, commerce, recommendation, engagement, device, latency, and fraud/risk proxy fields.
 
-Relevant raw Project 1 fields include:
+Relevant raw fields of the real-time pipeline include:
 
-| Raw field | Project 4 usage |
+| Raw field | Usage in this pipeline |
 |---|---|
 | `event_id` | rejected from model features; useful for traceability only |
 | `session_id` | rejected from current model features; useful for future session-level aggregation |
@@ -44,18 +44,18 @@ Relevant raw Project 1 fields include:
 | `purchase_probability` | used to calculate `purchase_probability_delta` |
 | `cart_abandonment_probability` | used to calculate `cart_abandonment_rate` |
 | `discount_percent` | used to calculate `discount_sensitivity` |
-| `schema_version` | source-side contract indicator; Project 4 emits its own feature schema version |
+| `schema_version` | source-side contract indicator; this pipeline emits its own feature schema version |
 | `source` | rejected from model features; useful for lineage only |
 
-Project 1 fields are not used blindly. Raw identifiers, personal fields, categorical strings, and high-cardinality text fields are intentionally excluded from the current numeric Isolation Forest feature contract.
+The real-time pipeline fields are not used blindly. Raw identifiers, personal fields, categorical strings, and high-cardinality text fields are intentionally excluded from the current numeric Isolation Forest feature contract.
 
-### Project 2/3 — trusted historical warehouse and mart source
+### Batch-Lakehouse-Marketing-Analytics — trusted historical warehouse and mart source
 
-Project 2 and Project 3 are treated as the trusted historical analytics source. Project 3 is merged into Project 2 as the PostgreSQL warehouse, SCD2, marts, dbt, reconciliation, and reporting layer.
+The batch lakehouse is treated as the trusted historical analytics source: the PostgreSQL warehouse, SCD2, marts, dbt, reconciliation, and reporting layer.
 
-Relevant Project 2/3 signals include:
+Relevant signals of the batch lakehouse include:
 
-| Warehouse or mart signal | Project 4 usage |
+| Warehouse or mart signal | Usage in this pipeline |
 |---|---|
 | `campaign_roas` | used directly as a model feature |
 | `conversion_rate` | used directly as a model feature |
@@ -64,7 +64,7 @@ Relevant Project 2/3 signals include:
 | dbt validation evidence | planned quality evidence for feature readiness |
 | BI and funnel marts | planned source for delayed-truth analysis and monitoring context |
 
-The current implementation accepts Project 2/3 signals as a dataframe input. Direct database extraction comes later.
+The current implementation accepts the batch lakehouse's signals as a dataframe input. Direct database extraction comes later.
 
 ---
 
@@ -125,7 +125,7 @@ Every model-ready feature dataframe must contain these columns:
 |---|---:|---|---|
 | `entity_id` | yes | string-compatible | model entity key |
 | `feature_timestamp` | yes | timestamp-compatible | point-in-time feature generation timestamp |
-| `schema_version` | yes | string | Project 4 feature schema version |
+| `schema_version` | yes | string | Feature schema version of this pipeline |
 | `avg_cart_value_7d` | yes | numeric | commerce behavior |
 | `event_count_1h` | yes | numeric | recent behavioral burst signal |
 | `avg_api_latency_ms` | yes | numeric | backend/system latency signal |
@@ -150,17 +150,17 @@ Current required numeric features:
 
 | Feature | Source family | Feature domain |
 |---|---|---|
-| `avg_cart_value_7d` | Project 1 | commerce/cart |
-| `event_count_1h` | Project 1 | behavioral/session |
-| `avg_api_latency_ms` | Project 1 | system performance latency |
-| `fraud_score_avg` | Project 1 | fraud/risk proxy |
-| `purchase_probability_delta` | Project 1 | engagement/commerce proxy |
-| `cart_abandonment_rate` | Project 1 | funnel risk |
-| `campaign_roas` | Project 2/3 | campaign/warehouse signal |
-| `conversion_rate` | Project 2/3 | funnel/warehouse signal |
-| `customer_lifetime_value` | Project 2/3 | customer value signal |
-| `discount_sensitivity` | Project 1 | pricing/promotion behavior |
-| `page_load_p95_ms` | Project 1 | system performance latency |
+| `avg_cart_value_7d` | The real-time pipeline | commerce/cart |
+| `event_count_1h` | The real-time pipeline | behavioral/session |
+| `avg_api_latency_ms` | The real-time pipeline | system performance latency |
+| `fraud_score_avg` | The real-time pipeline | fraud/risk proxy |
+| `purchase_probability_delta` | The real-time pipeline | engagement/commerce proxy |
+| `cart_abandonment_rate` | The real-time pipeline | funnel risk |
+| `campaign_roas` | The batch lakehouse | campaign/warehouse signal |
+| `conversion_rate` | The batch lakehouse | funnel/warehouse signal |
+| `customer_lifetime_value` | The batch lakehouse | customer value signal |
+| `discount_sensitivity` | The real-time pipeline | pricing/promotion behavior |
+| `page_load_p95_ms` | The real-time pipeline | system performance latency |
 
 This feature set is deliberately compact. The goal is stable production ML plumbing, not dumping every raw field into a model.
 

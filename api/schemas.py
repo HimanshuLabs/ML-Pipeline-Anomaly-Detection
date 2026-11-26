@@ -1,4 +1,4 @@
-"""Pydantic schemas for the Project 4 online inference API."""
+"""Pydantic schemas for the online inference API of this pipeline."""
 
 from __future__ import annotations
 

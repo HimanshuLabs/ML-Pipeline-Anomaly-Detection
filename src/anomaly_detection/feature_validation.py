@@ -395,13 +395,14 @@ def _finish_validation(
     return result
 
 
-# --- real-source (Project 1 + Project 2/3) snapshot contract ----------------------------
+# --- real-source (real-time pipeline + batch lakehouse) snapshot contract ----------------
 #
-# Ranges follow the current sources: P2 *_pct columns are percentages 0-100 (the
-# bounded ones; session_to_order_conversion_rate_pct is orders/sessions*100 and
-# not capped by P2, so it is only non-negative); P1/P2 probabilities and P2
-# fraud scores are 0-1; P1 engagement scores are unbounded above, so only
-# non-negative. budget_remaining is negative when a campaign overspends.
+# Ranges follow the current sources: the batch lakehouse's *_pct columns are percentages
+# 0-100 (the bounded ones; session_to_order_conversion_rate_pct is orders/sessions*100
+# and not capped by the batch lakehouse, so it is only non-negative); probabilities of
+# both sources and the batch lakehouse's fraud scores are 0-1; the real-time pipeline's
+# engagement scores are unbounded above, so only non-negative. budget_remaining is
+# negative when a campaign overspends.
 
 REAL_SOURCE_SIGNED_FEATURES: tuple[str, ...] = ("budget_remaining",)
 REAL_SOURCE_PERCENT_FEATURES: tuple[str, ...] = (

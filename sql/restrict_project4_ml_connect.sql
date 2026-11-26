@@ -1,10 +1,12 @@
--- Project 4: who may connect to the Project 4 database (one-time, re-runnable).
+-- ML-Pipeline-Anomaly-Detection: who may connect to project4_ml (one-time, re-runnable).
 --
 -- Acts on the database it is connected to (current_database()):
---   1. GRANT CONNECT to project5_reader (P5's read-only role, created by apply-schema);
+--   1. GRANT CONNECT to project5_reader (the decision-intelligence layer's read-only role,
+--      created by apply-schema);
 --   2. REVOKE CONNECT, TEMPORARY from PUBLIC, so any other role (for example
 --      project4_mlflow, which owns only its own database) can no longer connect.
--- Superusers always connect: the P4 app and P5 today use the owner role, unaffected.
+-- Superusers always connect: this pipeline's app and the decision-intelligence layer today
+-- use the owner role, unaffected.
 -- It refuses, changing nothing, when project5_reader does not exist yet: run
 -- `python -m anomaly_detection.database apply-schema` first. Plain SQL (no psql
 -- meta-commands), so the tests run the same file against the disposable database.

@@ -1,9 +1,9 @@
--- Project 4: MLflow tracking backend store (one-time setup, re-runnable).
+-- ML-Pipeline-Anomaly-Detection: MLflow tracking backend store (one-time setup, re-runnable).
 --
 -- Creates the dedicated login role project4_mlflow and the database project4_mlflow it
 -- owns, in the anomaly-postgres instance. The MLflow server creates and migrates its
 -- own tables inside project4_mlflow on first start. The role gets no rights anywhere
--- else, and this script never opens Project 4's metadata database.
+-- else, and this script never opens this pipeline's metadata database.
 --
 -- Re-runnable: the role and the database are created only when absent; the password
 -- is (re)set from the environment variable PROJECT4_MLFLOW_DB_PASSWORD on every run

@@ -1,4 +1,4 @@
-"""Tests for the Project 4 online inference FastAPI service."""
+"""Tests for this pipeline's online inference FastAPI service."""
 
 from __future__ import annotations
 

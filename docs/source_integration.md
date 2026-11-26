@@ -2,12 +2,12 @@
 
 ## Purpose
 
-Project 4 is the anomaly detection layer for the wider project platform.
+ML-Pipeline-Anomaly-Detection is the anomaly detection layer for the wider project platform.
 
 It now consumes real local outputs from:
 
-- Project 1: real-time personalization / streaming feature platform
-- Project 2/3: batch lakehouse, warehouse, marts, and BI reporting platform
+- [Real-time-personalization-pipeline](https://github.com/HimanshuLabs/Real-time-personalization-pipeline): real-time personalization / streaming feature platform
+- [Batch-Lakehouse-Marketing-Analytics](https://github.com/HimanshuLabs/Batch-Lakehouse-Marketing-Analytics): batch lakehouse, warehouse, marts, and BI reporting platform
 
 This fixes the earlier gap where the model training path existed, but the real upstream source extraction layer was not yet implemented.
 
@@ -15,8 +15,8 @@ This fixes the earlier gap where the model training path existed, but the real u
 
 | File | Purpose |
 |---|---|
-| `configs/source_extract.yaml` | Defines Project 1 and Project 2/3 PostgreSQL source tables. |
-| `src/anomaly_detection/source_extract.py` | Extracts, transforms, normalizes, and writes a real-source Project 4 training snapshot. |
+| `configs/source_extract.yaml` | Defines the PostgreSQL source tables of the real-time pipeline and the batch lakehouse. |
+| `src/anomaly_detection/source_extract.py` | Extracts, transforms, normalizes, and writes a real-source training snapshot of this pipeline. |
 | `tests/test_source_extract.py` | Validates source transforms, feature normalization, web-event aggregation, and snapshot metadata writing. |
 
 ## Current snapshot (2026-11-26)
@@ -76,14 +76,14 @@ The first read-only extract (sessions with `default_transaction_read_only=on`, s
 `training_dataset_id` `64e7a3c0-bd07-5f74-95f5-71cc9e494e1b`. That hash is identical to
 the hash of v004's training snapshot above (recomputed from its directory by
 `retrain --compare-with v004`): the sources had not changed between the two extracts,
-the hash is deterministic across extract runs, and Project 2/3's recreated Postgres
+the hash is deterministic across extract runs, and the batch lakehouse's recreated Postgres
 container still held the same data. v005 was trained on it (stage 15c).
 
 ## Source systems
 
 The row counts below are from the first extract (2026-06-10).
 
-### Project 1
+### Real-time-personalization-pipeline
 
 | Field | Value |
 |---|---|
@@ -94,7 +94,7 @@ The row counts below are from the first extract (2026-06-10).
 | Grain | user |
 | Extracted rows | `8,653` |
 
-### Project 2/3
+### Batch-Lakehouse-Marketing-Analytics
 
 | Source table | Grain | Extracted/transformed rows |
 |---|---:|---:|
@@ -131,9 +131,9 @@ Entity breakdown:
 
 The extractor does not fake a cross-project identity join.
 
-Project 1 `user_id` and Project 2/3 `customer_id` are not confirmed to be the same business key. Joining them would create false lineage.
+The real-time pipeline's `user_id` and the batch lakehouse's `customer_id` are not confirmed to be the same business key. Joining them would create false lineage.
 
-Instead, Project 4 builds one unified anomaly-feature corpus with explicit lineage columns:
+Instead, this pipeline builds one unified anomaly-feature corpus with explicit lineage columns:
 
 - `source_project`
 - `source_table`
@@ -145,13 +145,13 @@ The model trains on numeric behavioral, operational, marketing, customer, campai
 
 ## Why Kafka/Spark replay was not used for training
 
-Kafka and Spark Structured Streaming are part of Project 1's real-time pipeline.
+Kafka and Spark Structured Streaming are part of the real-time pipeline.
 
 For training, the correct dependency is a reproducible frozen snapshot:
 
 1. validated upstream outputs
 2. source extraction
-3. frozen Project 4 training snapshot
+3. frozen training snapshot of this pipeline
 4. model training
 5. registry promotion
 
@@ -191,7 +191,7 @@ The extract is read-only against both sources. Every source session is opened wi
 `-c default_transaction_read_only=on -c statement_timeout=120000` (the timeout is each
 source's `statement_timeout_ms` in `configs/source_extract.yaml`; the batch lakehouse
 source also sets `work_mem` (`configs/source_extract.yaml`, 128MB) for its session; only
-the source engines; Project 4's own database engine is unchanged), and before each table is read
+the source engines; this pipeline's own database engine is unchanged), and before each table is read
 the extract checks `SHOW transaction_read_only` is `on` and refuses otherwise, before any
 row is read. It issues only `SELECT`s: `SELECT *` on the configured tables; for
 `warehouse.dim_customer` (listed in the snapshot's `source_tables`), a `SELECT * ...

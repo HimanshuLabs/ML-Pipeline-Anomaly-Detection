@@ -280,7 +280,7 @@ def summarize_threshold_tradeoff(
     """Summarize threshold tradeoffs honestly for an unsupervised model.
 
     This function intentionally separates real metrics from proxy reasoning.
-    Without known-good / known-bad labels, Project 4 can discuss false-positive
+    Without known-good / known-bad labels, this pipeline can discuss false-positive
     and false-negative risk, but it cannot truthfully compute real FP/FN rates.
 
     Args:

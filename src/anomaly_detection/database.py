@@ -1,4 +1,4 @@
-"""Project 4 PostgreSQL database: connection settings, schema, and row mapping.
+"""This pipeline's PostgreSQL database: connection settings, schema, and row mapping.
 
 Connection settings come only from PROJECT4_POSTGRES_* environment variables.
 The password is never logged, printed, or included in reprs.
@@ -417,7 +417,7 @@ def scram_sha256_verifier(password: str, *, salt: bytes | None = None) -> str:
 
 
 def configure_project5_reader(connection: Connection, password: str | None) -> str:
-    """Create/update the read-only role Project 5 uses: SELECT on integration views only.
+    """Create/update the decision-intelligence layer's role: SELECT on integration views only.
 
     With a password the role can log in (stored as a SCRAM verifier); without one
     it is NOLOGIN. Returns a short status line that never contains the password.
@@ -525,7 +525,7 @@ def apply_schema(
 
 
 def check(engine: Engine) -> dict[str, Any]:
-    """Connect and report the server version, the Project 4 tables, and integration views."""
+    """Connect and report the server version, this pipeline's tables, and integration views."""
 
     with engine.connect() as connection:
         server_version = connection.execute(text("SHOW server_version")).scalar_one()
@@ -674,7 +674,7 @@ def _checked_columns(row: Mapping[str, Any]) -> list[str]:
 
 
 def insert_row(connection: Connection, table: str, row: Mapping[str, Any]) -> None:
-    """Insert one mapped row into a known Project 4 table."""
+    """Insert one mapped row into a known table of this pipeline."""
 
     if table not in INSERTABLE_TABLES:
         raise ValueError(f"not a Project 4 table: {table}")
@@ -688,7 +688,7 @@ def insert_row(connection: Connection, table: str, row: Mapping[str, Any]) -> No
 
 
 def insert_rows(connection: Connection, table: str, rows: Sequence[Mapping[str, Any]]) -> None:
-    """Insert mapped rows with the same columns into a known Project 4 table.
+    """Insert mapped rows with the same columns into a known table of this pipeline.
 
     One executemany of a Core INSERT, which SQLAlchemy sends as multi-row VALUES.
     """

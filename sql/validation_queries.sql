@@ -1,4 +1,4 @@
--- Project 4: ML Pipeline & Anomaly Detection
+-- ML-Pipeline-Anomaly-Detection
 -- Metadata validation query pack.
 -- This file validates schemas, tables, keys, constraints, required columns, and queryability.
 

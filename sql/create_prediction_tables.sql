@@ -1,4 +1,4 @@
--- Project 4: ML Pipeline & Anomaly Detection
+-- ML-Pipeline-Anomaly-Detection
 -- Batch and online prediction history tables.
 
 CREATE TABLE IF NOT EXISTS ml.batch_predictions (
@@ -125,8 +125,9 @@ CREATE INDEX IF NOT EXISTS idx_batch_predictions_score_timestamp
 CREATE INDEX IF NOT EXISTS idx_batch_predictions_is_anomaly
     ON ml.batch_predictions(is_anomaly);
 
--- Project 5 reads the latest batch run (ORDER BY recorded_at = created_at, then
--- batch_run_id) and that run's anomalies through integration.prediction_outputs.
+-- The decision-intelligence layer reads the latest batch run (ORDER BY recorded_at =
+-- created_at, then batch_run_id) and that run's anomalies through
+-- integration.prediction_outputs.
 -- Without these, both scan every batch prediction ever written.
 CREATE INDEX IF NOT EXISTS idx_batch_predictions_recorded_run
     ON ml.batch_predictions(created_at DESC, batch_run_id DESC);

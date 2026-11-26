@@ -474,9 +474,9 @@ def test_readme_test_database_recipe_and_ci_service_create_the_same_role() -> No
 
 def test_no_personal_name_in_the_test_database_recipes() -> None:
     # Scoped to the disposable test database (CI service, README recipe, test URLs).
-    # `manshu` remains the owner role of the compose database on 5435, which Project 5
-    # connects as, and the absolute paths inside the committed v001/v002 bundles; both
-    # are outside this guard on purpose.
+    # `manshu` remains the owner role of the compose database on 5435, which the
+    # decision-intelligence layer connects as, and the absolute paths inside the committed
+    # v001/v002 bundles; both are outside this guard on purpose.
     texts = {
         "ci.yml": CI.read_text(encoding="utf-8"),
         "README Local runbook": _section("Local runbook"),

@@ -1,4 +1,4 @@
-"""MLflow experiment tracking for Project 4 training runs.
+"""MLflow experiment tracking for the training runs of this pipeline.
 
 A tracking run is a record of how a model version was trained (params, per-segment
 metrics, the artifact bundle). It is never the source of truth: the Postgres model

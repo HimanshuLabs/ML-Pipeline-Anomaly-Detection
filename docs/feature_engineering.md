@@ -1,13 +1,13 @@
-# Project 4 Feature Engineering — Anomaly Detection
+# ML-Pipeline-Anomaly-Detection Feature Engineering — Anomaly Detection
 
 ## Purpose
 
-This document explains how Project 4 converts source signals from the real-time pipeline and warehouse layer into a validated anomaly detection feature dataset.
+This document explains how this pipeline converts source signals from the real-time pipeline and warehouse layer into a validated anomaly detection feature dataset.
 
-Project 4 sits above the earlier data engineering projects:
+This pipeline sits above the earlier data engineering projects:
 
-- Project 1 contributes behavioral, commerce, latency, engagement, recommendation, and risk-related event signals.
-- Project 2/3 contributes trusted historical warehouse, mart, campaign, funnel, and customer-value signals.
+- [Real-time-personalization-pipeline](https://github.com/HimanshuLabs/Real-time-personalization-pipeline) contributes behavioral, commerce, latency, engagement, recommendation, and risk-related event signals.
+- [Batch-Lakehouse-Marketing-Analytics](https://github.com/HimanshuLabs/Batch-Lakehouse-Marketing-Analytics) contributes trusted historical warehouse, mart, campaign, funnel, and customer-value signals.
 
 The feature engineering layer does not pass raw source tables directly into the model. It builds a stable numeric feature contract first, validates it, and only then allows the data to move toward model training or inference.
 
@@ -23,8 +23,8 @@ Main implementation files:
 
 The feature layer follows this flow:
 
-    Project 1 events
-    + Project 2/3 warehouse or mart signals
+    Real-time-personalization-pipeline events
+    + Batch-Lakehouse-Marketing-Analytics warehouse or mart signals
             ↓
     entity-level aggregation
             ↓
@@ -118,7 +118,7 @@ The generated dataframe follows this column order:
 |---|---|
 | `entity_id` | entity key used for training, scoring, and prediction logs |
 | `feature_timestamp` | point-in-time feature generation timestamp |
-| `schema_version` | Project 4 feature schema version |
+| `schema_version` | Feature schema version of this pipeline |
 | `avg_cart_value_7d` | commerce/cart behavior |
 | `event_count_1h` | recent activity burst signal |
 | `avg_api_latency_ms` | backend/system latency signal |
@@ -141,7 +141,7 @@ All model features after `schema_version` are numeric.
 
 Source:
 
-- Project 1: `cart_value`
+- The real-time pipeline: `cart_value`
 
 Logic:
 
@@ -164,7 +164,7 @@ Validation expectations:
 
 Source:
 
-- Project 1: `event_timestamp` or `event_time`
+- The real-time pipeline: `event_timestamp` or `event_time`
 
 Logic:
 
@@ -186,7 +186,7 @@ Validation expectations:
 
 Source:
 
-- Project 1: `api_latency_ms`
+- The real-time pipeline: `api_latency_ms`
 
 Logic:
 
@@ -208,7 +208,7 @@ Validation expectations:
 
 Source:
 
-- Project 1: `fraud_score`
+- The real-time pipeline: `fraud_score`
 
 Logic:
 
@@ -231,7 +231,7 @@ Validation expectations:
 
 Source:
 
-- Project 1: `purchase_probability`
+- The real-time pipeline: `purchase_probability`
 
 Logic:
 
@@ -255,7 +255,7 @@ This is a proxy feature. It does not claim true customer intent. It measures mov
 
 Source:
 
-- Project 1: `cart_abandonment_probability`
+- The real-time pipeline: `cart_abandonment_probability`
 
 Logic:
 
@@ -278,7 +278,7 @@ Validation expectations:
 
 Source:
 
-- Project 2/3 warehouse or mart layer
+- The batch lakehouse's warehouse or mart layer
 
 Logic:
 
@@ -300,7 +300,7 @@ Validation expectations:
 
 Source:
 
-- Project 2/3 warehouse or mart layer
+- The batch lakehouse's warehouse or mart layer
 
 Logic:
 
@@ -323,7 +323,7 @@ Validation expectations:
 
 Source:
 
-- Project 2/3 warehouse or mart layer
+- The batch lakehouse's warehouse or mart layer
 
 Logic:
 
@@ -345,7 +345,7 @@ Validation expectations:
 
 Source:
 
-- Project 1: `discount_percent`
+- The real-time pipeline: `discount_percent`
 
 Logic:
 
@@ -373,7 +373,7 @@ Validation expectations:
 
 Source:
 
-- Project 1: `page_load_time_ms`
+- The real-time pipeline: `page_load_time_ms`
 
 Logic:
 
@@ -511,7 +511,7 @@ It covers:
 - invalid timestamps
 - strict validation failure mode
 - model feature matrix extraction
-- feature building from Project 1-style events and warehouse signals
+- feature building from events like the real-time pipeline's and from warehouse signals
 - 1-hour event-count behavior
 - missing source entity column
 - invalid source event timestamp
@@ -526,7 +526,7 @@ This is intentional. Dependency warnings often become future failures, so the fe
 
 ## Operational value
 
-This feature layer makes Project 4 behave like a production ML system instead of a notebook.
+This feature layer makes this pipeline behave like a production ML system instead of a notebook.
 
 The model receives a versioned, numeric, validated feature contract. Upstream source instability is caught before model training or inference. This improves data quality, reliability, reproducibility, and operational confidence in the ML system.
 

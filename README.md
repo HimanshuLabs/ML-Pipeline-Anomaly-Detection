@@ -48,8 +48,8 @@ under "Batch inference".
 ## System architecture
 
 ```text
-Project 1 behavioral and runtime signals
-+ Project 2/3 warehouse and mart signals
+Real-time-personalization-pipeline behavioral and runtime signals
++ Batch-Lakehouse-Marketing-Analytics warehouse and mart signals
         ↓
 source extraction
         ↓
@@ -91,7 +91,7 @@ rollback to previous stable model
 | Repository foundation | Implemented | Source, API, SQL, monitoring, Docker, tests, and docs structure exists. |
 | Runtime configuration | Implemented | Config files and environment examples are separated from code. |
 | SQL metadata contracts | Implemented | ML, monitoring, and audit schemas are defined under `sql/`. |
-| Source extraction | Implemented locally | Extracts Project 1 and Project 2/3 local source data into Project 4 features. |
+| Source extraction | Implemented locally | Extracts the real-time pipeline's and the batch lakehouse's local source data into features. |
 | Feature validation | Implemented | Validates schema, required columns, numeric types, nulls, ranges, and timestamp behavior. |
 | Training snapshots | Implemented | Writes reproducible feature snapshots and metadata under `data/features/training/`. |
 | Isolation Forest training | Implemented | Trains anomaly detection models from validated training snapshots. |
@@ -116,8 +116,8 @@ Registered versions on 2026-11-26:
 
 | Version | Status | Kind | Feature schema | Why |
 |---|---|---|---|---|
-| `v001` | retired | single | `feature_schema_v001` | First model, trained on a Project 4 demo snapshot to prove training, artifacts, registry, and promotion. |
-| `v002` | archived | single | `feature_schema_v001` | First real-source model (Project 1 + Project 2/3 extracts, 51 features); production until v004. |
+| `v001` | retired | single | `feature_schema_v001` | First model, trained on a demo snapshot of this pipeline to prove training, artifacts, registry, and promotion. |
+| `v002` | archived | single | `feature_schema_v001` | First real-source model (extracts of the real-time pipeline and the batch lakehouse, 51 features); production until v004. |
 | `v003` | retired | single | `feature_schema_v002` | Superseded: the single model learned the entity type rather than anomalies (see its `evaluation_report.json`). |
 | `v004` | archived | segmented | `feature_schema_v003` | One Isolation Forest per entity type (6 segments, 52 features in total); production until v006. |
 | `v005` | rolled_back | segmented | `feature_schema_v003` | Retrained from a fresh read-only extract (same data as v004); `training_dataset_id` `64e7a3c0-bd07-5f74-95f5-71cc9e494e1b`, MLflow run `93a91a6a69834659befd027b2496b953`. Promoted, then rolled back to v004: the first real rollback (compose and kind). |
@@ -317,8 +317,8 @@ Who connects to the `anomaly-postgres` instance (127.0.0.1:5435), and as what:
 
 | Who | Role | Database | Rights |
 |---|---|---|---|
-| Project 4 API, CLIs and drift job (compose) | `manshu` (the instance owner, a superuser) | `project4_ml` | everything |
-| Project 4 API, registry CLI and drift job (Kubernetes) | `project4_app`, created by `apply-schema` | `project4_ml` | CONNECT; USAGE on `ml`, `monitoring`, `audit`; exactly the table privileges they use (`database.APP_TABLE_PRIVILEGES`); no DDL; LOGIN only when `PROJECT4_APP_PASSWORD` is set |
+| API, CLIs and drift job of this pipeline (compose) | `manshu` (the instance owner, a superuser) | `project4_ml` | everything |
+| API, registry CLI and drift job of this pipeline (Kubernetes) | `project4_app`, created by `apply-schema` | `project4_ml` | CONNECT; USAGE on `ml`, `monitoring`, `audit`; exactly the table privileges they use (`database.APP_TABLE_PRIVILEGES`); no DDL; LOGIN only when `PROJECT4_APP_PASSWORD` is set |
 | [AI-Decision-Intelligence-Layer](https://github.com/HimanshuLabs/AI-Decision-Intelligence-Layer) | `project5_reader`, created by `apply-schema` | `project4_ml` | CONNECT plus SELECT on the `integration.*` views only; LOGIN only when `PROJECT4_P5_READER_PASSWORD` is set |
 | MLflow server | `project4_mlflow` | `project4_mlflow` only | owner of its own database; cannot connect to `project4_ml` once PUBLIC's CONNECT is revoked |
 
@@ -341,7 +341,7 @@ docker compose exec -T anomaly-postgres psql -v ON_ERROR_STOP=1 -U manshu -d pro
 
 ## Feature contract
 
-Project 4 does not train directly on raw upstream tables.
+This pipeline does not train directly on raw upstream tables.
 
 It builds a controlled anomaly feature dataframe first. The validated model feature contract includes:
 
@@ -418,12 +418,12 @@ Each real-source snapshot written since stage 15a also records:
   v002–v004 were trained before this and keep `training_dataset_id` null; their rows
   are never rewritten.
 
-Extraction reads Project 1 (127.0.0.1:5433) and Project 2/3 (127.0.0.1:5434) read-only.
+Extraction reads the real-time pipeline (127.0.0.1:5433) and the batch lakehouse (127.0.0.1:5434) read-only.
 Every source session is opened with
 `-c default_transaction_read_only=on -c statement_timeout=120000` (the timeout is each
 source's `statement_timeout_ms` in `configs/source_extract.yaml`; the batch lakehouse
 source also sets `work_mem` (`configs/source_extract.yaml`, 128MB) for its session;
-Project 4's own database engine gets neither), and before each table is read the extract checks
+This pipeline's own database engine gets neither), and before each table is read the extract checks
 `SHOW transaction_read_only` is `on` and refuses otherwise. It issues only `SELECT`s:
 `SELECT *` per configured table, except `warehouse.dim_customer` (read for web events as
 `customer_sk` and `customer_id`) and `warehouse.fact_web_events` (the 12 columns the
@@ -882,7 +882,7 @@ show anything. Per segment and fault: [docs/scale_run_evidence.md](docs/scale_ru
 
 ## Dockerized runtimes
 
-Project 4 builds three local images from one `docker/Dockerfile` (base
+This pipeline builds three local images from one `docker/Dockerfile` (base
 `python:3.12.16-slim`, pinned by digest), each with its own dependency set:
 
 | Image | Target | Requirements | Purpose |
@@ -896,7 +896,7 @@ All three install against `constraints.txt` (frozen from the dev image).
 The API container runs FastAPI internally on port `8004`.
 
 Docker Compose publishes the API on `127.0.0.1:8014` by default (host-only, like every
-Project 4 service) to avoid collision with local `uvicorn` runs on port `8004`.
+service of this pipeline) to avoid collision with local `uvicorn` runs on port `8004`.
 
 Build the images:
 
@@ -960,7 +960,7 @@ Docker scope:
 
 ## Kubernetes runtime manifests
 
-Project 4 runs in its own kind cluster `project4-local` (context `kind-project4-local`).
+This pipeline runs in its own kind cluster `project4-local` (context `kind-project4-local`).
 Every command below names that context explicitly; never rely on the current kubectl
 context, which may point at another project's cluster.
 
@@ -1195,7 +1195,7 @@ docker compose down --remove-orphans
 
 | Document | Purpose |
 |---|---|
-| `docs/architecture.md` | End-to-end Project 4 architecture and source-to-model flow |
+| `docs/architecture.md` | End-to-end architecture of this pipeline and source-to-model flow |
 | `docs/source_integration.md` | Real-source extraction from upstream local systems |
 | `docs/data_contract.md` | Feature schema, required columns, validation rules, rejected fields |
 | `docs/feature_engineering.md` | Feature definitions and entity-grain logic |
@@ -1222,7 +1222,7 @@ docker compose down --remove-orphans
 
 ## Completion definition
 
-Project 4 is complete when:
+This pipeline is complete when:
 
 - full local validation passes
 - the runtime, tools and dev images build

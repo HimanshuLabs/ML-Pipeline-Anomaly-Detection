@@ -1,18 +1,18 @@
-# Inference Design — Project 4 ML Pipeline & Anomaly Detection
+# Inference Design — ML-Pipeline-Anomaly-Detection
 
 ## Purpose
 
-Project 4 supports anomaly inference over validated feature batches and, later, online API requests.
+ML-Pipeline-Anomaly-Detection supports anomaly inference over validated feature batches and, later, online API requests.
 
 The inference layer is designed around one rule:
 
 > Every prediction must be traceable to the model version, feature payload, threshold, timestamp, and source entity.
 
-This keeps Project 4 aligned with the wider platform:
+This keeps this pipeline aligned with the wider platform:
 
-- Project 1 provides real-time behavioral and system-performance signals.
-- Project 2/3 provides trusted historical warehouse, marts, and customer/campaign/product aggregates.
-- Project 4 scores those features with a versioned anomaly model.
+- [Real-time-personalization-pipeline](https://github.com/HimanshuLabs/Real-time-personalization-pipeline) provides real-time behavioral and system-performance signals.
+- [Batch-Lakehouse-Marketing-Analytics](https://github.com/HimanshuLabs/Batch-Lakehouse-Marketing-Analytics) provides trusted historical warehouse, marts, and customer/campaign/product aggregates.
+- This pipeline scores those features with a versioned anomaly model.
 
 ---
 
@@ -50,7 +50,7 @@ It is used for:
 Current flow:
 
 ```text
-Validated Project 4 feature dataframe
+Validated ML-Pipeline-Anomaly-Detection feature dataframe
     ↓
 Load active production model pointer
     ↓
@@ -155,7 +155,7 @@ A batch run inserts its rows in one transaction, then runs `ANALYZE ml.batch_pre
 in its own transaction (a failed `ANALYZE` is logged; the run is kept). The API writes online evidence as a
 background task after the response, so a persistence failure is counted
 (`prediction_persist_failures_total{sink=...}`) and logged but never fails the request.
-`integration.prediction_outputs` exposes both tables to Project 5.
+`integration.prediction_outputs` exposes both tables to [AI-Decision-Intelligence-Layer](https://github.com/HimanshuLabs/AI-Decision-Intelligence-Layer).
 
 ## feature_payload_hash and the 14c-5 cutover
 

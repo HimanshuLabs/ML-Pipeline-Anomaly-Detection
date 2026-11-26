@@ -1,4 +1,4 @@
-# Project 4 images, one Dockerfile, built with --target:
+# Images of this pipeline, one Dockerfile, built with --target:
 #   runtime -> project4-anomaly-api:local    API serving only (no mlflow, pyarrow or test tools)
 #   tools   -> project4-anomaly-tools:local  batch scoring, source extraction, training,
 #                                            retrain, drift job, MLflow tracking and server

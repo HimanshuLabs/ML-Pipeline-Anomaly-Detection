@@ -1,4 +1,4 @@
-# Latency Budget — Project 4 ML Pipeline & Anomaly Detection
+# Latency Budget — ML-Pipeline-Anomaly-Detection
 
 ## Current state (2026-11-26)
 
@@ -30,7 +30,7 @@ The goal is not to claim ultra-low-latency infrastructure. The goal is to prove 
   by a background task after the response, so it is not on the request path.
 - Prometheus records request counts and the scoring latency.
 
-The path does not fetch features from Project 1 or Project 2/3; it scores the payload it
+The path does not fetch features from [Real-time-personalization-pipeline](https://github.com/HimanshuLabs/Real-time-personalization-pipeline) or [Batch-Lakehouse-Marketing-Analytics](https://github.com/HimanshuLabs/Batch-Lakehouse-Marketing-Analytics); it scores the payload it
 receives.
 
 ## Measured result: v004 (live, 2026-11-15)
@@ -101,8 +101,8 @@ They do not prove:
 - latency inside Kubernetes (HPA scale-up and scale-down were observed on an earlier kind
   cluster in June 2026, and the HPA target on 2026-11-15; latency was not measured)
 - cloud network latency
-- Project 1 feature API lookup latency
-- Project 2/3 warehouse query latency
+- The real-time pipeline's feature API lookup latency
+- The batch lakehouse's warehouse query latency
 
 ## Failure conditions
 

@@ -1,8 +1,8 @@
-# Drift Monitoring — Project 4 ML Pipeline & Anomaly Detection
+# Drift Monitoring — ML-Pipeline-Anomaly-Detection
 
 ## Purpose
 
-Project 4 monitors whether current feature behavior has moved materially away from the training baseline used to approve the active anomaly detection model.
+ML-Pipeline-Anomaly-Detection monitors whether current feature behavior has moved materially away from the training baseline used to approve the active anomaly detection model.
 
 The current implementation focuses on lightweight mean and variance drift checks. It is intentionally simple. This checkpoint does not pretend to be a full statistical drift platform. It adds an operational signal that answers one practical question:
 
@@ -73,7 +73,7 @@ Implemented method:
 
     mean_variance_threshold
 
-For each overlapping numeric feature, Project 4 calculates:
+For each overlapping numeric feature, this pipeline calculates:
 
     current_mean
     current_variance
@@ -264,7 +264,7 @@ Run the drift and drift-job tests from the repository root with the dev image (t
 The database-backed drift-job tests (`-m postgres`) need a disposable test database; see
 the README's "Local runbook".
 
-## Fit inside Project 4
+## Fit inside this pipeline
 
 This checkpoint sits after prediction logging and feeds the Prometheus metrics layer.
 
@@ -288,11 +288,11 @@ Flow:
         ↓
     rollback review
 
-This makes Project 4 more than a model-serving demo. It gives the platform a way to know when the data underneath the model has changed.
+This makes this pipeline more than a model-serving demo. It gives the platform a way to know when the data underneath the model has changed.
 
 ## Prometheus metrics
 
-Project 4 exposes Prometheus metrics through the FastAPI `/metrics` endpoint.
+This pipeline exposes Prometheus metrics through the FastAPI `/metrics` endpoint.
 
 Implemented metrics:
 
@@ -334,7 +334,7 @@ Limitations:
 
 ## Grafana dashboards
 
-Project 4 now includes two Grafana dashboard definitions:
+This pipeline now includes two Grafana dashboard definitions:
 
 ~~~text
 monitoring/grafana/dashboards/anomaly_detection_dashboard.json
@@ -347,7 +347,7 @@ Both dashboards are designed for local Grafana on:
 http://localhost:3004
 ~~~
 
-Both dashboards use Prometheus as the datasource and expect Prometheus to scrape the Project 4 FastAPI metrics endpoint:
+Both dashboards use Prometheus as the datasource and expect Prometheus to scrape the FastAPI metrics endpoint of this pipeline:
 
 ~~~text
 http://anomaly-api:8004/metrics   (compose network; from the host: http://127.0.0.1:8014/metrics)

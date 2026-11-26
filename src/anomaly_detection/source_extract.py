@@ -1,7 +1,8 @@
-"""Extract real Project 1 and Project 2/3 features into a Project 4 training snapshot.
+"""Extract the real-time pipeline's and the batch lakehouse's features into a training snapshot.
 
 This module intentionally reads from local PostgreSQL sources instead of Kafka/Spark.
-For retraining, Project 4 needs stable historical feature snapshots, not a live replay dependency.
+For retraining, this pipeline needs stable historical feature snapshots, not a live replay
+dependency.
 """
 
 from __future__ import annotations
@@ -153,8 +154,8 @@ def _password_from_env(env_var_name: str) -> str:
     return password
 
 
-# Every session on a Project 1 / Project 2/3 source is read-only on the server side
-# and bounded in time. Only the source engines get these; Project 4's own database
+# Every session on a real-time pipeline / batch lakehouse source is read-only on the server
+# side and bounded in time. Only the source engines get these; this pipeline's own database
 # engine (database.get_engine) is unchanged. The bound is the source's
 # statement_timeout_ms in configs/source_extract.yaml, 120 s when it is absent.
 DEFAULT_SOURCE_STATEMENT_TIMEOUT_MS = 120_000
@@ -251,7 +252,8 @@ WEB_EVENTS_TABLE = "warehouse.fact_web_events"
 CUSTOMER_DIMENSION_TABLE = "warehouse.dim_customer"
 DEFAULT_CUSTOMER_DIMENSION = "dim_customer"
 
-# P2 marts mark rows for facts without a usable dimension member (member_type).
+# The batch lakehouse's marts mark rows for facts without a usable dimension member
+# (member_type).
 KNOWN_MEMBER_TYPE = "known"
 SENTINEL_MEMBER_TYPES = frozenset({"unknown_member", "invalid_reference"})
 # dim_customer sentinel members (customer_sk 0 and -1).
@@ -586,7 +588,7 @@ def transform_project1_user_features(
     dataframe: pd.DataFrame,
     report: ExtractionReport | None = None,
 ) -> pd.DataFrame:
-    """Transform Project 1 public.user_features into unified training features."""
+    """Transform the real-time pipeline's public.user_features into unified training features."""
 
     stats = _start(P1_TABLE, dataframe, report)
     features = _mapped_features(
@@ -611,7 +613,7 @@ def transform_customer_360(
     dataframe: pd.DataFrame,
     report: ExtractionReport | None = None,
 ) -> pd.DataFrame:
-    """Transform Project 2/3 customer mart into unified training features."""
+    """Transform the batch lakehouse's customer mart into unified training features."""
 
     stats = _start(CUSTOMER_360_TABLE, dataframe, report)
     dataframe = _drop_sentinel_members(dataframe, CUSTOMER_360_TABLE, stats)
@@ -644,7 +646,7 @@ def transform_campaign_performance(
     dataframe: pd.DataFrame,
     report: ExtractionReport | None = None,
 ) -> pd.DataFrame:
-    """Transform Project 2/3 campaign performance mart into unified training features."""
+    """Transform the batch lakehouse's campaign performance mart into unified features."""
 
     stats = _start(CAMPAIGN_TABLE, dataframe, report)
     dataframe = _drop_sentinel_members(dataframe, CAMPAIGN_TABLE, stats)
@@ -665,7 +667,7 @@ def transform_marketing_funnel(
     dataframe: pd.DataFrame,
     report: ExtractionReport | None = None,
 ) -> pd.DataFrame:
-    """Transform Project 2/3 marketing funnel mart into unified training features."""
+    """Transform the batch lakehouse's marketing funnel mart into unified training features."""
 
     stats = _start(FUNNEL_TABLE, dataframe, report)
     dataframe = _drop_sentinel_members(dataframe, FUNNEL_TABLE, stats)
@@ -694,7 +696,7 @@ def transform_product_sales(
     dataframe: pd.DataFrame,
     report: ExtractionReport | None = None,
 ) -> pd.DataFrame:
-    """Transform Project 2/3 product mart into unified training features."""
+    """Transform the batch lakehouse's product mart into unified training features."""
 
     stats = _start(PRODUCT_TABLE, dataframe, report)
     dataframe = _drop_sentinel_members(dataframe, PRODUCT_TABLE, stats)
@@ -997,7 +999,7 @@ def extract_project1_features(
     config: dict[str, Any],
     report: ExtractionReport | None = None,
 ) -> pd.DataFrame:
-    """Extract and transform Project 1 configured source."""
+    """Extract and transform the real-time pipeline's configured source."""
 
     if not config.get("enabled", True):
         return pd.DataFrame()
@@ -1012,7 +1014,7 @@ def extract_project23_features(
     config: dict[str, Any],
     report: ExtractionReport | None = None,
 ) -> pd.DataFrame:
-    """Extract and transform Project 2/3 configured sources (read-only SELECTs)."""
+    """Extract and transform the batch lakehouse's configured sources (read-only SELECTs)."""
 
     if not config.get("enabled", True):
         return pd.DataFrame()
@@ -1048,7 +1050,7 @@ def build_unified_feature_dataframe(
     config: dict[str, Any],
     report: ExtractionReport | None = None,
 ) -> pd.DataFrame:
-    """Build the unified Project 4 real-source feature dataframe."""
+    """Build the unified real-source feature dataframe of this pipeline."""
 
     frames = [
         extract_project1_features(config["project_1"], report=report),

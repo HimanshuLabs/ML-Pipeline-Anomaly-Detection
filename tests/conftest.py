@@ -1,4 +1,4 @@
-"""Shared test isolation for Project 4.
+"""Shared test isolation for this pipeline.
 
 Every test runs against a per-test mirror of the repository's mutable state
 (configs/, the model registry, logs/, data/) instead of the real files. The

@@ -1,8 +1,8 @@
-"""Latency smoke benchmark for Project 4 online anomaly inference.
+"""Latency smoke benchmark for the online anomaly inference of this pipeline.
 
 This script sends repeated POST requests to the FastAPI /predict endpoint and
 measures client-observed latency. It intentionally uses the active model feature
-contract from the local Project 4 codebase so the benchmark payload stays aligned
+contract from the local codebase of this pipeline so the benchmark payload stays aligned
 with the currently deployed model version.
 
 Example:

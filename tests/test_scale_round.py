@@ -38,7 +38,7 @@ RUN_COLUMNS = ["extracted_at"]
 def _without_run_columns(frame: pd.DataFrame) -> pd.DataFrame:
     return frame.drop(columns=RUN_COLUMNS).reset_index(drop=True)
 
-# --- item 1: P1 columns P4 does not map never reach features, specs or the hash ----------
+# --- item 1: unmapped real-time pipeline columns never reach features, specs or the hash ---
 
 P1_COLUMNS_P4_DOES_NOT_MAP = ("user_name", "membership_tier", "total_spend",
                               "recency_hours", "features_computed_at")
@@ -53,7 +53,8 @@ def test_p1_columns_p4_does_not_map_change_nothing() -> None:
 
     pd.testing.assert_frame_equal(_without_run_columns(first), _without_run_columns(second))
     assert content_sha256(first) == content_sha256(second)
-    # total_spend is a campaign feature: a user row gets the 0.0 padding, not P1's value.
+    # total_spend is a campaign feature: a user row gets the 0.0 padding, not the real-time
+    # pipeline's value.
     assert first.loc[0, "total_spend"] == 0.0
     assert "total_spend" not in SEGMENT_FEATURE_COLUMNS["user"]
     assert "session_count" in SEGMENT_FEATURE_COLUMNS["user"]
@@ -382,7 +383,8 @@ def test_bucketed_reads_on_a_real_database_equal_the_whole_table(monkeypatch) ->
         with owner.begin() as connection:
             connection.execute(text(f"DROP SCHEMA IF EXISTS {schema} CASCADE"))
             connection.execute(text(f"CREATE SCHEMA {schema}"))
-            # An extra column the extract must not need, like P2's 35-column table.
+            # An extra column the extract must not need, like the batch lakehouse's
+            # 35-column table.
             events.assign(page_url="/p").to_sql("fact_web_events", connection, schema=schema,
                                                 index=False)
             dimension.to_sql("dim_customer", connection, schema=schema, index=False)

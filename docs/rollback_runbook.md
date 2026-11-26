@@ -1,4 +1,4 @@
-# Rollback Runbook — Project 4 ML Pipeline & Anomaly Detection
+# Rollback Runbook — ML-Pipeline-Anomaly-Detection
 
 ## Current state (2026-11-26)
 
@@ -29,7 +29,7 @@
 
 Rollback exists because a deployed anomaly model can degrade after promotion.
 
-Project 4 should not only detect model failure through drift, alerts, metrics, and
+ML-Pipeline-Anomaly-Detection should not only detect model failure through drift, alerts, metrics, and
 dashboards. It must also recover by moving the active model pointer back to the previous
 stable approved model.
 
@@ -134,7 +134,7 @@ written):
   `audit.rollback_events` row and incremented `model_rollback_total` to 1;
 - `registry mirror` brought `configs/active_model.yaml` and `model_registry.json` in line
   with the database (v004 production, v005 `rolled_back`);
-- Project 5's contract was unchanged: the 71 columns of the three integration views were
+- [AI-Decision-Intelligence-Layer](https://github.com/HimanshuLabs/AI-Decision-Intelligence-Layer)'s contract was unchanged: the 71 columns of the three integration views were
   identical before and after, and `project5_reader` was denied at schema `ml`.
 
 ## Verify the active model

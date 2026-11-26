@@ -1,8 +1,8 @@
-# False Positive / False Negative Analysis — Project 4 ML Pipeline & Anomaly Detection
+# False Positive / False Negative Analysis — ML-Pipeline-Anomaly-Detection
 
 ## Purpose
 
-This document explains how Project 4 handles false positives, false negatives, anomaly thresholds, and proxy metrics.
+This document explains how ML-Pipeline-Anomaly-Detection handles false positives, false negatives, anomaly thresholds, and proxy metrics.
 
 An anomaly detection platform is not production-ready just because it can return `is_anomaly=true`.
 
@@ -19,9 +19,9 @@ A production anomaly system must answer harder questions:
 * Which metrics are proxy metrics?
 * What evidence would be needed to calculate real precision, recall, false-positive rate, and false-negative rate?
 
-Project 4 currently uses an unsupervised Isolation Forest model. The model is trained from real-source Project 1 and Project 2/3 feature extracts, but it does not currently have human-reviewed anomaly labels or delayed ground-truth labels.
+This pipeline currently uses an unsupervised Isolation Forest model. The model is trained from real-source [Real-time-personalization-pipeline](https://github.com/HimanshuLabs/Real-time-personalization-pipeline) and [Batch-Lakehouse-Marketing-Analytics](https://github.com/HimanshuLabs/Batch-Lakehouse-Marketing-Analytics) feature extracts, but it does not currently have human-reviewed anomaly labels or delayed ground-truth labels.
 
-That means Project 4 can discuss false-positive and false-negative risk honestly, but it cannot truthfully claim real false-positive rate, false-negative rate, precision, recall, or F1.
+That means this pipeline can discuss false-positive and false-negative risk honestly, but it cannot truthfully claim real false-positive rate, false-negative rate, precision, recall, or F1.
 
 Short version: the README's ["Evaluation limits"](../README.md#evaluation-limits) section (why the training anomaly rate is about 5% by construction, and what real precision and recall would need).
 
@@ -62,7 +62,7 @@ That distinction matters.
 
 A false positive is a normal record incorrectly flagged as anomalous.
 
-In Project 4, a false positive could be:
+In this pipeline, a false positive could be:
 
 * a legitimate high-value customer flagged because their cart value is unusually large
 * a planned campaign spike flagged as suspicious
@@ -84,7 +84,7 @@ They can make operators stop trusting the system.
 
 A false negative is a real anomaly that the model fails to flag.
 
-In Project 4, a false negative could be:
+In this pipeline, a false negative could be:
 
 * a fraud-like behavior pattern hidden inside otherwise normal-looking aggregate features
 * a campaign performance collapse that does not cross the anomaly threshold
@@ -118,7 +118,7 @@ For fraud, abuse, security, and critical reliability monitoring, the system may 
 
 For executive dashboards, campaign monitoring, and business reporting, too many false positives can make the system useless because teams stop trusting the alerts.
 
-Project 4 sits between both worlds:
+This pipeline sits between both worlds:
 
 * it monitors behavioral and business anomalies
 * it monitors model and data drift
@@ -134,7 +134,7 @@ So false-positive and false-negative behavior affects more than a single predict
 
 ## Current label position
 
-Project 4 currently has no real anomaly labels.
+This pipeline currently has no real anomaly labels.
 
 Current status:
 
@@ -185,7 +185,7 @@ Valid real-label sources would include:
 * known injected anomalies in controlled replay data
 * confirmed historical incidents mapped back to feature rows
 
-With real labels, Project 4 could calculate:
+With real labels, this pipeline could calculate:
 
 | Metric              | Meaning                                                          |
 | ------------------- | ---------------------------------------------------------------- |
@@ -239,7 +239,7 @@ An anomaly threshold converts a continuous anomaly score into a binary decision.
 
 The threshold controls how aggressive the model is.
 
-In Project 4 helper logic, lower anomaly scores are treated as more anomalous when estimating a cutoff from score distribution.
+In this pipeline's helper logic, lower anomaly scores are treated as more anomalous when estimating a cutoff from score distribution.
 
 Conceptually:
 
@@ -258,7 +258,7 @@ There is no free lunch here. You choose which pain you are more willing to carry
 
 ## Current threshold implementation
 
-Project 4 now includes threshold and error-tradeoff helper logic in:
+This pipeline now includes threshold and error-tradeoff helper logic in:
 
 `src/anomaly_detection/evaluation.py`
 
@@ -423,7 +423,7 @@ This is a production failure mode.
 
 It does not matter if the model is technically working. If operators stop trusting alerts, the monitoring layer has failed.
 
-In Project 4, alert fatigue can come from:
+In this pipeline, alert fatigue can come from:
 
 * threshold too aggressive
 * drift threshold too sensitive
@@ -444,7 +444,7 @@ Impact:
 * executives lose confidence
 * engineering time gets burned on false alarms
 
-Current mitigation in Project 4:
+Current mitigation in this pipeline:
 
 * alert events are explicit and inspectable
 * drift severity is separated into normal, warning, and critical
@@ -469,7 +469,7 @@ Missed anomaly risk is the cost of false negatives.
 
 In an anomaly system, missed anomalies are dangerous because they do not create obvious noise. They hide inside normal operations until another system, user, operator, or business metric reveals the issue.
 
-In Project 4, missed anomalies could affect:
+In this pipeline, missed anomalies could affect:
 
 * customer behavior monitoring
 * campaign performance monitoring
@@ -479,7 +479,7 @@ In Project 4, missed anomalies could affect:
 * model drift monitoring
 * rollback timing
 
-Current mitigation in Project 4:
+Current mitigation in this pipeline:
 
 * baseline-vs-current anomaly-rate comparison
 * mean and variance drift checks
@@ -536,7 +536,7 @@ False positives can inflate alert volume.
 
 False negatives can prevent alert events from firing.
 
-Project 4 alert types include:
+This pipeline's alert types include:
 
 * drift-critical alerts
 * anomaly-rate spike alerts
@@ -578,7 +578,7 @@ False positives can cause unnecessary rollback if the alert layer is too sensiti
 
 False negatives can delay rollback if the anomaly system misses degradation.
 
-That is why Project 4 treats rollback as a controlled operation, not blind automation.
+That is why this pipeline treats rollback as a controlled operation, not blind automation.
 
 Good ML systems do not just deploy.
 
@@ -592,7 +592,7 @@ Threshold logic also interacts with latency.
 
 If the system adds heavy investigation logic directly inside the online request path, latency can degrade.
 
-Project 4 should keep online prediction lightweight:
+This pipeline should keep online prediction lightweight:
 
 * validate payload
 * score with in-memory model
@@ -620,7 +620,7 @@ The model should not become slow just because the evaluation process becomes mat
 
 ## Batch versus online threshold behavior
 
-Project 4 supports both batch and online inference.
+This pipeline supports both batch and online inference.
 
 The same model version can serve both paths, but threshold review may differ by path.
 
@@ -660,7 +660,7 @@ Recommended approach:
 
 ## Recommended future label strategy
 
-Project 4 should eventually add delayed labels or review labels.
+This pipeline should eventually add delayed labels or review labels.
 
 ### Human review labels
 
@@ -703,15 +703,15 @@ When real incidents happen, link them back to prediction windows:
 * `was_detected`
 * `detection_delay_minutes`
 
-Once one of these exists, Project 4 can add real confusion-matrix metrics.
+Once one of these exists, this pipeline can add real confusion-matrix metrics.
 
 Until then, proxy metrics remain the honest boundary.
 
 ---
 
-## What Project 4 can claim today
+## What this pipeline can claim today
 
-Project 4 can honestly claim:
+This pipeline can honestly claim:
 
 * The platform trains an unsupervised Isolation Forest anomaly model.
 * The active model is versioned as `v007`, segmented into one Isolation Forest per entity type.
@@ -730,9 +730,9 @@ Project 4 can honestly claim:
 
 ---
 
-## What Project 4 must not claim today
+## What this pipeline must not claim today
 
-Project 4 must not claim:
+This pipeline must not claim:
 
 * real production precision
 * real production recall
@@ -932,13 +932,13 @@ v002's baseline meant the single model flagged approximately 5.0% of the whole t
 
 ## Bottom line
 
-Project 4 currently has a production-style anomaly detection platform with versioning, inference, prediction evidence, drift checks, metrics, dashboards, alerts, rollback, and latency validation.
+This pipeline currently has a production-style anomaly detection platform with versioning, inference, prediction evidence, drift checks, metrics, dashboards, alerts, rollback, and latency validation.
 
 The current model does not have real labels.
 
 So the honest position is:
 
-> Project 4 tracks anomaly behavior and operational degradation using proxy metrics today. Real false-positive and false-negative rates require labels and are planned for a future hardening pass.
+> This pipeline tracks anomaly behavior and operational degradation using proxy metrics today. Real false-positive and false-negative rates require labels and are planned for a future hardening pass.
 
 That is credible.
 

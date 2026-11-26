@@ -21,7 +21,7 @@ from anomaly_detection.source_extract import (
     write_snapshot,
 )
 
-# --- frames shaped like the current P1 and P2 tables ----------------------------------
+# --- frames shaped like the current real-time pipeline and batch lakehouse tables -----
 
 
 def _p1_user_features(**overrides) -> pd.DataFrame:
@@ -355,7 +355,7 @@ def test_non_numeric_source_value_fails_instead_of_becoming_zero() -> None:
         transform_customer_360(_customer_360(lifetime_value="not-a-number"))
 
 
-# --- sentinels, meaningful NULLs, SCD2 grain, P1 sessions -------------------------------
+# --- sentinels, meaningful NULLs, SCD2 grain, real-time pipeline sessions ---------------
 
 
 @pytest.mark.parametrize("table", [t for t in _TRANSFORMS if t != "public.user_features"])

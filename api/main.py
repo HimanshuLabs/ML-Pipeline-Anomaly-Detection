@@ -1,4 +1,4 @@
-"""FastAPI application for Project 4 online anomaly inference."""
+"""FastAPI application for the online anomaly inference of this pipeline."""
 
 from __future__ import annotations
 

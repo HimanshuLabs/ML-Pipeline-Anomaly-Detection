@@ -1,4 +1,4 @@
-"""Alert event generation for Project 4 anomaly monitoring.
+"""Alert event generation for the anomaly monitoring of this pipeline.
 
 This module creates local-first alert evidence for operational conditions that
 matter to the anomaly detection platform:

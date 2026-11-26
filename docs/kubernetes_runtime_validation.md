@@ -1,6 +1,6 @@
 # Kubernetes Runtime Validation (live runbook)
 
-Step-by-step procedure to run Project 4 in its own local kind cluster `project4-local`
+Step-by-step procedure to run ML-Pipeline-Anomaly-Detection in its own local kind cluster `project4-local`
 and verify it: the database, the seed, the hardened API, a promote and a real rollback
 across replicas, the network policies, the drift job and teardown. It is a local,
 cost-safe validation, not a cloud deployment.
@@ -235,7 +235,7 @@ kubectl --kubeconfig "$KCFG" --context kind-project4-local -n project4-ml exec s
 # expected: one event v005 -> v004 applied; pointer v004 at pointer_version 3
 ```
 
-The integration views, as Project 5 reads them (`project5_reader` cannot log in inside
+The integration views, as [AI-Decision-Intelligence-Layer](https://github.com/HimanshuLabs/AI-Decision-Intelligence-Layer) reads them (`project5_reader` cannot log in inside
 the cluster, so the owner switches to it):
 
 ```bash

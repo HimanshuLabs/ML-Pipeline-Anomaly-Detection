@@ -1,4 +1,4 @@
--- Project 4: ML Pipeline & Anomaly Detection
+-- ML-Pipeline-Anomaly-Detection
 -- Feature snapshot, training dataset, baseline, and current feature statistic tables.
 
 CREATE TABLE IF NOT EXISTS ml.feature_snapshots (

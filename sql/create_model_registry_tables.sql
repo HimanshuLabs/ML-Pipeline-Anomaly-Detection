@@ -1,4 +1,4 @@
--- Project 4: ML Pipeline & Anomaly Detection
+-- ML-Pipeline-Anomaly-Detection
 -- Model registry and metrics metadata tables.
 
 CREATE TABLE IF NOT EXISTS ml.model_registry (

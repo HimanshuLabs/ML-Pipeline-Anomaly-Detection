@@ -1,6 +1,6 @@
 """Kubernetes manifests (parsed only, no cluster): hardened pods, least privilege, docs.
 
-The cluster for Project 4 is the dedicated kind cluster `project4-local`; every kubectl
+The cluster for this pipeline is the dedicated kind cluster `project4-local`; every kubectl
 command in the docs names its context explicitly so nothing lands in another cluster.
 """
 
@@ -58,7 +58,7 @@ def _seed_job() -> dict:
 
 
 def _all_pod_specs() -> dict[str, dict]:
-    """Every Project 4 pod: API, drift job, seed job, Postgres."""
+    """Every pod of this pipeline: API, drift job, seed job, Postgres."""
 
     return {
         **_pod_specs(),
@@ -576,7 +576,8 @@ def test_runbook_promotes_v005_then_really_rolls_back_to_v004_on_every_replica()
     assert '"to_model_version":"v004"' in step and '"status":"applied"' in step
     assert "No compatible rollback target" not in step  # v004 is a target once v005 is active
     assert "audit.rollback_events" in step and "model_rollback_total" in step
-    # Project 5's view of the result, without logging in as project5_reader.
+    # The decision-intelligence layer's view of the result, without logging in as
+    # project5_reader.
     assert '"SET ROLE project5_reader"' in step
     assert "bad" in step and "md5(string_agg(" in step
     # The same signature query in compose, as project5_reader itself, diffed against the

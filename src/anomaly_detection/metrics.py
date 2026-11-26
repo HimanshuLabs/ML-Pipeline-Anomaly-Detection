@@ -1,9 +1,9 @@
-"""Prometheus metrics for Project 4 anomaly detection.
+"""Prometheus metrics for the anomaly detection of this pipeline.
 
 This module centralizes runtime metrics for online inference, drift monitoring,
 active model visibility, and rollback evidence.
 
-Metric names intentionally match the Project 4 monitoring contract:
+Metric names intentionally match the monitoring contract of this pipeline:
 
 - prediction_requests_total
 - predictions_scored_total

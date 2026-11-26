@@ -1,4 +1,4 @@
-"""Online anomaly inference service for Project 4.
+"""Online anomaly inference service for this pipeline.
 
 The online path keeps the active production model loaded in memory and scores
 validated feature payloads with low per-request overhead.
