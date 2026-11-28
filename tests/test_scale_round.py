@@ -146,7 +146,7 @@ V005_SNAPSHOT = (PROJECT_ROOT / "data" / "features" / "training" / "snapshot_dat
                  / "snapshot_id=real_source_20261116T035043Z" / "features.parquet")
 
 def _whole_csv_sha256(frame: pd.DataFrame) -> str:
-    """content_sha256 as main c2823ee computes it: one CSV string of the whole frame."""
+    """content_sha256 as main 3cf1a97 computes it: one CSV string of the whole frame."""
 
     import hashlib
 
@@ -422,7 +422,7 @@ RUN_VARYING_FIELDS = {"prediction_id", "score_timestamp"}
 def _records_as_main_builds_them(features, artifacts, *, scores, anomaly_flags, threshold_used,
                                  row_feature_names, row_entity_types, per_record_latency_ms,
                                  source_project, source_table, batch_id):
-    """batch_inference._build_records as main c2823ee has it (one iterrows pass)."""
+    """batch_inference._build_records as main 3cf1a97 has it (one iterrows pass)."""
 
     entity_key = str(artifacts.feature_schema.get("entity_key") or "entity_id")
     records = []

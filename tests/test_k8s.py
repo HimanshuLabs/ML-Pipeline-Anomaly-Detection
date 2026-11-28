@@ -640,7 +640,7 @@ def test_runbook_records_the_2026_11_16_live_run_above_the_earlier_ones() -> Non
 
     assert text.index(heading) < text.index("## Live validation (2026-11-15)")
     for observed in (
-        "1f855c5", "5 registry rows", "pointer_version 1", "4 snapshot rows",
+        "a3a240c", "5 registry rows", "pointer_version 1", "4 snapshot rows",
         "2 dataset rows", "0 rollback events", "pointer_version 2", "pointer_version 3",
         "1 → 2", "093e2da8", "6ac0c919", "36f6f02f", "22 columns", "26 columns",
         "23 columns", "byte-identical", "UIDs",

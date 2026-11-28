@@ -327,12 +327,12 @@ rm -rf "$STATE"
 ## 2026-11-16 live record (stage 15e)
 
 The runbook above was run end to end on a fresh `project4-local` cluster, with images
-built from commit `1f855c5` (compose then served v004, with v005 `rolled_back` after the
+built from commit `a3a240c` (compose then served v004, with v005 `rolled_back` after the
 stage 15d compose rollback).
 
 | Step | Observed |
 | --- | --- |
-| 0 images | built from `1f855c5`; the tools image's `model_registry.json` sha256 equal to the repository's (`02f0962f4224b0ff447c2421256d1f9e216f56d58fc165378878edcf74cd6858`), and its `configs/active_model.yaml` on v004 |
+| 0 images | built from `a3a240c`; the tools image's `model_registry.json` sha256 equal to the repository's (`02f0962f4224b0ff447c2421256d1f9e216f56d58fc165378878edcf74cd6858`), and its `configs/active_model.yaml` on v004 |
 | 1 kubeconfig | cluster created in its own kubeconfig file; the default kubeconfig's current context unchanged and the default kubeconfig byte-identical (`sha256sum -c` OK) after create |
 | 5 seed | the committed registry state reproduced exactly: 5 registry rows, pointer v004 at `pointer_version 1`, 4 snapshot rows, 2 dataset rows (v001's, and v005's `64e7a3c0-bd07-5f74-95f5-71cc9e494e1b` from its bundle metadata), 0 rollback events |
 | 7 promote | `registry promote --model-version v005` through one pod: both pods on v005 within one poll (`pointer_version 2`), `model_reload_total{result="success"}` 1 → 2 on each pod; a v005 `/predict` succeeded |
