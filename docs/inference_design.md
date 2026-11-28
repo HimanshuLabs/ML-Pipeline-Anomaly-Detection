@@ -165,9 +165,9 @@ cast to float (NaN and inf as null), in sorted-key compact canonical JSON. Extra
 keys (`entity_id`, `entity_type`, unknown keys) never enter it. Online and batch scoring
 use one shared function, so the same row hashes identically on both paths.
 
-This canonical form starts at commit `a57058a` (stage 14c-5). Rows written before it differ:
+This canonical form starts at commit `f00a6d7` (stage 14c-5). Rows written before it differ:
 
-| Rows | Before `a57058a` | From `a57058a` |
+| Rows | Before `f00a6d7` | From `f00a6d7` |
 |---|---|---|
 | Online | sha256 of the whole request payload as sent: every key, ints kept as ints (`4` and `4.0` hashed differently) | Only the scored features, as floats |
 | Batch | Only the scored features, but values as pandas produced them: int columns stayed ints in frames with a text column | Only the scored features, always as floats |

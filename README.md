@@ -988,7 +988,7 @@ Validation status:
 - Passed: YAML parsing and manifest tests (`tests/test_k8s.py`: hardening, images, secrets, kustomization).
 - Passed in CI: kubeconform v0.8.0, strict, against Kubernetes 1.36.1.
 - Validated live on 2026-11-15 on the dedicated kind cluster `project4-local`: seed job, both replicas on the database pointer, promote propagation across replicas, network-policy deny checks, drift job, non-root read-only pods, and HPA. See [the live validation](docs/kubernetes_runtime_validation.md#live-validation-2026-11-15).
-- Validated live again on 2026-11-16 (stage 15e) with images built from `1f855c5`: the seed reproduced the committed registry state exactly, v005 was promoted and then really rolled back to v004 through `/admin/rollback`, both replicas following each change within one poll, and the integration views matched the compose database. See [the 2026-11-16 record](docs/kubernetes_runtime_validation.md#2026-11-16-live-record-stage-15e).
+- Validated live again on 2026-11-16 (stage 15e) with images built from `a3a240c`: the seed reproduced the committed registry state exactly, v005 was promoted and then really rolled back to v004 through `/admin/rollback`, both replicas following each change within one poll, and the integration views matched the compose database. See [the 2026-11-16 record](docs/kubernetes_runtime_validation.md#2026-11-16-live-record-stage-15e).
 - Not implemented: cloud Kubernetes deployment, public ingress, managed load balancer, or managed cluster autoscaler.
 
 Render the manifests offline (no cluster is contacted):
@@ -1047,12 +1047,12 @@ last three. Each job first checks out the repository; the first also sets up Pyt
 
 First CI run:
 [run 43817679214](https://github.com/HimanshuLabs/ML-Pipeline-Anomaly-Detection/actions/runs/43817679214),
-event `pull_request`, started 2026-11-16T06:34:33Z, on commit `2ce4918` (the branch head
+event `pull_request`, started 2026-11-16T06:34:33Z, on commit `addc34a` (the branch head
 before this README record was added, so it validated everything except this paragraph).
 
 - `Validate ML platform`: success in 4m33s, every step successful, including
   "Run Ruff quality gate" (no output in its log) and "Run full pytest suite with
-  JUnit report". The run's JUnit report for commit `2ce4918` recorded 621 tests,
+  JUnit report". The run's JUnit report for commit `addc34a` recorded 621 tests,
   0 failures, 0 errors, 0 skipped (82.7 s). The per-segment
   baseline audit printed `OK` for all four checks of each of the six segments
   (`campaign`, `customer`, `funnel_day`, `product`, `user`, `web_customer`: feature
