@@ -507,7 +507,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="Project 4 Online Anomaly Inference API",
+    title="ML-Pipeline-Anomaly-Detection Online Anomaly Inference API",
     version="0.1.0",
     lifespan=lifespan,
 )

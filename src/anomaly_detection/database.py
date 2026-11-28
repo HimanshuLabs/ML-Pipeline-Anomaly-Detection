@@ -177,7 +177,8 @@ def get_engine(settings: DatabaseSettings | None = None) -> Engine:
     resolved_settings = settings or load_settings()
     if resolved_settings is None:
         raise DatabaseConfigError(
-            "Project 4 database is not configured; set " + ", ".join(REQUIRED_ENV_VARS)
+            "ML-Pipeline-Anomaly-Detection database is not configured; set "
+            + ", ".join(REQUIRED_ENV_VARS)
         )
 
     return create_engine(resolved_settings.url(), pool_pre_ping=True, hide_parameters=True)
@@ -194,7 +195,8 @@ def get_shared_engine() -> Engine:
     settings = load_settings()
     if settings is None:
         raise DatabaseConfigError(
-            "Project 4 database is not configured; set " + ", ".join(REQUIRED_ENV_VARS)
+            "ML-Pipeline-Anomaly-Detection database is not configured; set "
+            + ", ".join(REQUIRED_ENV_VARS)
         )
     return _shared_engine(settings)
 
@@ -677,7 +679,7 @@ def insert_row(connection: Connection, table: str, row: Mapping[str, Any]) -> No
     """Insert one mapped row into a known table of this pipeline."""
 
     if table not in INSERTABLE_TABLES:
-        raise ValueError(f"not a Project 4 table: {table}")
+        raise ValueError(f"not an ML-Pipeline-Anomaly-Detection table: {table}")
 
     columns = _checked_columns(row)
     statement = text(
@@ -698,7 +700,7 @@ def insert_rows(connection: Connection, table: str, rows: Sequence[Mapping[str, 
     from sqlalchemy import table as sql_table
 
     if table not in INSERTABLE_TABLES:
-        raise ValueError(f"not a Project 4 table: {table}")
+        raise ValueError(f"not an ML-Pipeline-Anomaly-Detection table: {table}")
     if not rows:
         return
     columns = _checked_columns(rows[0])
@@ -814,7 +816,7 @@ def insert_row_if_absent(connection: Connection, table: str, row: Mapping[str, A
     """Insert unless a row with the same key already exists. True when inserted."""
 
     if table not in INSERTABLE_TABLES:
-        raise ValueError(f"not a Project 4 table: {table}")
+        raise ValueError(f"not an ML-Pipeline-Anomaly-Detection table: {table}")
 
     columns = _checked_columns(row)
     result = connection.execute(
@@ -1066,7 +1068,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     from anomaly_detection.logging_config import configure_logging
 
     configure_logging()
-    parser = argparse.ArgumentParser(description="Project 4 PostgreSQL schema tools.")
+    parser = argparse.ArgumentParser(
+        description="ML-Pipeline-Anomaly-Detection PostgreSQL schema tools."
+    )
     parser.add_argument(
         "command", choices=["apply-schema", "check", "sync-from-files", "restrict-connect"]
     )

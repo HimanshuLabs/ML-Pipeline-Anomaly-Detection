@@ -243,7 +243,7 @@ def create_alert_event(
 
 def create_manual_alert(
     *,
-    message: str = "Manual Project 4 alert test event.",
+    message: str = "Manual ML-Pipeline-Anomaly-Detection alert test event.",
     model_name: str | None = None,
     model_version: str | None = None,
     severity: str = "info",

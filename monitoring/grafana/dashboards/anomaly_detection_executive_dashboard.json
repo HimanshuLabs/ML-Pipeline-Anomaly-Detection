@@ -10,7 +10,7 @@
   "panels": [
     {
       "id": 1,
-      "title": "Project 4 executive summary",
+      "title": "ML-Pipeline-Anomaly-Detection executive summary",
       "type": "text",
       "gridPos": {
         "x": 0,
@@ -880,7 +880,7 @@
   },
   "timepicker": {},
   "timezone": "browser",
-  "title": "Project 4 \u2014 Executive ML Health Dashboard",
+  "title": "ML-Pipeline-Anomaly-Detection \u2014 Executive ML Health Dashboard",
   "uid": "project4-executive-ml-health",
   "version": 1,
   "weekStart": ""

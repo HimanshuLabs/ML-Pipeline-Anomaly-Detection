@@ -1,9 +1,10 @@
 """Repo-relative bundle paths for new versions; registration of old bundles from anywhere.
 
-v001/v002 store host paths (/home/...), v003/v004 container paths (/app/...). They are
-never edited: registration resolves each stored path, falling back to the file of the
-same name next to the metadata.json being read. New training runs store repo-relative
-paths, and new rollback events store repo-relative pointer and event-log paths.
+Tests never edit the committed model files. Their metadata path fields are repo-relative,
+except v003/v004, which store container paths (/app/...). Registration resolves each
+stored path, falling back to the file of the same name next to the metadata.json being
+read. New training runs store repo-relative paths, and new rollback events store
+repo-relative pointer and event-log paths.
 """
 
 from __future__ import annotations
@@ -123,7 +124,6 @@ def _copy_bundle(version: str, destination: Path) -> Path:
 @pytest.mark.parametrize(
     ("version", "stored_prefix"),
     [
-        ("v001", "/home/"),  # written on the host
         ("v004", "/app/"),  # written in the tools container
     ],
 )
@@ -147,12 +147,40 @@ def test_copy_of_an_old_bundle_registers_from_its_own_directory(
     assert load_verified_feature_spec(entry).feature_names
 
 
+def test_copy_of_a_bundle_with_absolute_paths_registers_from_its_own_directory(
+    tmp_path: Path,
+) -> None:
+    from anomaly_detection.registry import load_verified_feature_spec
+
+    # The original stays on disk, as on the machine that wrote the absolute paths.
+    original = _copy_bundle("v001", tmp_path / "original")
+    copy = _copy_bundle("v001", tmp_path / "elsewhere")
+    metadata = _metadata(copy)  # the copy only; the committed v001 is never edited
+    for field in PATH_FIELDS:
+        metadata[field] = str(original if field == "artifact_dir" else
+                              original / Path(metadata[field]).name)
+    (copy / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
+    assert _metadata(copy)["model_path"] == str(original / "model.joblib")
+    assert all(Path(_metadata(copy)[field]).is_absolute() for field in PATH_FIELDS)
+
+    entry = registry.register_model_from_artifacts(
+        metadata_path=copy / "metadata.json", registry_path=tmp_path / "registry.json"
+    )
+
+    assert entry.artifact_path == str(copy / "model.joblib")
+    assert entry.artifact_dir == str(copy)
+    assert entry.metadata_path == str(copy / "metadata.json")
+    assert entry.feature_schema_path == str(copy / "feature_schema.json")
+    assert entry.baseline_stats_path == str(copy / "baseline_stats.json")
+    assert load_verified_feature_spec(entry).feature_names
+
+
 def test_relative_path_bundle_registers_inside_the_repo_and_after_a_move(
     project_root: Path, tmp_path: Path
 ) -> None:
     bundle_dir = "artifacts/models/isolation_forest/model_version=v001"
     bundle = _copy_bundle("v001", project_root / "artifacts/models/isolation_forest")
-    metadata = _metadata(bundle)  # the copy only; the real v001 is never edited
+    metadata = _metadata(bundle)  # the copy only; the committed v001 is never edited
     for field in PATH_FIELDS:
         metadata[field] = bundle_dir + ("" if field == "artifact_dir" else
                                         "/" + Path(metadata[field]).name)

@@ -855,7 +855,10 @@ def _segment_baselines(
 def parse_args() -> argparse.Namespace:
     """Parse training CLI arguments."""
     parser = argparse.ArgumentParser(
-        description="Train an Isolation Forest anomaly model from a Project 4 training snapshot."
+        description=(
+            "Train an Isolation Forest anomaly model from an "
+            "ML-Pipeline-Anomaly-Detection training snapshot."
+        )
     )
     parser.add_argument(
         "--snapshot",

@@ -7,7 +7,7 @@
 CREATE SCHEMA IF NOT EXISTS integration;
 
 COMMENT ON SCHEMA integration IS
-'Read-only views over Project 4 metadata for downstream consumers (Project 5). No base tables.';
+'Read-only views over ML-Pipeline-Anomaly-Detection metadata for downstream consumers (AI-Decision-Intelligence-Layer). No base tables.';
 
 CREATE OR REPLACE VIEW integration.model_metadata AS
 SELECT

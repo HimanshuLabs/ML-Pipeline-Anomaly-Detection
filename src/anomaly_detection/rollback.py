@@ -1,4 +1,4 @@
-"""Model rollback controls for Project 4.
+"""Model rollback controls for ML-Pipeline-Anomaly-Detection.
 
 Rollback is intentionally implemented as a controlled operation, not a blind
 automation. The module reads the active production model pointer, selects a

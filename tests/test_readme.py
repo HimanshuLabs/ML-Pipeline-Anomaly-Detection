@@ -261,7 +261,6 @@ DOCS_STALE_PHRASES = {
         "export PROJECT23_POSTGRES_PASSWORD=",
         "## v002 production model",
     ),
-    "data_contract.md": ("The current Project 4 feature schema version is:",),
     "feature_engineering.md": ("The current feature schema version is:",),
     "false_positive_false_negative_analysis.md": (
         "Current production model state:",
@@ -372,7 +371,7 @@ def test_docs_have_none_of_the_replaced_stale_phrases() -> None:
 
 
 def test_readme_has_no_home_directory_paths() -> None:
-    assert "~/Desktop" not in _text()
+    assert "~/" + "Desktop" not in _text()
 
 
 def test_local_runbook_shows_the_disposable_test_database_recipe() -> None:
@@ -408,7 +407,9 @@ def test_rollback_module_docstring_describes_the_database_path() -> None:
 # --- stage 15a: register, mirror, read-only extraction ---------------------------------------
 
 SOURCE_INTEGRATION = DOCS / "source_integration.md"
-HOME_OR_SCRATCH_PATH = re.compile(r"/home/[A-Za-z0-9_]|~/Desktop|scratchpad|/tmp/claude")
+HOME_OR_SCRATCH_PATH = re.compile(
+    r"/home/[A-Za-z0-9_]|~/[D]esktop|scratchpad|/tmp/[A-Za-z]+-[0-9]+/"
+)
 
 
 def _extract_commands(text: str) -> list[str]:

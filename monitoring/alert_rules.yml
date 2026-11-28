@@ -7,7 +7,7 @@ groups:
         labels:
           severity: critical
         annotations:
-          summary: "No active model is loaded by the Project 4 anomaly API."
+          summary: "No active model is loaded by the ML-Pipeline-Anomaly-Detection anomaly API."
 
       - alert: Project4FeatureDriftCritical
         expr: max by (model_version, segment) (feature_drift_status) >= 2
@@ -24,7 +24,7 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "More than 5% of Project 4 prediction requests fail."
+          summary: "More than 5% of ML-Pipeline-Anomaly-Detection prediction requests fail."
 
       - alert: Project4LatencyBudgetBreach
         expr: >
@@ -33,7 +33,7 @@ groups:
         labels:
           severity: warning
         annotations:
-          summary: "Project 4 p95 /predict latency is above the 200 ms budget."
+          summary: "ML-Pipeline-Anomaly-Detection p95 /predict latency is above the 200 ms budget."
           description: >-
             The 200 ms SLA is per single prediction (/predict). /predict/batch latency
             grows with batch size; it is shown on the dashboard but not alerted on.

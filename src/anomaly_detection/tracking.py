@@ -46,7 +46,7 @@ BUNDLE_FILES = (
     "model.joblib",
 )
 RUN_DESCRIPTION = (
-    "Record of a Project 4 training run. The Postgres model registry and the "
+    "Record of an ML-Pipeline-Anomaly-Detection training run. The Postgres model registry and the "
     "active-model pointer are authoritative for promotion, rollback and serving; "
     "this run never decides which model is served."
 )

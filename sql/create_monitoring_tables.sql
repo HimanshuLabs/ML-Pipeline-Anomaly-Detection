@@ -216,7 +216,7 @@ COMMENT ON TABLE monitoring.alert_events IS
 'Stores operational alerts for drift, anomaly-rate spikes, latency breaches, prediction errors, model degradation, and rollback triggers.';
 
 COMMENT ON TABLE audit.rollback_events IS
-'Stores rollback audit evidence when Project 4 reverts from an unhealthy model version to a previous stable model version.';
+'Stores rollback audit evidence when ML-Pipeline-Anomaly-Detection reverts from an unhealthy model version to a previous stable model version.';
 
 
 CREATE INDEX IF NOT EXISTS idx_rollback_events_model_time

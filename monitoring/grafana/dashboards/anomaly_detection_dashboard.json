@@ -996,7 +996,7 @@
         "w": 6,
         "h": 4
       },
-      "description": "Project 4 alert rules (monitoring/alert_rules.yml) firing now.",
+      "description": "ML-Pipeline-Anomaly-Detection alert rules (monitoring/alert_rules.yml) firing now.",
       "targets": [
         {
           "datasource": {
@@ -1293,7 +1293,7 @@
   },
   "timepicker": {},
   "timezone": "browser",
-  "title": "Project 4 \u2014 ML Anomaly Detection Monitoring",
+  "title": "ML-Pipeline-Anomaly-Detection \u2014 Monitoring",
   "uid": "project4-anomaly-monitoring",
   "version": 1,
   "weekStart": ""

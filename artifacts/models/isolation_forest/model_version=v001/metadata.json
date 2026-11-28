@@ -1,8 +1,8 @@
 {
   "algorithm": "IsolationForest",
-  "artifact_dir": "/home/manshu/Desktop/Project-4-ML-Pipeline-Anomaly-Detection/artifacts/models/isolation_forest/model_version=v001",
+  "artifact_dir": "artifacts/models/isolation_forest/model_version=v001",
   "baseline_anomaly_rate": 0.05,
-  "baseline_stats_path": "/home/manshu/Desktop/Project-4-ML-Pipeline-Anomaly-Detection/artifacts/models/isolation_forest/model_version=v001/baseline_stats.json",
+  "baseline_stats_path": "artifacts/models/isolation_forest/model_version=v001/baseline_stats.json",
   "feature_names": [
     "avg_cart_value_7d",
     "event_count_1h",
@@ -16,9 +16,9 @@
     "discount_sensitivity",
     "page_load_p95_ms"
   ],
-  "feature_schema_path": "/home/manshu/Desktop/Project-4-ML-Pipeline-Anomaly-Detection/artifacts/models/isolation_forest/model_version=v001/feature_schema.json",
+  "feature_schema_path": "artifacts/models/isolation_forest/model_version=v001/feature_schema.json",
   "feature_schema_version": "feature_schema_v001",
-  "metadata_path": "/home/manshu/Desktop/Project-4-ML-Pipeline-Anomaly-Detection/artifacts/models/isolation_forest/model_version=v001/metadata.json",
+  "metadata_path": "artifacts/models/isolation_forest/model_version=v001/metadata.json",
   "model_name": "isolation_forest",
   "model_parameters": {
     "contamination": 0.05,
@@ -26,7 +26,7 @@
     "n_estimators": 200,
     "random_state": 42
   },
-  "model_path": "/home/manshu/Desktop/Project-4-ML-Pipeline-Anomaly-Detection/artifacts/models/isolation_forest/model_version=v001/model.joblib",
+  "model_path": "artifacts/models/isolation_forest/model_version=v001/model.joblib",
   "model_version": "v001",
   "row_count": 240,
   "training_finished_at_utc": "2026-06-08T17:44:18.434885+00:00",

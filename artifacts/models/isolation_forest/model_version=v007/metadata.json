@@ -277,7 +277,7 @@
     ],
     "feature_schema_version": "feature_schema_v002",
     "feature_set_fingerprint": "eadd4b57c6818ff48f3bafff6236d42022b853dca961619fef3348022c30eebe",
-    "notes": "Real-source extract from Project 1 PostgreSQL user_features and Project 2/3 PostgreSQL warehouse/marts.",
+    "notes": "Real-source extract from Real-time-personalization-pipeline PostgreSQL user_features and Batch-Lakehouse-Marketing-Analytics PostgreSQL warehouse/marts.",
     "row_count": 1185050,
     "sentinel_rows_dropped": 228,
     "snapshot_id": "real_source_20261126T120904Z",

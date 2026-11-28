@@ -1,8 +1,8 @@
 {
   "algorithm": "IsolationForest",
-  "artifact_dir": "/home/manshu/Desktop/Project-4-ML-Pipeline-Anomaly-Detection/artifacts/models/isolation_forest/model_version=v002",
+  "artifact_dir": "artifacts/models/isolation_forest/model_version=v002",
   "baseline_anomaly_rate": 0.05002985074626866,
-  "baseline_stats_path": "/home/manshu/Desktop/Project-4-ML-Pipeline-Anomaly-Detection/artifacts/models/isolation_forest/model_version=v002/baseline_stats.json",
+  "baseline_stats_path": "artifacts/models/isolation_forest/model_version=v002/baseline_stats.json",
   "feature_names": [
     "total_events",
     "page_view_count",
@@ -56,9 +56,9 @@
     "avg_fraud_score",
     "avg_event_value"
   ],
-  "feature_schema_path": "/home/manshu/Desktop/Project-4-ML-Pipeline-Anomaly-Detection/artifacts/models/isolation_forest/model_version=v002/feature_schema.json",
+  "feature_schema_path": "artifacts/models/isolation_forest/model_version=v002/feature_schema.json",
   "feature_schema_version": "feature_schema_v001",
-  "metadata_path": "/home/manshu/Desktop/Project-4-ML-Pipeline-Anomaly-Detection/artifacts/models/isolation_forest/model_version=v002/metadata.json",
+  "metadata_path": "artifacts/models/isolation_forest/model_version=v002/metadata.json",
   "model_name": "isolation_forest",
   "model_parameters": {
     "contamination": 0.05,
@@ -66,7 +66,7 @@
     "n_estimators": 200,
     "random_state": 42
   },
-  "model_path": "/home/manshu/Desktop/Project-4-ML-Pipeline-Anomaly-Detection/artifacts/models/isolation_forest/model_version=v002/model.joblib",
+  "model_path": "artifacts/models/isolation_forest/model_version=v002/model.joblib",
   "model_version": "v002",
   "row_count": 16750,
   "training_finished_at_utc": "2026-06-10T06:42:29.755088+00:00",
@@ -136,13 +136,13 @@
       "avg_event_value"
     ],
     "feature_schema_version": "feature_schema_v001",
-    "notes": "Real-source extract from Project 1 PostgreSQL user_features and Project 2/3 PostgreSQL warehouse/marts.",
+    "notes": "Real-source extract from Real-time-personalization-pipeline PostgreSQL user_features and Batch-Lakehouse-Marketing-Analytics PostgreSQL warehouse/marts.",
     "row_count": 16750,
     "snapshot_id": "real_source_20260610T060738Z",
     "snapshot_type": "real_source_extract",
     "source_paths": [
-      "~/Desktop/Project-1- Real time suggestions/PostgreSQL/public.user_features",
-      "~/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics/PostgreSQL/marts+warehouse"
+      "Real-time-personalization-pipeline/PostgreSQL/public.user_features",
+      "Batch-Lakehouse-Marketing-Analytics/PostgreSQL/marts+warehouse"
     ],
     "source_projects": [
       "project_1",

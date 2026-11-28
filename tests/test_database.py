@@ -1030,7 +1030,7 @@ def test_poller_keeps_serving_when_the_database_becomes_unreachable(
 
 # --- stage 8a follow-up: refuse writes to an uninitialized database ------------------
 
-NOT_INITIALIZED = "Project 4 database is not initialized for isolation_forest"
+NOT_INITIALIZED = "ML-Pipeline-Anomaly-Detection database is not initialized for isolation_forest"
 
 
 def _write_attempts(trained_metadata_paths: dict[str, Path]):

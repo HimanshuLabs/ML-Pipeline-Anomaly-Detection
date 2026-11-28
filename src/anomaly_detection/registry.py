@@ -692,7 +692,7 @@ def ensure_database_initialized(state: RegistryState, model_name: str | None = N
     has_entries = any(entry.model_name == name for entry in state.entries)
     if not has_entries or state.pointer_version is None:
         raise RegistryStorageError(
-            f"Project 4 database is not initialized for {name}; "
+            f"ML-Pipeline-Anomaly-Detection database is not initialized for {name}; "
             "run: python -m anomaly_detection.database sync-from-files"
         )
 
@@ -1752,7 +1752,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     configure_logging()
 
-    parser = argparse.ArgumentParser(description="Project 4 model registry tools.")
+    parser = argparse.ArgumentParser(
+        description="ML-Pipeline-Anomaly-Detection model registry tools."
+    )
     commands = parser.add_subparsers(dest="command", required=True)
     retire = commands.add_parser(
         "retire",

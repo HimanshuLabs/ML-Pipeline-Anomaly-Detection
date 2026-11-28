@@ -190,7 +190,7 @@ def parse_args() -> argparse.Namespace:
     """Parse CLI arguments."""
 
     parser = argparse.ArgumentParser(
-        description="Benchmark Project 4 online inference latency.",
+        description="Benchmark the online inference latency of ML-Pipeline-Anomaly-Detection.",
     )
     parser.add_argument(
         "--url",

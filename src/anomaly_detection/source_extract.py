@@ -1006,7 +1006,7 @@ def extract_project1_features(
 
     engine = build_postgres_engine(config)
     raw = read_table(engine, config["schema"], config["table"])
-    LOGGER.info("Extracted Project 1 rows: %s", len(raw))
+    LOGGER.info("Extracted Real-time-personalization-pipeline rows: %s", len(raw))
     return transform_project1_user_features(raw, report=report)
 
 
@@ -1042,7 +1042,7 @@ def extract_project23_features(
     ]
 
     output = pd.concat(frames, ignore_index=True)
-    LOGGER.info("Extracted Project 2/3 transformed rows: %s", len(output))
+    LOGGER.info("Extracted Batch-Lakehouse-Marketing-Analytics transformed rows: %s", len(output))
     return output
 
 
@@ -1261,8 +1261,8 @@ def write_snapshot(
         "days_since_last_order_never_ordered_fill": DAYS_SINCE_LAST_ORDER_NEVER_ORDERED,
         **(extraction_report or ExtractionReport()).to_metadata(),
         "notes": (
-            "Real-source extract from Project 1 PostgreSQL user_features and "
-            "Project 2/3 PostgreSQL warehouse/marts."
+            "Real-source extract from Real-time-personalization-pipeline PostgreSQL user_features "
+            "and Batch-Lakehouse-Marketing-Analytics PostgreSQL warehouse/marts."
         ),
     }
 
@@ -1311,7 +1311,7 @@ def run_source_extract(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Extract real-source features for Project 4 training.",
+        description="Extract real-source features for ML-Pipeline-Anomaly-Detection training.",
     )
     parser.add_argument("--config", required=True, help="Path to source_extract.yaml")
     parser.add_argument("--output-root", default=None, help="Output root for training snapshots")

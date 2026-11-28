@@ -111,7 +111,7 @@ CREATE INDEX IF NOT EXISTS idx_feature_current_stats_model_version
     ON ml.feature_current_stats(model_version);
 
 COMMENT ON TABLE ml.feature_snapshots IS
-'Tracks reproducible Project 4 feature snapshots built from Project 1 real-time signals and Project 2/3 warehouse or mart data.';
+'Tracks reproducible ML-Pipeline-Anomaly-Detection feature snapshots built from Real-time-personalization-pipeline real-time signals and Batch-Lakehouse-Marketing-Analytics warehouse or mart data.';
 
 COMMENT ON TABLE ml.training_datasets IS
 'Tracks training dataset versions derived from feature snapshots, including split counts and feature schema version.';

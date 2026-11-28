@@ -436,12 +436,12 @@ def test_every_metric_in_dashboards_and_alert_rules_is_defined_in_metrics_py() -
 HEAD_DASHBOARD_IDENTITY = {
     "anomaly_detection_dashboard.json": (
         "project4-anomaly-monitoring",
-        "Project 4 — ML Anomaly Detection Monitoring",
+        "ML-Pipeline-Anomaly-Detection — Monitoring",
         set(range(1, 17)),
     ),
     "anomaly_detection_executive_dashboard.json": (
         "project4-executive-ml-health",
-        "Project 4 — Executive ML Health Dashboard",
+        "ML-Pipeline-Anomaly-Detection — Executive ML Health Dashboard",
         set(range(1, 15)),
     ),
 }

@@ -148,14 +148,14 @@
     ],
     "feature_schema_version": "feature_schema_v002",
     "feature_set_fingerprint": "eadd4b57c6818ff48f3bafff6236d42022b853dca961619fef3348022c30eebe",
-    "notes": "Real-source extract from Project 1 PostgreSQL user_features and Project 2/3 PostgreSQL warehouse/marts.",
+    "notes": "Real-source extract from Real-time-personalization-pipeline PostgreSQL user_features and Batch-Lakehouse-Marketing-Analytics PostgreSQL warehouse/marts.",
     "row_count": 2504,
     "sentinel_rows_dropped": 244,
     "snapshot_id": "real_source_20261115T010701Z",
     "snapshot_type": "real_source_extract",
     "source_paths": [
-      "~/Desktop/Project-1- Real time suggestions/PostgreSQL/public.user_features",
-      "~/Desktop/Project-2-Batch-Lakehouse-Marketing-Analytics/PostgreSQL/marts+warehouse"
+      "Real-time-personalization-pipeline/PostgreSQL/public.user_features",
+      "Batch-Lakehouse-Marketing-Analytics/PostgreSQL/marts+warehouse"
     ],
     "source_projects": [
       "project_1",

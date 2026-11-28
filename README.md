@@ -490,7 +490,7 @@ Run day of v006 (2026-11-20), in this order (`tools()` from "Local runbook"; the
 "Training snapshots", with the source passwords by name):
 
 ```bash
-tools python -m anomaly_detection.database apply-schema   # adds the two P5 slice indexes
+tools python -m anomaly_detection.database apply-schema   # adds the two slice indexes of AI-Decision-Intelligence-Layer
 # extract: prints row_count and content_sha256; metadata.json has entity_type_counts
 # and, per table, null_fills (browse-only users: avg_event_price / max_event_price)
 tools python -m anomaly_detection.retrain --snapshot latest --model-version v006 --compare-with v004

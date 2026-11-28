@@ -213,7 +213,7 @@ def load_batch_prediction_features(
 
     if not database.is_configured():
         raise DriftJobError(
-            "--source batch-predictions needs the Project 4 database; "
+            "--source batch-predictions needs the ML-Pipeline-Anomaly-Detection database; "
             "set PROJECT4_POSTGRES_* (or use --input)"
         )
     try:
